@@ -169,6 +169,30 @@ class ConfigStore:
             or ""
         ).strip().rstrip("/")
 
+    @staticmethod
+    def _display_text(value: object, default: str) -> str:
+        text = str(value or "").strip()
+        return text or default
+
+    @property
+    def site_name(self) -> str:
+        return self._display_text(self.data.get("site_name"), "chatgpt2api")
+
+    @property
+    def page_title(self) -> str:
+        return self._display_text(self.data.get("page_title"), "ChatGPT 号池管理")
+
+    @property
+    def image_page_title(self) -> str:
+        return self._display_text(self.data.get("image_page_title"), "Turn ideas into images")
+
+    @property
+    def image_page_subtitle(self) -> str:
+        return self._display_text(
+            self.data.get("image_page_subtitle"),
+            "在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。",
+        )
+
     @property
     def app_version(self) -> str:
         try:
@@ -186,6 +210,10 @@ class ConfigStore:
         data["auto_sync_cpa"] = self.auto_sync_cpa
         data["auto_sync_sub2api"] = self.auto_sync_sub2api
         data["log_levels"] = self.log_levels
+        data["site_name"] = self.site_name
+        data["page_title"] = self.page_title
+        data["image_page_title"] = self.image_page_title
+        data["image_page_subtitle"] = self.image_page_subtitle
         data.pop("auth-key", None)
         return data
 

@@ -6,7 +6,7 @@ from threading import Event, Thread
 from fastapi import HTTPException, Request
 
 from services.account_service import account_service
-from services.auth_service import auth_service
+from services.auth_service import ImageQuotaExceeded, auth_service
 from services.config import config
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -52,8 +52,8 @@ def resolve_image_base_url(request: Request) -> str:
 
 def raise_image_quota_error(exc: Exception) -> None:
     message = str(exc)
-    if "no available image quota" in message.lower():
-        raise HTTPException(status_code=429, detail={"error": "no available image quota"}) from exc
+    if isinstance(exc, ImageQuotaExceeded) or "no available image quota" in message.lower() or "user image quota exhausted" in message.lower():
+        raise HTTPException(status_code=429, detail={"error": "user image quota exhausted"}) from exc
     raise HTTPException(status_code=502, detail={"error": message}) from exc
 
 

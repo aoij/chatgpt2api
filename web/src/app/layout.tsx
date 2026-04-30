@@ -4,7 +4,7 @@ import "./globals.css";
 import { TopNav } from "@/components/top-nav";
 
 export const metadata: Metadata = {
-  title: "ChatGPT 号池管理",
+  title: "__CHATGPT2API_PAGE_TITLE__",
   description: "ChatGPT account pool management dashboard",
 };
 

@@ -2,10 +2,10 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { Github } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
 import webConfig from "@/constants/common-env";
+import { fetchPublicConfig, type PublicConfig } from "@/lib/api";
 import { clearStoredAuthSession, getStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
@@ -24,6 +24,24 @@ export function TopNav() {
   const pathname = usePathname();
   const router = useRouter();
   const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
+  const [publicConfig, setPublicConfig] = useState<PublicConfig | null>(null);
+
+
+  useEffect(() => {
+    let active = true;
+    fetchPublicConfig()
+      .then((config) => {
+        if (!active) return;
+        setPublicConfig(config);
+        if (config.page_title) {
+          document.title = config.page_title;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -70,18 +88,8 @@ export function TopNav() {
             href="/image"
             className="shrink-0 py-1 text-[15px] font-bold tracking-tight text-stone-950 transition hover:text-stone-700"
           >
-            chatgpt2api
+            {publicConfig?.site_name || "chatgpt2api"}
           </Link>
-          <a
-            href="https://github.com/basketikun/chatgpt2api"
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-1.5 py-1 text-sm text-stone-400 transition hover:text-stone-700"
-            aria-label="GitHub repository"
-          >
-            <Github className="size-4" />
-            <span className="hidden md:inline">GitHub</span>
-          </a>
           <button
             type="button"
             className="ml-auto shrink-0 py-1 text-xs text-stone-400 transition hover:text-stone-700 sm:hidden"

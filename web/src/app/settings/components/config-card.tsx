@@ -26,6 +26,10 @@ export function ConfigCard() {
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
   const setProxy = useSettingsStore((state) => state.setProxy);
   const setBaseUrl = useSettingsStore((state) => state.setBaseUrl);
+  const setSiteName = useSettingsStore((state) => state.setSiteName);
+  const setPageTitle = useSettingsStore((state) => state.setPageTitle);
+  const setImagePageTitle = useSettingsStore((state) => state.setImagePageTitle);
+  const setImagePageSubtitle = useSettingsStore((state) => state.setImagePageSubtitle);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
 
   const handleTestProxy = async () => {
@@ -68,6 +72,45 @@ export function ConfigCard() {
           管理员登录密钥继续从部署配置读取，不再在此页面展示；如需分发给其他人，请在下方创建普通用户密钥。
         </div>
         <div className="grid gap-4 md:grid-cols-2">
+
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">网站名称</label>
+            <Input
+              value={String(config?.site_name || "")}
+              onChange={(event) => setSiteName(event.target.value)}
+              placeholder="chatgpt2api"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">显示在左上角品牌位置。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">浏览器页面名称</label>
+            <Input
+              value={String(config?.page_title || "")}
+              onChange={(event) => setPageTitle(event.target.value)}
+              placeholder="ChatGPT 号池管理"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">保存后刷新页面即可更新浏览器标签标题。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">画图首页标题</label>
+            <Input
+              value={String(config?.image_page_title || "")}
+              onChange={(event) => setImagePageTitle(event.target.value)}
+              placeholder="Turn ideas into images"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">画图首页副标题</label>
+            <Input
+              value={String(config?.image_page_subtitle || "")}
+              onChange={(event) => setImagePageSubtitle(event.target.value)}
+              placeholder="在同一窗口里保留本地历史与任务状态"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+          </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">账号刷新间隔</label>
             <Input

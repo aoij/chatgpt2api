@@ -41,6 +41,7 @@ export function UserKeysCard() {
   const [isLoading, setIsLoading] = useState(true);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [name, setName] = useState("");
+  const [quota, setQuota] = useState("30");
   const [isCreating, setIsCreating] = useState(false);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
   const [revealedKey, setRevealedKey] = useState("");
@@ -69,10 +70,11 @@ export function UserKeysCard() {
   const handleCreate = async () => {
     setIsCreating(true);
     try {
-      const data = await createUserKey(name.trim());
+      const data = await createUserKey(name.trim(), Math.max(0, Number(quota) || 0));
       setItems(data.items);
       setRevealedKey(data.key);
       setName("");
+      setQuota("30");
       setIsDialogOpen(false);
       toast.success("用户密钥已创建");
     } catch (error) {
@@ -102,6 +104,20 @@ export function UserKeysCard() {
       toast.success(item.enabled ? "用户密钥已禁用" : "用户密钥已启用");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "更新用户密钥失败");
+    } finally {
+      setItemPending(item.id, false);
+    }
+  };
+
+  const handleQuotaChange = async (item: UserKey, value: string) => {
+    const nextQuota = Math.max(0, Math.floor(Number(value) || 0));
+    setItemPending(item.id, true);
+    try {
+      const data = await updateUserKey(item.id, { quota: nextQuota });
+      setItems(data.items);
+      toast.success("额度已更新");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "更新额度失败");
     } finally {
       setItemPending(item.id, false);
     }
@@ -159,15 +175,26 @@ export function UserKeysCard() {
               <div className="font-medium">新密钥仅展示一次，请立即保存：</div>
               <div className="mt-3 flex flex-col gap-3 rounded-lg border border-emerald-200 bg-white/80 p-3 md:flex-row md:items-center md:justify-between">
                 <code className="break-all font-mono text-[13px]">{revealedKey}</code>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="h-9 rounded-xl border-emerald-200 bg-white px-4 text-emerald-700"
-                  onClick={() => void handleCopy(revealedKey)}
-                >
-                  <Copy className="size-4" />
-                  复制
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9 rounded-xl border-emerald-200 bg-white px-4 text-emerald-700"
+                    onClick={() => void handleCopy(revealedKey)}
+                  >
+                    <Copy className="size-4" />
+                    复制密钥
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9 rounded-xl border-emerald-200 bg-white px-4 text-emerald-700"
+                    onClick={() => void handleCopy(`${window.location.origin}/image/?key=${encodeURIComponent(revealedKey)}`)}
+                  >
+                    <Copy className="size-4" />
+                    复制免登录链接
+                  </Button>
+                </div>
               </div>
             </div>
           ) : null}
@@ -199,7 +226,33 @@ export function UserKeysCard() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex h-9 items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 text-sm text-stone-700">
+                        <span className="text-xs text-stone-500">额度</span>
+                        <Input
+                          type="number"
+                          min="0"
+                          defaultValue={String(item.quota ?? 0)}
+                          className="h-7 w-20 border-0 bg-transparent px-0 text-center shadow-none focus-visible:ring-0"
+                          disabled={isPending}
+                          onBlur={(event) => void handleQuotaChange(item, event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.currentTarget.blur();
+                            }
+                          }}
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                        onClick={() => item.link_token ? void handleCopy(`${window.location.origin}/image/?key=${encodeURIComponent(item.link_token)}`) : undefined}
+                        disabled={isPending || !item.link_token}
+                      >
+                        <Copy className="size-4" />
+                        免登录链接
+                      </Button>
                       <Button
                         type="button"
                         variant="outline"
@@ -251,6 +304,18 @@ export function UserKeysCard() {
               placeholder="例如：设计同学 A、运营临时账号"
               className="h-11 rounded-xl border-stone-200 bg-white"
             />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-stone-700">生成额度（张）</label>
+            <Input
+              type="number"
+              min="0"
+              value={quota}
+              onChange={(event) => setQuota(event.target.value)}
+              placeholder="例如：30"
+              className="h-11 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">普通用户每提交 1 张图片消耗 1 张额度；额度为 0 时不能继续生成。</p>
           </div>
           <DialogFooter>
             <Button

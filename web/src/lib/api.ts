@@ -53,6 +53,10 @@ type AccountUpdateResponse = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
+  site_name?: string;
+  page_title?: string;
+  image_page_title?: string;
+  image_page_subtitle?: string;
   refresh_account_interval_minute?: number | string;
   image_retention_days?: number | string;
   auto_remove_invalid_accounts?: boolean;
@@ -109,6 +113,7 @@ export type LoginResponse = {
   role: AuthRole;
   subject_id: string;
   name: string;
+  quota?: number | null;
 };
 
 export type UserKey = {
@@ -116,6 +121,8 @@ export type UserKey = {
   name: string;
   role: "user";
   enabled: boolean;
+  quota: number | null;
+  link_token?: string | null;
   created_at: string | null;
   last_used_at: string | null;
 };
@@ -168,6 +175,21 @@ export async function login(authKey: string) {
     },
     redirectOnUnauthorized: false,
   });
+}
+
+export type PublicConfig = {
+  site_name: string;
+  page_title: string;
+  image_page_title: string;
+  image_page_subtitle: string;
+};
+
+export async function fetchPublicConfig() {
+  return httpRequest<PublicConfig>("/api/public/config", { redirectOnUnauthorized: false });
+}
+
+export async function fetchCurrentUser() {
+  return httpRequest<{ id: string; name: string; role: AuthRole; enabled: boolean; quota?: number | null }>("/api/auth/me");
 }
 
 export async function fetchAccounts() {
@@ -337,14 +359,14 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string) {
+export async function createUserKey(name: string, quota: number) {
   return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
-    body: { name },
+    body: { name, quota },
   });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string }) {
+export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; quota?: number }) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
     body: updates,

@@ -21,7 +21,10 @@ import {
   createImageEditTask,
   createImageGenerationTask,
   fetchAccounts,
+  fetchCurrentUser,
   fetchImageTasks,
+  fetchPublicConfig,
+  type PublicConfig,
   type Account,
   type ImageTask,
 } from "@/lib/api";
@@ -351,6 +354,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [availableQuota, setAvailableQuota] = useState("加载中...");
+  const [publicConfig, setPublicConfig] = useState<PublicConfig | null>(null);
   const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -423,17 +427,33 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   }, []);
 
   const loadQuota = useCallback(async () => {
-    if (!isAdmin) {
-      setAvailableQuota("--");
-      return;
-    }
     try {
+      if (!isAdmin) {
+        const data = await fetchCurrentUser();
+        setAvailableQuota(data.quota == null ? "不限" : String(Math.max(0, Number(data.quota) || 0)));
+        return;
+      }
       const data = await fetchAccounts();
       setAvailableQuota(formatAvailableQuota(data.items));
     } catch {
       setAvailableQuota((prev) => (prev === "加载中..." ? "--" : prev));
     }
   }, [isAdmin]);
+  useEffect(() => {
+    let active = true;
+    fetchPublicConfig()
+      .then((config) => {
+        if (!active) return;
+        setPublicConfig(config);
+        if (config.page_title) {
+          document.title = config.page_title;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (didLoadQuotaRef.current) {
@@ -776,6 +796,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
           }),
         );
         await applyTasks(submitted);
+        await loadQuota();
 
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
@@ -876,6 +897,11 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     }
 
     const effectiveImageMode: ImageConversationMode = referenceImageFiles.length > 0 ? "edit" : "generate";
+    const numericQuota = Number(availableQuota);
+    if (!isAdmin && Number.isFinite(numericQuota) && numericQuota >= 0 && parsedCount > numericQuota) {
+      toast.error(`剩余额度不足，当前还剩 ${numericQuota} 张`);
+      return;
+    }
 
     const targetConversation = selectedConversationId
       ? conversationsRef.current.find((conversation) => conversation.id === selectedConversationId) ?? null
@@ -1015,6 +1041,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
               onOpenLightbox={openLightbox}
               onContinueEdit={handleContinueEdit}
               formatConversationTime={formatConversationTime}
+              publicConfig={publicConfig}
             />
           </div>
 

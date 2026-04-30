@@ -33,6 +33,7 @@ export default function LoginPage() {
         role: data.role,
         subjectId: data.subject_id,
         name: data.name,
+        quota: data.quota,
       });
       router.replace(getDefaultRouteForRole(data.role));
     } catch (error) {

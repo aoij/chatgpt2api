@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { ChevronLeft, ChevronRight, Download, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, RotateCcw, RotateCw, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
@@ -29,6 +29,7 @@ export function ImageLightbox({
   onIndexChange,
 }: ImageLightboxProps) {
   const current = images[currentIndex];
+  const [rotation, setRotation] = useState(0);
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < images.length - 1;
 
@@ -42,6 +43,7 @@ export function ImageLightbox({
 
   useEffect(() => {
     if (!open) return;
+    setRotation(0);
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "ArrowLeft") {
@@ -50,12 +52,15 @@ export function ImageLightbox({
       } else if (e.key === "ArrowRight") {
         e.preventDefault();
         goNext();
+      } else if (e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        setRotation((value) => value + 90);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, goPrev, goNext]);
+  }, [open, goPrev, goNext, currentIndex]);
 
   const handleDownload = useCallback(() => {
     if (!current) return;
@@ -93,6 +98,22 @@ export function ImageLightbox({
             )}
             <button
               type="button"
+              onClick={() => setRotation((value) => value - 90)}
+              className="inline-flex size-9 items-center justify-center rounded-full bg-black/50 text-white/90 transition hover:bg-black/70"
+              aria-label="向左旋转"
+            >
+              <RotateCcw className="size-4" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setRotation((value) => value + 90)}
+              className="inline-flex size-9 items-center justify-center rounded-full bg-black/50 text-white/90 transition hover:bg-black/70"
+              aria-label="向右旋转"
+            >
+              <RotateCw className="size-4" />
+            </button>
+            <button
+              type="button"
               onClick={handleDownload}
               className="inline-flex size-9 items-center justify-center rounded-full bg-black/50 text-white/90 transition hover:bg-black/70"
               aria-label="下载图片"
@@ -125,7 +146,8 @@ export function ImageLightbox({
             <img
               src={current.src}
               alt=""
-              className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain"
+              className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain transition-transform duration-200"
+              style={{ transform: `rotate(${rotation}deg)` }}
               onClick={(e) => e.stopPropagation()}
               draggable={false}
             />

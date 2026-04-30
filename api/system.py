@@ -5,6 +5,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict
 
 from api.support import require_admin, require_identity, resolve_image_base_url
+from services.auth_service import auth_service
 from services.config import config
 from services.image_service import add_log_image_thumbnails, delete_images, list_images
 from services.log_service import log_service
@@ -38,6 +39,30 @@ def create_router(app_version: str) -> APIRouter:
             "role": identity.get("role"),
             "subject_id": identity.get("id"),
             "name": identity.get("name"),
+            "quota": identity.get("quota"),
+        }
+
+    @router.get("/api/auth/me")
+    async def get_me(authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        item = auth_service.get_public_key(str(identity.get("id") or ""))
+        if item is None:
+            item = identity
+        return {
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "role": item.get("role"),
+            "enabled": item.get("enabled", True),
+            "quota": item.get("quota"),
+        }
+
+    @router.get("/api/public/config")
+    async def get_public_config():
+        return {
+            "site_name": config.site_name,
+            "page_title": config.page_title,
+            "image_page_title": config.image_page_title,
+            "image_page_subtitle": config.image_page_subtitle,
         }
 
     @router.get("/version")

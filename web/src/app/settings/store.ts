@@ -37,6 +37,10 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
+    site_name: typeof config.site_name === "string" ? config.site_name : "chatgpt2api",
+    page_title: typeof config.page_title === "string" ? config.page_title : "ChatGPT 号池管理",
+    image_page_title: typeof config.image_page_title === "string" ? config.image_page_title : "Turn ideas into images",
+    image_page_subtitle: typeof config.image_page_subtitle === "string" ? config.image_page_subtitle : "在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。",
   };
 }
 
@@ -98,6 +102,10 @@ type SettingsStore = {
   setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
+  setSiteName: (value: string) => void;
+  setPageTitle: (value: string) => void;
+  setImagePageTitle: (value: string) => void;
+  setImagePageSubtitle: (value: string) => void;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -202,6 +210,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
+        site_name: String(config.site_name || "").trim(),
+        page_title: String(config.page_title || "").trim(),
+        image_page_title: String(config.image_page_title || "").trim(),
+        image_page_subtitle: String(config.image_page_subtitle || "").trim(),
       });
       set({
         config: normalizeConfig(data.config),
@@ -276,6 +288,22 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         },
       };
     });
+  },
+
+  setSiteName: (value) => {
+    set((state) => state.config ? { config: { ...state.config, site_name: value } } : {});
+  },
+
+  setPageTitle: (value) => {
+    set((state) => state.config ? { config: { ...state.config, page_title: value } } : {});
+  },
+
+  setImagePageTitle: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_page_title: value } } : {});
+  },
+
+  setImagePageSubtitle: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_page_subtitle: value } } : {});
   },
 
   loadRegister: async (silent = false) => {

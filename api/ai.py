@@ -4,7 +4,8 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Request, Uploa
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.support import require_identity, resolve_image_base_url
+from api.support import raise_image_quota_error, require_admin, require_identity, resolve_image_base_url
+from services.auth_service import ImageQuotaExceeded, auth_service
 from services.log_service import LoggedCall
 from services.protocol import (
     anthropic_v1_messages,
@@ -58,7 +59,7 @@ def create_router() -> APIRouter:
 
     @router.get("/v1/models")
     async def list_models(authorization: str | None = Header(default=None)):
-        require_identity(authorization)
+        require_admin(authorization)
         try:
             return await run_in_threadpool(openai_v1_models.list_models)
         except Exception as exc:
@@ -73,8 +74,21 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
+        reserved_quota = 0
+        try:
+            reserved_quota = auth_service.reserve_image_quota(identity, body.n)
+        except ImageQuotaExceeded as exc:
+            raise_image_quota_error(exc)
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图")
-        return await call.run(openai_v1_image_generations.handle, payload)
+        try:
+            result = await call.run(openai_v1_image_generations.handle, payload)
+            if reserved_quota and int(getattr(result, "status_code", 200) or 200) >= 400:
+                auth_service.refund_image_quota(identity, reserved_quota)
+            return result
+        except Exception:
+            if reserved_quota:
+                auth_service.refund_image_quota(identity, reserved_quota)
+            raise
 
     @router.post("/v1/images/edits")
     async def edit_images(
@@ -101,6 +115,11 @@ def create_router() -> APIRouter:
             if not image_data:
                 raise HTTPException(status_code=400, detail={"error": "image file is empty"})
             images.append((image_data, upload.filename or "image.png", upload.content_type or "image/png"))
+        reserved_quota = 0
+        try:
+            reserved_quota = auth_service.reserve_image_quota(identity, n)
+        except ImageQuotaExceeded as exc:
+            raise_image_quota_error(exc)
         payload = {
             "prompt": prompt,
             "images": images,
@@ -112,11 +131,19 @@ def create_router() -> APIRouter:
             "base_url": resolve_image_base_url(request),
         }
         call = LoggedCall(identity, "/v1/images/edits", model, "图生图")
-        return await call.run(openai_v1_image_edit.handle, payload)
+        try:
+            result = await call.run(openai_v1_image_edit.handle, payload)
+            if reserved_quota and int(getattr(result, "status_code", 200) or 200) >= 400:
+                auth_service.refund_image_quota(identity, reserved_quota)
+            return result
+        except Exception:
+            if reserved_quota:
+                auth_service.refund_image_quota(identity, reserved_quota)
+            raise
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
+        identity = require_admin(authorization)
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成")
@@ -124,7 +151,7 @@ def create_router() -> APIRouter:
 
     @router.post("/v1/responses")
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
+        identity = require_admin(authorization)
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         call = LoggedCall(identity, "/v1/responses", model, "Responses")
@@ -137,7 +164,7 @@ def create_router() -> APIRouter:
             x_api_key: str | None = Header(default=None, alias="x-api-key"),
             anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
     ):
-        identity = require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
+        identity = require_admin(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         call = LoggedCall(identity, "/v1/messages", model, "Messages")

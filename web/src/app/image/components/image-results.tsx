@@ -5,6 +5,7 @@ import { Clock3, LoaderCircle, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import type { PublicConfig } from "@/lib/api";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
 
 export type ImageLightboxItem = {
@@ -19,6 +20,7 @@ type ImageResultsProps = {
   onOpenLightbox: (images: ImageLightboxItem[], index: number) => void;
   onContinueEdit: (conversationId: string, image: StoredImage | StoredReferenceImage) => void;
   formatConversationTime: (value: string) => string;
+  publicConfig?: PublicConfig | null;
 };
 
 function getStoredImageSrc(image: StoredImage) {
@@ -33,6 +35,7 @@ export function ImageResults({
   onOpenLightbox,
   onContinueEdit,
   formatConversationTime,
+  publicConfig,
 }: ImageResultsProps) {
   const [imageDimensions, setImageDimensions] = useState<Record<string, string>>({});
 
@@ -56,7 +59,7 @@ export function ImageResults({
               fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
             }}
           >
-            Turn ideas into images
+            {publicConfig?.image_page_title || "Turn ideas into images"}
           </h1>
           <p
             className="mx-auto mt-3 max-w-[280px] text-sm italic tracking-[0.01em] text-stone-500 sm:mt-4 sm:max-w-none sm:text-[15px]"
@@ -64,7 +67,7 @@ export function ImageResults({
               fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
             }}
           >
-            在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。
+            {publicConfig?.image_page_subtitle || "在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。"}
           </p>
         </div>
       </div>

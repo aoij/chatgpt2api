@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from services.auth_service import ImageQuotaExceeded, auth_service
 from services.config import DATA_DIR, config
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
@@ -171,6 +172,7 @@ class ImageTaskService:
         key = _task_key(owner, task_id)
         now = _now_iso()
         should_start = False
+        reserved_quota = 0
         with self._lock:
             cleaned = self._cleanup_locked()
             task = self._tasks.get(key)
@@ -178,6 +180,10 @@ class ImageTaskService:
                 if cleaned:
                     self._save_locked()
                 return _public_task(task)
+            try:
+                reserved_quota = auth_service.reserve_image_quota(identity, 1)
+            except ImageQuotaExceeded:
+                raise
             task = {
                 "id": task_id,
                 "owner_id": owner,
@@ -187,6 +193,7 @@ class ImageTaskService:
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
+                "reserved_quota": reserved_quota,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -251,6 +258,16 @@ class ImageTaskService:
             self._log_task_call(key, started=started, status="success", result=result)
         except Exception as exc:
             message = str(exc) or "image task failed"
+            reserved_quota = 0
+            owner_id = ""
+            with self._lock:
+                task = self._tasks.get(key) or {}
+                reserved_quota = int(task.get("reserved_quota") or 0)
+                owner_id = _clean(task.get("owner_id"))
+                if reserved_quota:
+                    task["reserved_quota"] = 0
+            if reserved_quota:
+                auth_service.refund_image_quota_by_id(owner_id, reserved_quota)
             self._update_task(key, status=TASK_STATUS_ERROR, error=message, data=[])
             self._log_task_call(key, started=started, status="failed", error=message)
 
@@ -293,6 +310,7 @@ class ImageTaskService:
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
+                "reserved_quota": int(item.get("reserved_quota") or 0),
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }
@@ -315,6 +333,10 @@ class ImageTaskService:
         changed = False
         for task in self._tasks.values():
             if task.get("status") in UNFINISHED_STATUSES:
+                reserved_quota = int(task.get("reserved_quota") or 0)
+                if reserved_quota:
+                    auth_service.refund_image_quota_by_id(task.get("owner_id"), reserved_quota)
+                    task["reserved_quota"] = 0
                 task["status"] = TASK_STATUS_ERROR
                 task["error"] = "服务已重启，未完成的图片任务已中断"
                 task["updated_at"] = _now_iso()

@@ -14,6 +14,10 @@ from services.storage.base import StorageBackend
 AuthRole = Literal["admin", "user"]
 
 
+class ImageQuotaExceeded(RuntimeError):
+    pass
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -26,12 +30,27 @@ class AuthService:
     def __init__(self, storage: StorageBackend):
         self.storage = storage
         self._lock = Lock()
+        self._needs_save = False
         self._items = self._load()
         self._last_used_flush_at: dict[str, datetime] = {}
+        if self._needs_save:
+            try:
+                self._save()
+            except Exception:
+                pass
 
     @staticmethod
     def _clean(value: object) -> str:
         return str(value or "").strip()
+
+    @staticmethod
+    def _normalize_quota(value: object, default: int | None = None) -> int | None:
+        if value is None or value == "":
+            return default
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return default
 
     def _normalize_item(self, raw: object) -> dict[str, object] | None:
         if not isinstance(raw, dict):
@@ -46,12 +65,19 @@ class AuthService:
         name = self._clean(raw.get("name")) or ("管理员密钥" if role == "admin" else "普通用户")
         created_at = self._clean(raw.get("created_at")) or _now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
+        quota = self._normalize_quota(raw.get("quota"), default=None)
+        link_token = self._clean(raw.get("link_token"))
+        if role == "user" and not link_token:
+            link_token = f"lk-{secrets.token_urlsafe(24)}"
+            self._needs_save = True
         return {
             "id": item_id,
             "name": name,
             "role": role,
             "key_hash": key_hash,
             "enabled": bool(raw.get("enabled", True)),
+            "quota": quota,
+            "link_token": link_token,
             "created_at": created_at,
             "last_used_at": last_used_at,
         }
@@ -75,6 +101,8 @@ class AuthService:
             "name": item.get("name"),
             "role": item.get("role"),
             "enabled": bool(item.get("enabled", True)),
+            "quota": item.get("quota"),
+            "link_token": item.get("link_token") if item.get("role") == "user" else None,
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
         }
@@ -84,8 +112,9 @@ class AuthService:
             items = [item for item in self._items if role is None or item.get("role") == role]
             return [self._public_item(item) for item in items]
 
-    def create_key(self, *, role: AuthRole, name: str = "") -> tuple[dict[str, object], str]:
+    def create_key(self, *, role: AuthRole, name: str = "", quota: int | None = None) -> tuple[dict[str, object], str]:
         normalized_name = self._clean(name) or ("管理员密钥" if role == "admin" else "普通用户")
+        normalized_quota = self._normalize_quota(quota, default=0 if role == "user" else None)
         raw_key = f"sk-{secrets.token_urlsafe(24)}"
         item = {
             "id": uuid.uuid4().hex[:12],
@@ -93,6 +122,8 @@ class AuthService:
             "role": role,
             "key_hash": _hash_key(raw_key),
             "enabled": True,
+            "quota": normalized_quota,
+            "link_token": f"lk-{secrets.token_urlsafe(24)}" if role == "user" else "",
             "created_at": _now_iso(),
             "last_used_at": None,
         }
@@ -122,6 +153,8 @@ class AuthService:
                     next_item["name"] = self._clean(updates.get("name")) or next_item.get("name") or "普通用户"
                 if "enabled" in updates and updates.get("enabled") is not None:
                     next_item["enabled"] = bool(updates.get("enabled"))
+                if "quota" in updates and updates.get("quota") is not None:
+                    next_item["quota"] = self._normalize_quota(updates.get("quota"), default=0)
                 self._items[index] = next_item
                 self._save()
                 return self._public_item(next_item)
@@ -153,7 +186,10 @@ class AuthService:
                 if not bool(item.get("enabled", True)):
                     continue
                 stored_hash = self._clean(item.get("key_hash"))
-                if not stored_hash or not hmac.compare_digest(stored_hash, candidate_hash):
+                link_token = self._clean(item.get("link_token"))
+                key_matched = bool(stored_hash) and hmac.compare_digest(stored_hash, candidate_hash)
+                link_matched = bool(link_token) and hmac.compare_digest(link_token, candidate)
+                if not key_matched and not link_matched:
                     continue
                 next_item = dict(item)
                 now = datetime.now(timezone.utc)
@@ -169,6 +205,73 @@ class AuthService:
                         pass
                 return self._public_item(next_item)
         return None
+
+    def get_public_key(self, key_id: str) -> dict[str, object] | None:
+        normalized_id = self._clean(key_id)
+        if not normalized_id:
+            return None
+        with self._lock:
+            for item in self._items:
+                if item.get("id") == normalized_id:
+                    return self._public_item(item)
+        return None
+
+    def reserve_image_quota(self, identity: dict[str, object], amount: int = 1) -> int:
+        try:
+            normalized_amount = max(1, int(amount))
+        except (TypeError, ValueError):
+            normalized_amount = 1
+        if identity.get("role") != "user":
+            return 0
+        key_id = self._clean(identity.get("id"))
+        if not key_id:
+            raise ImageQuotaExceeded("user image quota exhausted")
+        with self._lock:
+            for index, item in enumerate(self._items):
+                if item.get("id") != key_id:
+                    continue
+                if item.get("role") != "user" or not bool(item.get("enabled", True)):
+                    raise ImageQuotaExceeded("user image quota exhausted")
+                quota = item.get("quota")
+                if quota is None:
+                    return 0
+                remaining = self._normalize_quota(quota, default=0) or 0
+                if remaining < normalized_amount:
+                    raise ImageQuotaExceeded("user image quota exhausted")
+                next_item = dict(item)
+                next_item["quota"] = remaining - normalized_amount
+                self._items[index] = next_item
+                self._save()
+                return normalized_amount
+        raise ImageQuotaExceeded("user image quota exhausted")
+
+    def refund_image_quota_by_id(self, key_id: object, amount: int = 1) -> int:
+        try:
+            normalized_amount = max(1, int(amount))
+        except (TypeError, ValueError):
+            normalized_amount = 1
+        normalized_id = self._clean(key_id)
+        if not normalized_id:
+            return 0
+        with self._lock:
+            for index, item in enumerate(self._items):
+                if item.get("id") != normalized_id or item.get("role") != "user":
+                    continue
+                quota = item.get("quota")
+                if quota is None:
+                    return 0
+                remaining = self._normalize_quota(quota, default=0) or 0
+                next_item = dict(item)
+                next_item["quota"] = remaining + normalized_amount
+                self._items[index] = next_item
+                self._save()
+                return normalized_amount
+        return 0
+
+    def refund_image_quota(self, identity: dict[str, object], amount: int = 1) -> int:
+        if identity.get("role") != "user":
+            return 0
+        return self.refund_image_quota_by_id(identity.get("id"), amount)
 
 
 auth_service = AuthService(config.get_storage_backend())

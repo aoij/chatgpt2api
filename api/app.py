@@ -14,6 +14,19 @@ from api.support import resolve_web_asset, start_limited_account_watcher
 from services.config import config
 
 
+def _inject_runtime_web_config(text: str) -> str:
+    replacements = {
+        "__CHATGPT2API_SITE_NAME__": config.site_name,
+        "__CHATGPT2API_PAGE_TITLE__": config.page_title,
+        "__CHATGPT2API_IMAGE_PAGE_TITLE__": config.image_page_title,
+        "__CHATGPT2API_IMAGE_PAGE_SUBTITLE__": config.image_page_subtitle,
+    }
+    next_text = text
+    for marker, value in replacements.items():
+        next_text = next_text.replace(marker, str(value))
+    return next_text
+
+
 def create_app() -> FastAPI:
     app_version = config.app_version
 
@@ -64,6 +77,7 @@ def create_app() -> FastAPI:
                     "0sm2er~jf-i~i.js",
                     "0sm2er~jf-i~i.js?v=log-thumb-20260428",
                 )
+                text = _inject_runtime_web_config(text)
                 return HTMLResponse(text, headers={"Cache-Control": "no-cache"})
             return FileResponse(asset)
         if full_path.strip("/").startswith("_next/"):

@@ -81,18 +81,23 @@ class AuthServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
 
-            item, raw_key = service.create_key(role="user", name="Alice")
+            item, raw_key = service.create_key(role="user", name="Alice", quota=2)
 
             self.assertEqual(item["role"], "user")
             self.assertEqual(item["name"], "Alice")
             self.assertTrue(item["enabled"])
+            self.assertEqual(item["quota"], 2)
             self.assertTrue(raw_key.startswith("sk-"))
+            self.assertTrue(str(item.get("link_token") or "").startswith("lk-"))
 
             authed = service.authenticate(raw_key)
             self.assertIsNotNone(authed)
             self.assertEqual(authed["id"], item["id"])
             self.assertEqual(authed["role"], "user")
             self.assertIsNotNone(authed["last_used_at"])
+            link_authed = service.authenticate(str(item["link_token"]))
+            self.assertIsNotNone(link_authed)
+            self.assertEqual(link_authed["id"], item["id"])
 
             updated = service.update_key(item["id"], {"enabled": False}, role="user")
             self.assertIsNotNone(updated)
@@ -103,10 +108,25 @@ class AuthServiceTests(unittest.TestCase):
             self.assertFalse(service.delete_key(item["id"], role="user"))
             self.assertEqual(service.list_keys(role="user"), [])
 
+    def test_user_image_quota_reserve_and_refund(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
+            item, raw_key = service.create_key(role="user", name="Alice", quota=2)
+            identity = service.authenticate(raw_key)
+
+            self.assertEqual(service.reserve_image_quota(identity, 1), 1)
+            self.assertEqual(service.get_public_key(item["id"])["quota"], 1)
+            service.refund_image_quota(identity, 1)
+            self.assertEqual(service.get_public_key(item["id"])["quota"], 2)
+            service.reserve_image_quota(identity, 2)
+            self.assertEqual(service.get_public_key(item["id"])["quota"], 0)
+            with self.assertRaises(Exception):
+                service.reserve_image_quota(identity, 1)
+
     def test_authenticate_ignores_last_used_save_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AuthService(JSONStorageBackend(Path(tmp_dir) / "accounts.json", Path(tmp_dir) / "auth_keys.json"))
-            item, raw_key = service.create_key(role="user", name="Alice")
+            item, raw_key = service.create_key(role="user", name="Alice", quota=2)
 
             def fail_save() -> None:
                 raise OSError("disk unavailable")

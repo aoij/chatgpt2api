@@ -9,6 +9,7 @@ import {
   type AuthRole,
   type StoredAuthSession,
 } from "@/store/auth";
+import { consumeShareKeyFromUrl } from "@/lib/request";
 
 type UseAuthGuardResult = {
   isCheckingAuth: boolean;
@@ -26,6 +27,7 @@ export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
 
     const load = async () => {
       const roleList = allowedRolesKey ? (allowedRolesKey.split(",") as AuthRole[]) : [];
+      await consumeShareKeyFromUrl();
       const storedSession = await getStoredAuthSession();
       if (!active) {
         return;
@@ -66,6 +68,7 @@ export function useRedirectIfAuthenticated() {
     let active = true;
 
     const load = async () => {
+      await consumeShareKeyFromUrl();
       const storedSession = await getStoredAuthSession();
       if (!active) {
         return;

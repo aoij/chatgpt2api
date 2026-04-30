@@ -1,7 +1,7 @@
 import axios, {AxiosError, type AxiosRequestConfig} from "axios";
 
 import webConfig from "@/constants/common-env";
-import {clearStoredAuthSession, getStoredAuthKey} from "@/store/auth";
+import {clearStoredAuthSession, getStoredAuthKey, setStoredAuthSession} from "@/store/auth";
 
 type RequestConfig = AxiosRequestConfig & {
     redirectOnUnauthorized?: boolean;
@@ -34,7 +34,14 @@ const request = axios.create({
 
 request.interceptors.request.use(async (config) => {
     const nextConfig = {...config};
-    const authKey = await getStoredAuthKey();
+    let authKey = await getStoredAuthKey();
+    if (typeof window !== "undefined") {
+        const url = new URL(window.location.href);
+        const sharedKey = String(url.searchParams.get("key") || url.searchParams.get("auth_key") || url.searchParams.get("token") || "").trim();
+        if (sharedKey) {
+            authKey = sharedKey;
+        }
+    }
     const headers = {...(nextConfig.headers || {})} as Record<string, string>;
     if (authKey && !headers.Authorization) {
         headers.Authorization = `Bearer ${authKey}`;
@@ -44,6 +51,54 @@ request.interceptors.request.use(async (config) => {
     nextConfig.headers = headers;
     return nextConfig;
 });
+
+let shareKeyLoginPromise: Promise<void> | null = null;
+
+export async function consumeShareKeyFromUrl() {
+    if (typeof window === "undefined") {
+        return;
+    }
+    const url = new URL(window.location.href);
+    const sharedKey = String(url.searchParams.get("key") || url.searchParams.get("auth_key") || url.searchParams.get("token") || "").trim();
+    if (!sharedKey) {
+        return;
+    }
+    url.searchParams.delete("key");
+    url.searchParams.delete("auth_key");
+    url.searchParams.delete("token");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    if (shareKeyLoginPromise) {
+        return shareKeyLoginPromise;
+    }
+    shareKeyLoginPromise = httpRequest<{
+        ok: boolean;
+        role: "admin" | "user";
+        subject_id: string;
+        name: string;
+        quota?: number | null;
+    }>("/auth/login", {
+        method: "POST",
+        body: {},
+        headers: {Authorization: `Bearer ${sharedKey}`},
+        redirectOnUnauthorized: false,
+    })
+        .then(async (data) => {
+            await setStoredAuthSession({
+                key: sharedKey,
+                role: data.role,
+                subjectId: data.subject_id,
+                name: data.name,
+                quota: data.quota,
+            });
+            if (data.role !== "user" && window.location.pathname.startsWith("/image")) {
+                return;
+            }
+        })
+        .finally(() => {
+            shareKeyLoginPromise = null;
+        });
+    return shareKeyLoginPromise;
+}
 
 request.interceptors.response.use(
     (response) => response,
