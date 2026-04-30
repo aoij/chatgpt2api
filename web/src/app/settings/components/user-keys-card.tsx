@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Ban, CheckCircle2, Copy, KeyRound, LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Ban, CheckCircle2, Copy, KeyRound, LoaderCircle, Plus, RefreshCw, Search, Trash2, UsersRound } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -16,7 +16,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKey } from "@/lib/api";
+
+const PAGE_SIZE_OPTIONS = [20, 50, 100, 200] as const;
+
+type StatusFilter = "all" | "enabled" | "disabled" | "empty";
 
 function formatDateTime(value?: string | null) {
   if (!value) {
@@ -35,7 +40,7 @@ function formatDateTime(value?: string | null) {
   }).format(date);
 }
 
-export function UserKeysCard() {
+export function UserKeysCard({ standalone = false }: { standalone?: boolean } = {}) {
   const didLoadRef = useRef(false);
   const [items, setItems] = useState<UserKey[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -47,12 +52,21 @@ export function UserKeysCard() {
   const [revealedKey, setRevealedKey] = useState("");
   const [revealedLinkToken, setRevealedLinkToken] = useState("");
   const [deletingItem, setDeletingItem] = useState<UserKey | null>(null);
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [pageSize, setPageSize] = useState<(typeof PAGE_SIZE_OPTIONS)[number]>(50);
+  const [page, setPage] = useState(1);
 
-  const load = async () => {
-    setIsLoading(true);
+  const load = async (silent = false) => {
+    if (!silent) {
+      setIsLoading(true);
+    }
     try {
       const data = await fetchUserKeys();
       setItems(data.items);
+      if (silent) {
+        toast.success("用户列表已刷新");
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载用户密钥失败");
     } finally {
@@ -67,6 +81,40 @@ export function UserKeysCard() {
     didLoadRef.current = true;
     void load();
   }, []);
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, statusFilter, pageSize]);
+
+  const stats = useMemo(() => {
+    const total = items.length;
+    const enabled = items.filter((item) => item.enabled).length;
+    const disabled = total - enabled;
+    const empty = items.filter((item) => item.enabled && item.quota !== null && Number(item.quota || 0) <= 0).length;
+    const quota = items.reduce((sum, item) => sum + (item.quota == null ? 0 : Math.max(0, Number(item.quota) || 0)), 0);
+    return { total, enabled, disabled, empty, quota };
+  }, [items]);
+
+  const filteredItems = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    return items.filter((item) => {
+      const matchesKeyword = keyword
+        ? [item.name, item.id, item.link_token, item.created_at, item.last_used_at]
+            .filter(Boolean)
+            .some((value) => String(value).toLowerCase().includes(keyword))
+        : true;
+      const matchesStatus =
+        statusFilter === "all" ||
+        (statusFilter === "enabled" && item.enabled) ||
+        (statusFilter === "disabled" && !item.enabled) ||
+        (statusFilter === "empty" && item.enabled && item.quota !== null && Number(item.quota || 0) <= 0);
+      return matchesKeyword && matchesStatus;
+    });
+  }, [items, query, statusFilter]);
+
+  const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const pagedItems = filteredItems.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   const handleCreate = async () => {
     setIsCreating(true);
@@ -159,17 +207,47 @@ export function UserKeysCard() {
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex items-center gap-3">
               <div className="flex size-10 items-center justify-center rounded-xl bg-stone-100">
-                <KeyRound className="size-5 text-stone-600" />
+                {standalone ? <UsersRound className="size-5 text-stone-600" /> : <KeyRound className="size-5 text-stone-600" />}
               </div>
               <div>
-                <h2 className="text-lg font-semibold tracking-tight">用户密钥管理</h2>
-                <p className="text-sm text-stone-500">为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。</p>
+                <h2 className="text-lg font-semibold tracking-tight">{standalone ? "普通用户管理" : "用户密钥管理"}</h2>
+                <p className="text-sm text-stone-500">
+                  {standalone
+                    ? "支持搜索、状态筛选、分页管理、调额度和复制免登录链接。"
+                    : "为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。"}
+                </p>
               </div>
             </div>
-            <Button className="h-9 w-full rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800 sm:w-auto" onClick={() => setIsDialogOpen(true)}>
-              <Plus className="size-4" />
-              创建用户密钥
-            </Button>
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                onClick={() => void load(true)}
+                disabled={isLoading}
+              >
+                {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+                刷新
+              </Button>
+              <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => setIsDialogOpen(true)}>
+                <Plus className="size-4" />
+                创建用户密钥
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {[
+              ["用户总数", stats.total],
+              ["已启用", stats.enabled],
+              ["已禁用", stats.disabled],
+              ["剩余额度", stats.quota],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-2xl border border-stone-100 bg-stone-50/70 px-4 py-3">
+                <div className="text-xs text-stone-500">{label}</div>
+                <div className="mt-1 text-xl font-semibold text-stone-950">{value}</div>
+              </div>
+            ))}
           </div>
 
           {revealedKey ? (
@@ -202,6 +280,47 @@ export function UserKeysCard() {
             </div>
           ) : null}
 
+          <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_160px_150px]">
+            <div className="relative">
+              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="搜索名称、ID、免登录令牌、创建/使用时间"
+                className="h-11 rounded-xl border-stone-200 bg-white pl-9"
+              />
+            </div>
+            <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as StatusFilter)}>
+              <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                <SelectValue placeholder="状态筛选" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">全部状态</SelectItem>
+                <SelectItem value="enabled">仅已启用</SelectItem>
+                <SelectItem value="disabled">仅已禁用</SelectItem>
+                <SelectItem value="empty">启用但额度为 0</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={String(pageSize)} onValueChange={(value) => setPageSize(Number(value) as (typeof PAGE_SIZE_OPTIONS)[number])}>
+              <SelectTrigger className="h-11 rounded-xl border-stone-200 bg-white">
+                <SelectValue placeholder="每页数量" />
+              </SelectTrigger>
+              <SelectContent>
+                {PAGE_SIZE_OPTIONS.map((item) => (
+                  <SelectItem key={item} value={String(item)}>
+                    每页 {item} 条
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {stats.empty > 0 ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+              当前有 {stats.empty} 个已启用用户额度为 0，可通过筛选快速定位后补额度或禁用。
+            </div>
+          ) : null}
+
           {isLoading ? (
             <div className="flex items-center justify-center py-10">
               <LoaderCircle className="size-5 animate-spin text-stone-400" />
@@ -210,9 +329,21 @@ export function UserKeysCard() {
             <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
               暂无普通用户密钥。点击右上角按钮后即可创建并分发给其他人。
             </div>
+          ) : filteredItems.length === 0 ? (
+            <div className="rounded-xl bg-stone-50 px-6 py-10 text-center text-sm text-stone-500">
+              没有找到符合条件的用户，可清空搜索或切换状态筛选。
+            </div>
           ) : (
             <div className="space-y-3">
-              {items.map((item) => {
+              <div className="flex flex-col gap-2 text-sm text-stone-500 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  当前显示 <span className="font-medium text-stone-900">{filteredItems.length}</span> / {items.length} 个用户
+                </div>
+                <div>
+                  第 <span className="font-medium text-stone-900">{safePage}</span> / {pageCount} 页
+                </div>
+              </div>
+              {pagedItems.map((item) => {
                 const isPending = pendingIds.has(item.id);
                 return (
                   <div key={item.id} className="flex flex-col gap-3 rounded-xl border border-stone-200 bg-white px-3 py-4 md:flex-row md:items-center md:justify-between md:px-4">
@@ -286,6 +417,31 @@ export function UserKeysCard() {
                   </div>
                 );
               })}
+              <div className="flex flex-col gap-3 border-t border-stone-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-sm text-stone-500">
+                  显示第 {(safePage - 1) * pageSize + 1} - {Math.min(safePage * pageSize, filteredItems.length)} 条，共 {filteredItems.length} 条
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                    onClick={() => setPage((current) => Math.max(1, current - 1))}
+                    disabled={safePage <= 1}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                    onClick={() => setPage((current) => Math.min(pageCount, current + 1))}
+                    disabled={safePage >= pageCount}
+                  >
+                    下一页
+                  </Button>
+                </div>
+              </div>
             </div>
           )}
         </CardContent>

@@ -15,6 +15,7 @@ const adminNavItems = [
   { href: "/register", label: "注册机" },
   { href: "/image-manager", label: "图片管理" },
   { href: "/logs", label: "日志管理" },
+  { href: "/users", label: "用户管理" },
   { href: "/settings", label: "设置" },
 ];
 
