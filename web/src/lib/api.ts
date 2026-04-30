@@ -75,6 +75,18 @@ export type ManagedImage = {
   created_at: string;
   width?: number;
   height?: number;
+  uploader_key?: string;
+  uploader_id?: string;
+  uploader_name?: string;
+  uploader_role?: string;
+};
+
+export type ManagedImageUploader = {
+  key: string;
+  id?: string;
+  name: string;
+  role?: string;
+  count: number;
 };
 
 export type SystemLog = {
@@ -348,16 +360,17 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
   });
 }
 
-export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
+export async function fetchManagedImages(filters: { start_date?: string; end_date?: string; uploader?: string }) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
-  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }> }>(
+  if (filters.uploader) params.set("uploader", filters.uploader);
+  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }>; uploaders: ManagedImageUploader[]; uploader_groups: Array<{ uploader_key: string; uploader_id?: string; uploader_name: string; items: ManagedImage[] }> }>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
   );
 }
 
-export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; all_matching?: boolean }) {
+export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; uploader?: string; all_matching?: boolean }) {
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
 

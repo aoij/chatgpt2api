@@ -54,6 +54,16 @@ class AnthropicMessageRequest(BaseModel):
     stream: bool | None = None
 
 
+def _uploader_from_identity(identity: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": identity.get("id"),
+        "name": identity.get("name"),
+        "role": identity.get("role"),
+        "auth_mode": identity.get("auth_mode"),
+        "scope": identity.get("scope"),
+    }
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -74,6 +84,7 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
+        payload["uploader"] = _uploader_from_identity(identity)
         reserved_quota = 0
         try:
             reserved_quota = auth_service.reserve_image_quota(identity, body.n)
@@ -129,6 +140,7 @@ def create_router() -> APIRouter:
             "response_format": response_format,
             "stream": stream,
             "base_url": resolve_image_base_url(request),
+            "uploader": _uploader_from_identity(identity),
         }
         call = LoggedCall(identity, "/v1/images/edits", model, "图生图")
         try:
@@ -145,6 +157,7 @@ def create_router() -> APIRouter:
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
         identity = require_admin(authorization)
         payload = body.model_dump(mode="python")
+        payload["uploader"] = _uploader_from_identity(identity)
         model = str(payload.get("model") or "auto")
         call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成")
         return await call.run(openai_v1_chat_complete.handle, payload)
@@ -153,6 +166,7 @@ def create_router() -> APIRouter:
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
         identity = require_admin(authorization)
         payload = body.model_dump(mode="python")
+        payload["uploader"] = _uploader_from_identity(identity)
         model = str(payload.get("model") or "auto")
         call = LoggedCall(identity, "/v1/responses", model, "Responses")
         return await call.run(openai_v1_response.handle, payload)

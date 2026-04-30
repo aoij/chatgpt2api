@@ -47,6 +47,16 @@ def _owner_id(identity: dict[str, object]) -> str:
     return _clean(identity.get("id")) or "anonymous"
 
 
+def _uploader_from_identity(identity: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": identity.get("id"),
+        "name": identity.get("name"),
+        "role": identity.get("role"),
+        "auth_mode": identity.get("auth_mode"),
+        "scope": identity.get("scope"),
+    }
+
+
 def _task_key(owner_id: str, task_id: str) -> str:
     return f"{owner_id}:{task_id}"
 
@@ -108,6 +118,7 @@ class ImageTaskService:
             "size": size,
             "response_format": "url",
             "base_url": base_url,
+            "uploader": _uploader_from_identity(identity),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -130,6 +141,7 @@ class ImageTaskService:
             "size": size,
             "response_format": "url",
             "base_url": base_url,
+            "uploader": _uploader_from_identity(identity),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 

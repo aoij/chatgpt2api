@@ -30,6 +30,7 @@ class ImageDeleteRequest(BaseModel):
     paths: list[str] = []
     start_date: str = ""
     end_date: str = ""
+    uploader: str = ""
     all_matching: bool = False
 
 
@@ -105,14 +106,14 @@ def create_router(app_version: str) -> APIRouter:
         return {"config": config.update(body.model_dump(mode="python"))}
 
     @router.get("/api/images")
-    async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_images(request: Request, start_date: str = "", end_date: str = "", uploader: str = "", authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
+        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip(), uploader=uploader.strip())
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), all_matching=body.all_matching)
+        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), uploader=body.uploader.strip(), all_matching=body.all_matching)
 
     @router.get("/api/logs")
     async def get_logs(request: Request, type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):

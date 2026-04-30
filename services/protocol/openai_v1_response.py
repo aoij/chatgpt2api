@@ -205,6 +205,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         size=None if images else "1:1",
         response_format="b64_json",
         images=images,
+        uploader=body.get("uploader") if isinstance(body.get("uploader"), dict) else None,
     ))
     yield from stream_image_response(image_outputs, prompt, model)
 

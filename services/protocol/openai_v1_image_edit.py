@@ -20,6 +20,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     size = body.get("size")
     response_format = str(body.get("response_format") or "b64_json")
     base_url = str(body.get("base_url") or "") or None
+    uploader = body.get("uploader") if isinstance(body.get("uploader"), dict) else None
     encoded_images = encode_images(images)
     if not encoded_images:
         raise ImageGenerationError("image is required")
@@ -30,6 +31,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         size=size,
         response_format=response_format,
         base_url=base_url,
+        uploader=uploader,
         images=encoded_images,
         message_as_error=True,
     ))

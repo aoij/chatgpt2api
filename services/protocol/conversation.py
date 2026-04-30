@@ -66,7 +66,7 @@ def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
 
-def save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
+def save_image_bytes(image_data: bytes, base_url: str | None = None, uploader: dict[str, Any] | None = None) -> str:
     config.cleanup_old_images()
     file_hash = hashlib.md5(image_data).hexdigest()
     filename = f"{int(time.time())}_{file_hash}.png"
@@ -74,6 +74,12 @@ def save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
     file_path = config.images_dir / relative_dir / filename
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(image_data)
+    try:
+        from services.image_service import record_image_metadata
+
+        record_image_metadata(f"{relative_dir.as_posix()}/{filename}", uploader)
+    except Exception as exc:
+        logger.warning({"event": "image_metadata_record_failed", "path": str(file_path), "error": str(exc)})
     return f"{(base_url or config.base_url)}/images/{relative_dir.as_posix()}/{filename}"
 
 
@@ -161,6 +167,7 @@ def format_image_result(
     base_url: str | None = None,
     created: int | None = None,
     message: str = "",
+    uploader: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     for item in items:
@@ -171,12 +178,12 @@ def format_image_result(
         if response_format == "b64_json":
             data.append({
                 "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": save_image_bytes(base64.b64decode(b64_json), base_url, uploader),
                 "revised_prompt": revised_prompt,
             })
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": save_image_bytes(base64.b64decode(b64_json), base_url, uploader),
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
@@ -195,6 +202,7 @@ class ConversationRequest:
     size: str | None = None
     response_format: str = "b64_json"
     base_url: str | None = None
+    uploader: dict[str, Any] | None = None
     message_as_error: bool = False
 
 
@@ -528,6 +536,7 @@ def stream_image_outputs(
             request.response_format,
             request.base_url,
             int(time.time()),
+            uploader=request.uploader,
         )["data"]
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
