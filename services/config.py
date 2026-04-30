@@ -138,6 +138,12 @@ class ConfigStore:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    @property
+    def image_thumbnails_dir(self) -> Path:
+        path = DATA_DIR / "image_thumbnails"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def cleanup_old_images(self) -> int:
         cutoff = time.time() - self.image_retention_days * 86400
         removed = 0

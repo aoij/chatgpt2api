@@ -67,7 +67,10 @@ export type ManagedImage = {
   date: string;
   size: number;
   url: string;
+  thumbnail_url?: string;
   created_at: string;
+  width?: number;
+  height?: number;
 };
 
 export type SystemLog = {
