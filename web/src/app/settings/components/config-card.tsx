@@ -67,7 +67,7 @@ export function ConfigCard() {
 
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-      <CardContent className="space-y-4 p-6">
+      <CardContent className="space-y-4 p-4 sm:p-6">
         <div className="rounded-xl border border-stone-200 bg-stone-50 px-4 py-3 text-sm leading-6 text-stone-600">
           管理员登录密钥继续从部署配置读取，不再在此页面展示；如需分发给其他人，请在下方创建普通用户密钥。
         </div>
@@ -198,7 +198,7 @@ export function ConfigCard() {
               <label className="text-sm text-stone-700">控制台日志级别</label>
               <p className="mt-1 text-xs text-stone-500">不选择时使用默认 info / warning / error。</p>
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {logLevelOptions.map((level) => (
                 <label key={level} className="flex items-center gap-2 text-sm capitalize text-stone-700">
                   <Checkbox

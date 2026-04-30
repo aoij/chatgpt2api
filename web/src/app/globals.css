@@ -113,11 +113,24 @@
 }
 
 @layer base {
+  html,
+  body {
+    min-width: 0;
+    overflow-x: hidden;
+  }
+
   * {
     @apply border-border outline-ring/50;
   }
   body {
     @apply bg-background text-foreground;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  input,
+  textarea,
+  select {
+    font-size: 16px;
   }
 }
 

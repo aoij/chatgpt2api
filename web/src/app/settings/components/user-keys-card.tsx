@@ -155,8 +155,8 @@ export function UserKeysCard() {
   return (
     <>
       <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-        <CardContent className="space-y-6 p-6">
-          <div className="flex items-start justify-between gap-4">
+        <CardContent className="space-y-5 p-4 sm:space-y-6 sm:p-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex items-center gap-3">
               <div className="flex size-10 items-center justify-center rounded-xl bg-stone-100">
                 <KeyRound className="size-5 text-stone-600" />
@@ -166,7 +166,7 @@ export function UserKeysCard() {
                 <p className="text-sm text-stone-500">为普通用户创建专用密钥；普通用户只能进入画图页，不能查看设置和号池。</p>
               </div>
             </div>
-            <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={() => setIsDialogOpen(true)}>
+            <Button className="h-9 w-full rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800 sm:w-auto" onClick={() => setIsDialogOpen(true)}>
               <Plus className="size-4" />
               创建用户密钥
             </Button>
@@ -215,9 +215,9 @@ export function UserKeysCard() {
               {items.map((item) => {
                 const isPending = pendingIds.has(item.id);
                 return (
-                  <div key={item.id} className="flex flex-col gap-3 rounded-xl border border-stone-200 bg-white px-4 py-4 md:flex-row md:items-center md:justify-between">
+                  <div key={item.id} className="flex flex-col gap-3 rounded-xl border border-stone-200 bg-white px-3 py-4 md:flex-row md:items-center md:justify-between md:px-4">
                     <div className="min-w-0 space-y-2">
-                      <div className="flex flex-wrap items-center gap-2">
+                      <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
                         <div className="truncate text-sm font-medium text-stone-800">{item.name}</div>
                         <Badge variant={item.enabled ? "success" : "secondary"} className="rounded-md">
                           {item.enabled ? "已启用" : "已禁用"}
@@ -292,7 +292,7 @@ export function UserKeysCard() {
       </Card>
 
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="rounded-2xl p-6">
+        <DialogContent className="rounded-2xl p-4 sm:p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>创建用户密钥</DialogTitle>
             <DialogDescription className="text-sm leading-6">
@@ -344,7 +344,7 @@ export function UserKeysCard() {
       </Dialog>
 
       <Dialog open={Boolean(deletingItem)} onOpenChange={(open) => (!open ? setDeletingItem(null) : null)}>
-        <DialogContent className="rounded-2xl p-6">
+        <DialogContent className="rounded-2xl p-4 sm:p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>删除用户密钥</DialogTitle>
             <DialogDescription className="text-sm leading-6">

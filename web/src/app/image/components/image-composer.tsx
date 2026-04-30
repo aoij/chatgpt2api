@@ -89,8 +89,8 @@ export function ImageComposer({
   };
 
   return (
-    <div className="shrink-0 flex justify-center px-1 sm:px-0">
-      <div style={{ width: "min(980px, 100%)" }}>
+    <div className="flex shrink-0 justify-center px-1 pb-[env(safe-area-inset-bottom)] sm:px-0 sm:pb-0">
+      <div className="w-full max-w-[980px]">
         <input
           ref={fileInputRef}
           type="file"
@@ -103,7 +103,7 @@ export function ImageComposer({
         />
 
         {referenceImages.length > 0 ? (
-          <div className="mb-2 flex gap-2 overflow-x-auto px-1 pb-1 sm:mb-3 sm:flex-wrap sm:overflow-visible sm:pb-0">
+          <div className="hide-scrollbar mb-2 flex gap-2 overflow-x-auto px-1 pb-1 sm:mb-3 sm:flex-wrap sm:overflow-visible sm:pb-0">
             {referenceImages.map((image, index) => (
               <div key={`${image.name}-${index}`} className="relative size-14 shrink-0 sm:size-16">
                 <button
@@ -137,7 +137,7 @@ export function ImageComposer({
           </div>
         ) : null}
 
-        <div className="rounded-[24px] border border-stone-200 bg-white shadow-[0_14px_60px_-42px_rgba(15,23,42,0.45)] sm:rounded-[32px] sm:shadow-none">
+        <div className="rounded-[22px] border border-stone-200 bg-white shadow-[0_14px_60px_-42px_rgba(15,23,42,0.45)] sm:rounded-[32px] sm:shadow-none">
           <div
             className="relative cursor-text"
             onClick={() => {
@@ -167,10 +167,10 @@ export function ImageComposer({
                   void onSubmit();
                 }
               }}
-              className="min-h-[82px] resize-none rounded-[24px] border-0 bg-transparent px-4 pt-4 pb-2 text-[15px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[148px] sm:rounded-[32px] sm:px-6 sm:pt-6 sm:pb-20 sm:leading-7"
+              className="min-h-[76px] resize-none rounded-[22px] border-0 bg-transparent px-4 pt-4 pb-2 text-[16px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[148px] sm:rounded-[32px] sm:px-6 sm:pt-6 sm:pb-20 sm:text-[15px] sm:leading-7"
             />
 
-            <div className="border-t border-stone-100 bg-white px-3 pb-3 pt-2 sm:absolute sm:inset-x-0 sm:bottom-0 sm:border-t-0 sm:bg-gradient-to-t sm:from-white sm:via-white/95 sm:to-transparent sm:px-6 sm:pb-4 sm:pt-6" onClick={(event) => event.stopPropagation()}>
+            <div className="border-t border-stone-100 bg-white px-2.5 pb-2.5 pt-2 sm:absolute sm:inset-x-0 sm:bottom-0 sm:border-t-0 sm:bg-gradient-to-t sm:from-white sm:via-white/95 sm:to-transparent sm:px-6 sm:pb-4 sm:pt-6" onClick={(event) => event.stopPropagation()}>
               <div className="flex items-end justify-between gap-2 sm:gap-3">
                 <div className="hide-scrollbar flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto pb-0.5 sm:flex-wrap sm:gap-3 sm:overflow-visible sm:pb-0">
                   <Button
@@ -185,8 +185,8 @@ export function ImageComposer({
                   <div className="shrink-0 rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:px-3 sm:py-2 sm:text-xs">
                     <span className="hidden sm:inline">剩余额度 </span>{availableQuota}
                   </div>
-                  <div className="shrink-0 rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:px-3 sm:py-2 sm:text-xs">
-                    <span className="hidden sm:inline">当前令牌 </span>{tokenName || "-"}
+                  <div className="flex max-w-[150px] shrink-0 items-center rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:max-w-[260px] sm:px-3 sm:py-2 sm:text-xs">
+                    <span className="hidden sm:inline">当前令牌 </span><span className="truncate">{tokenName || "-"}</span>
                   </div>
                   {activeTaskCount > 0 && (
                     <div className="flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700 sm:gap-1.5 sm:px-3 sm:py-2 sm:text-xs">

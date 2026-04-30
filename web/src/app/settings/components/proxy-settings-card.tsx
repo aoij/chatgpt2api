@@ -48,7 +48,7 @@ export function ProxySettingsCard() {
 
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-      <CardContent className="space-y-6 p-6">
+      <CardContent className="space-y-5 p-4 sm:space-y-6 sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex size-10 items-center justify-center rounded-xl bg-stone-100">
@@ -100,7 +100,7 @@ export function ProxySettingsCard() {
               </div>
             ) : null}
 
-            <div className="flex justify-end gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:flex sm:justify-end">
               <Button
                 variant="outline"
                 className="h-10 rounded-xl border-stone-200 bg-white px-5 text-stone-700"

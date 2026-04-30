@@ -20,7 +20,7 @@ export function BaseUrlCard() {
 
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-      <CardContent className="space-y-6 p-6">
+      <CardContent className="space-y-5 p-4 sm:space-y-6 sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex size-10 items-center justify-center rounded-xl bg-stone-100">

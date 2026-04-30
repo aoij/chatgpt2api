@@ -32,7 +32,7 @@ export function CPAPoolDialog() {
 
   return (
     <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-      <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+      <DialogContent showCloseButton={false} className="rounded-2xl p-4 sm:p-6">
         <DialogHeader className="gap-2">
           <DialogTitle>{editingPool ? "编辑连接" : "添加连接"}</DialogTitle>
           <DialogDescription className="text-sm leading-6">

@@ -153,7 +153,7 @@ function ImageManagerContent() {
   const renderImageCard = (item: ManagedImage) => {
     const imageIndex = items.findIndex((row) => row.url === item.url);
     return (
-      <div key={item.url} className="group border-r border-b border-stone-100 p-4 transition hover:bg-stone-50">
+      <div key={item.url} className="group border-r border-b border-stone-100 p-2.5 transition hover:bg-stone-50 sm:p-4">
         <button
           type="button"
           className="relative block aspect-square w-full cursor-zoom-in overflow-hidden rounded-lg bg-stone-100 text-left"
@@ -173,9 +173,9 @@ function ImageManagerContent() {
             <Maximize2 className="size-4" />
           </span>
         </button>
-        <div className="mt-3 space-y-1 text-xs text-stone-500">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1 font-medium text-stone-700">
+        <div className="mt-2 space-y-1 text-[11px] text-stone-500 sm:mt-3 sm:text-xs">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1 truncate font-medium text-stone-700 sm:flex sm:items-center sm:gap-1">
               <CalendarDays className="size-3.5" />
               {item.created_at}
             </div>
@@ -198,7 +198,7 @@ function ImageManagerContent() {
             <Users className="size-3.5" />
             <span className="truncate" title={uploaderLabel(item)}>上传人：{uploaderLabel(item)}</span>
           </div>
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex items-start justify-between gap-2">
             <span>{formatSize(item.size)}</span>
             <span>{imageDimensions(item)}</span>
           </div>
@@ -214,12 +214,12 @@ function ImageManagerContent() {
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Images</div>
           <h1 className="text-2xl font-semibold tracking-tight">图片管理</h1>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
+        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
+          <div className="col-span-2 sm:col-span-1"><DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} /></div>
           <select
             value={uploader}
             onChange={(event) => setUploader(event.target.value)}
-            className="h-10 rounded-xl border border-stone-200 bg-white px-3 text-sm text-stone-700 shadow-sm outline-none transition focus:border-stone-300"
+            className="h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-sm text-stone-700 shadow-sm outline-none transition focus:border-stone-300 sm:w-auto"
           >
             <option value="">全部上传人</option>
             {uploaders.map((item) => (
@@ -229,19 +229,19 @@ function ImageManagerContent() {
           <select
             value={groupMode}
             onChange={(event) => setGroupMode(event.target.value as GroupMode)}
-            className="h-10 rounded-xl border border-stone-200 bg-white px-3 text-sm text-stone-700 shadow-sm outline-none transition focus:border-stone-300"
+            className="h-10 w-full rounded-xl border border-stone-200 bg-white px-3 text-sm text-stone-700 shadow-sm outline-none transition focus:border-stone-300 sm:w-auto"
           >
             <option value="uploader">按上传人分组</option>
             <option value="none">不分组</option>
           </select>
-          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
+          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700 sm:px-4">
             清除筛选条件
           </Button>
-          <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
+          <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800 sm:px-4">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
-          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || items.length === 0 || !hasActiveFilter} className="h-10 rounded-xl border-rose-200 bg-white px-4 text-rose-600 hover:bg-rose-50">
+          <Button variant="outline" onClick={() => setDeleteMode("filtered")} disabled={isDeleting || items.length === 0 || !hasActiveFilter} className="col-span-2 h-10 rounded-xl border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50 sm:col-span-1 sm:px-4">
             <Trash2 className="size-4" />
             删除匹配筛选
           </Button>
@@ -250,7 +250,7 @@ function ImageManagerContent() {
 
       <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="p-0">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
+          <div className="flex flex-col gap-3 border-b border-stone-100 px-3 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between sm:px-5 sm:py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
               <ImageIcon className="size-4" />
               共 {items.length} 张
@@ -265,7 +265,7 @@ function ImageManagerContent() {
               </label>
               {selectedPaths.length > 0 ? <span>已选 {selectedPaths.length} 张</span> : null}
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadImages()} disabled={isLoading}>
                 <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
                 刷新
@@ -289,13 +289,13 @@ function ImageManagerContent() {
                   <span className="text-xs font-normal text-stone-400">本页 {group.items.length} 张</span>
                 </div>
               ) : null}
-              <div className="grid gap-0 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              <div className="grid grid-cols-2 gap-0 lg:grid-cols-3 xl:grid-cols-4">
                 {group.items.map(renderImageCard)}
               </div>
             </div>
           ))}
 
-          <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
+          <div className="flex items-center justify-between gap-2 border-t border-stone-100 px-3 py-3 text-sm text-stone-500 sm:justify-end sm:px-4">
             <span>第 {safePage} / {pageCount} 页，共 {items.length} 张</span>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />

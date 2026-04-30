@@ -20,8 +20,8 @@ export function CPAPoolsCard() {
 
   return (
     <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-      <CardContent className="space-y-6 p-6">
-        <div className="flex items-start justify-between">
+      <CardContent className="space-y-5 p-4 sm:space-y-6 sm:p-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex size-10 items-center justify-center rounded-xl bg-stone-100">
               <ServerCog className="size-5 text-stone-600" />
@@ -31,9 +31,9 @@ export function CPAPoolsCard() {
               <p className="text-sm text-stone-500">先配置连接，再按需查询远程账号并选择导入到本地号池。</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {pools.length > 0 ? <Badge className="rounded-md px-2.5 py-1">{pools.length} 个连接</Badge> : null}
-            <Button className="h-9 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800" onClick={openAddDialog}>
+            <Button className="h-9 w-full rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800 sm:w-auto" onClick={openAddDialog}>
               <Plus className="size-4" />
               添加连接
             </Button>

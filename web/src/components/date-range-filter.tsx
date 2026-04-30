@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { format, parse } from "date-fns";
 import { CalendarIcon } from "lucide-react";
 import type { DateRange } from "react-day-picker";
@@ -16,6 +17,7 @@ type DateRangeFilterProps = {
 };
 
 export function DateRangeFilter({ startDate, endDate, onChange }: DateRangeFilterProps) {
+  const [isNarrowScreen, setIsNarrowScreen] = useState(false);
   const selected: DateRange | undefined = startDate
     ? {
         from: parse(startDate, "yyyy-MM-dd", new Date()),
@@ -25,13 +27,21 @@ export function DateRangeFilter({ startDate, endDate, onChange }: DateRangeFilte
 
   const label = startDate ? `${startDate} 至 ${endDate || startDate}` : "选择日期范围";
 
+  useEffect(() => {
+    const query = window.matchMedia("(max-width: 640px)");
+    const sync = () => setIsNarrowScreen(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+
   return (
-    <Field className="w-[240px]">
+    <Field className="w-full sm:w-[240px]">
       <Popover>
         <PopoverTrigger asChild>
-          <Button variant="outline" className="h-10 justify-start rounded-xl border-stone-200 bg-white px-3 font-normal text-stone-700">
+          <Button variant="outline" className="h-10 w-full justify-start rounded-xl border-stone-200 bg-white px-3 font-normal text-stone-700">
             <CalendarIcon className="size-4 text-stone-400" />
-            {label}
+            <span className="truncate">{label}</span>
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-auto p-3" align="start">
@@ -40,7 +50,7 @@ export function DateRangeFilter({ startDate, endDate, onChange }: DateRangeFilte
             defaultMonth={selected?.from}
             selected={selected}
             onSelect={(value) => onChange(value?.from ? format(value.from, "yyyy-MM-dd") : "", value?.to ? format(value.to, "yyyy-MM-dd") : "")}
-            numberOfMonths={2}
+            numberOfMonths={isNarrowScreen ? 1 : 2}
           />
         </PopoverContent>
       </Popover>

@@ -517,8 +517,8 @@ function AccountsPageContent() {
             </Badge>
           </div>
 
-          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
-            <div className="relative min-w-[260px]">
+          <div className="grid w-full grid-cols-2 gap-2 lg:flex lg:w-auto lg:items-center">
+            <div className="relative col-span-2 min-w-0 lg:col-span-1 lg:min-w-[260px]">
               <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-stone-400" />
               <Input
                 value={query}
@@ -527,7 +527,7 @@ function AccountsPageContent() {
                   setPage(1);
                 }}
                 placeholder="搜索邮箱"
-                className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
+                className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10 text-base sm:text-sm"
               />
             </div>
             <Select
@@ -590,11 +590,11 @@ function AccountsPageContent() {
           )}
         >
           <CardContent className="space-y-0 p-0">
-            <div className="flex flex-col gap-3 border-b border-stone-100 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex flex-wrap items-center gap-2 text-sm text-stone-500">
+            <div className="flex flex-col gap-3 border-b border-stone-100 px-3 py-3 sm:px-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="grid grid-cols-2 gap-2 text-sm text-stone-500 sm:flex sm:flex-wrap sm:items-center">
                 <Button
                   variant="ghost"
-                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                  className="h-9 rounded-lg px-2 text-stone-500 hover:bg-stone-100 sm:h-8 sm:px-3"
                   onClick={() => void handleRefreshAccounts(selectedTokens)}
                   disabled={selectedTokens.length === 0 || isRefreshing}
                 >
@@ -603,7 +603,7 @@ function AccountsPageContent() {
                 </Button>
                 <Button
                   variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                  className="h-9 rounded-lg px-2 text-rose-500 hover:bg-rose-50 hover:text-rose-600 sm:h-8 sm:px-3"
                   onClick={() => void handleDeleteTokens(abnormalTokens)}
                   disabled={abnormalTokens.length === 0 || isDeleting}
                 >
@@ -612,7 +612,7 @@ function AccountsPageContent() {
                 </Button>
                 <Button
                   variant="ghost"
-                  className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
+                  className="h-9 rounded-lg px-2 text-rose-500 hover:bg-rose-50 hover:text-rose-600 sm:h-8 sm:px-3"
                   onClick={() => void handleDeleteTokens(selectedTokens)}
                   disabled={selectedTokens.length === 0 || isDeleting}
                 >
@@ -620,14 +620,121 @@ function AccountsPageContent() {
                   删除所选
                 </Button>
                 {selectedIds.length > 0 ? (
-                  <span className="rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600">
+                  <span className="col-span-2 rounded-lg bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-600 sm:col-span-1">
                     已选择 {selectedIds.length} 项
                   </span>
                 ) : null}
               </div>
             </div>
 
-            <div className="overflow-x-auto">
+            <div className="divide-y divide-stone-100 md:hidden">
+              {currentRows.map((account) => {
+                const status = statusMeta[account.status];
+                const StatusIcon = status.icon;
+                const restore = formatRestoreAt(account.restoreAt);
+
+                return (
+                  <div key={`${account.id}-mobile`} className="space-y-3 px-3 py-4">
+                    <div className="flex items-start gap-3">
+                      <Checkbox
+                        checked={selectedIds.includes(account.id)}
+                        onCheckedChange={(checked) => {
+                          setSelectedIds((prev) =>
+                            checked
+                              ? Array.from(new Set([...prev, account.id]))
+                              : prev.filter((item) => item !== account.id),
+                          );
+                        }}
+                      />
+                      <div className="min-w-0 flex-1 space-y-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-sm font-semibold tracking-tight text-stone-800">
+                            {maskToken(account.access_token)}
+                          </span>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                            onClick={() => {
+                              void navigator.clipboard.writeText(account.access_token);
+                              toast.success("token 已复制");
+                            }}
+                          >
+                            <Copy className="size-4" />
+                          </button>
+                        </div>
+                        <div className="truncate text-xs text-stone-500">{account.email ?? "—"}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant="secondary" className="rounded-md bg-stone-100 text-stone-700">
+                            {account.type}
+                          </Badge>
+                          <Badge
+                            variant={status.badge}
+                            className="inline-flex items-center gap-1 rounded-md px-2 py-1"
+                          >
+                            <StatusIcon className="size-3.5" />
+                            {account.status}
+                          </Badge>
+                          <Badge variant="info" className="rounded-md">
+                            额度 {formatQuota(account)}
+                          </Badge>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs text-stone-500">
+                      <div className="rounded-xl bg-stone-50 px-3 py-2">
+                        <div className="text-stone-400">恢复时间</div>
+                        {restore.relative ? <div className="mt-1 font-medium text-stone-700">{restore.relative}</div> : null}
+                        <div className="mt-0.5 break-all">{restore.absolute}</div>
+                      </div>
+                      <div className="rounded-xl bg-stone-50 px-3 py-2">
+                        <div className="text-stone-400">成功 / 失败</div>
+                        <div className="mt-1 font-medium text-stone-700">{account.success} / {account.fail}</div>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-end gap-1 text-stone-400">
+                      <button
+                        type="button"
+                        className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                        onClick={() => openEditDialog(account)}
+                        disabled={isUpdating}
+                      >
+                        <Pencil className="size-4" />
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
+                        onClick={() => void handleRefreshAccounts([account.access_token])}
+                        disabled={isRefreshing}
+                      >
+                        <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
+                      </button>
+                      <button
+                        type="button"
+                        className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
+                        onClick={() => void handleDeleteTokens([account.access_token])}
+                        disabled={isDeleting}
+                      >
+                        <Trash2 className="size-4" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {!isLoading && currentRows.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-3 px-6 py-14 text-center">
+                  <div className="rounded-xl bg-stone-100 p-3 text-stone-500">
+                    <Search className="size-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-stone-700">没有匹配的账户</p>
+                    <p className="text-sm text-stone-500">调整筛选条件或搜索关键字后重试。</p>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="hidden overflow-x-auto md:block">
               <table className="w-full min-w-[920px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
@@ -769,8 +876,8 @@ function AccountsPageContent() {
               ) : null}
             </div>
 
-            <div className="border-t border-stone-100 px-4 py-4">
-              <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
+            <div className="border-t border-stone-100 px-3 py-3 sm:px-4 sm:py-4">
+              <div className="hide-scrollbar flex items-center gap-2 overflow-x-auto whitespace-nowrap sm:justify-center sm:gap-3">
                 <div className="shrink-0 text-sm text-stone-500">
                 显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
                 {Math.min(startIndex + Number(pageSize), filteredAccounts.length)} 条，共{" "}
