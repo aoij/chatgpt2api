@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import queue
 import threading
 import time
 from collections.abc import Callable
@@ -19,6 +21,8 @@ TASK_STATUS_SUCCESS = "success"
 TASK_STATUS_ERROR = "error"
 TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
+DEFAULT_IMAGE_TASK_WORKERS = 4
+DEFAULT_CLEANUP_INTERVAL_SECONDS = 600
 
 
 def _now_iso() -> str:
@@ -41,6 +45,14 @@ def _timestamp(value: object) -> float:
 
 def _clean(value: object, default: str = "") -> str:
     return str(value or default).strip()
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(str(os.getenv(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, minimum), maximum)
 
 
 def _owner_id(identity: dict[str, object]) -> str:
@@ -93,6 +105,14 @@ class ImageTaskService:
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._queue: queue.Queue[tuple[str, str, dict[str, Any]]] = queue.Queue()
+        self._worker_count = _env_int(
+            "CHATGPT2API_IMAGE_TASK_WORKERS",
+            DEFAULT_IMAGE_TASK_WORKERS,
+            minimum=1,
+            maximum=16,
+        )
+        self._last_cleanup_at = 0.0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
@@ -100,6 +120,7 @@ class ImageTaskService:
             changed = self._cleanup_locked() or changed
             if changed:
                 self._save_locked()
+        self._start_workers()
 
     def submit_generation(
         self,
@@ -149,7 +170,7 @@ class ImageTaskService:
         owner = _owner_id(identity)
         requested_ids = [_clean(task_id) for task_id in task_ids if _clean(task_id)]
         with self._lock:
-            if self._cleanup_locked():
+            if self._cleanup_if_due_locked():
                 self._save_locked()
             items = []
             missing_ids = []
@@ -186,7 +207,7 @@ class ImageTaskService:
         should_start = False
         reserved_quota = 0
         with self._lock:
-            cleaned = self._cleanup_locked()
+            cleaned = self._cleanup_if_due_locked()
             task = self._tasks.get(key)
             if task is not None:
                 if cleaned:
@@ -214,15 +235,27 @@ class ImageTaskService:
             should_start = True
 
         if should_start:
+            self._queue.put((key, mode, payload))
+        return _public_task(task)
+
+    def _start_workers(self) -> None:
+        for index in range(self._worker_count):
             thread = threading.Thread(
-                target=self._run_task,
-                args=(key, mode, payload),
-                name=f"image-task-{task_id[:16]}",
+                target=self._worker,
+                name=f"image-task-worker-{index + 1}",
                 daemon=True,
             )
             thread.start()
-        return _public_task(task)
 
+    def _worker(self) -> None:
+        while True:
+            key, mode, payload = self._queue.get()
+            try:
+                self._run_task(key, mode, payload)
+            except Exception as exc:
+                print(f"[image-task-worker] unexpected error key={key}: {exc}")
+            finally:
+                self._queue.task_done()
 
     def _log_task_call(self, key: str, *, started: float, status: str, result: object = None, error: str = "") -> None:
         task = self._tasks.get(key, {})
@@ -338,7 +371,10 @@ class ImageTaskService:
     def _save_locked(self) -> None:
         items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps({"tasks": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_path.write_text(
+            json.dumps({"tasks": items}, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
         tmp_path.replace(self.path)
 
     def _recover_unfinished_locked(self) -> bool:
@@ -369,6 +405,13 @@ class ImageTaskService:
         for key in removed_keys:
             self._tasks.pop(key, None)
         return bool(removed_keys)
+
+    def _cleanup_if_due_locked(self) -> bool:
+        now = time.time()
+        if now - self._last_cleanup_at < DEFAULT_CLEANUP_INTERVAL_SECONDS:
+            return False
+        self._last_cleanup_at = now
+        return self._cleanup_locked()
 
 
 image_task_service = ImageTaskService(DATA_DIR / "image_tasks.json")

@@ -152,8 +152,10 @@ class ImageConversationService:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
+        self._data: dict[str, list[dict[str, Any]]] = self._load_from_disk()
+        self._dirty = False
 
-    def _load_locked(self) -> dict[str, list[dict[str, Any]]]:
+    def _load_from_disk(self) -> dict[str, list[dict[str, Any]]]:
         if not self.path.exists():
             return {}
         try:
@@ -171,10 +173,17 @@ class ImageConversationService:
             result[_clean(owner, "anonymous")] = _sort_conversations(normalized)[:MAX_CONVERSATIONS_PER_OWNER]
         return result
 
-    def _save_locked(self, data: dict[str, list[dict[str, Any]]]) -> None:
+    def _load_locked(self) -> dict[str, list[dict[str, Any]]]:
+        return self._data
+
+    def _save_locked(self) -> None:
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps({"owners": data}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        tmp_path.write_text(
+            json.dumps({"owners": self._data}, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
         tmp_path.replace(self.path)
+        self._dirty = False
 
     def list(self, identity: dict[str, object]) -> list[dict[str, Any]]:
         owner = _owner_key(identity)
@@ -187,14 +196,14 @@ class ImageConversationService:
             return self.list(identity)
         owner = _owner_key(identity)
         with self._lock:
-            data = self._load_locked()
-            items = data.get(owner, [])
+            items = self._data.get(owner, [])
             by_id = {item["id"]: item for item in items}
             current = by_id.get(normalized["id"])
             by_id[normalized["id"]] = _pick_latest(current, normalized) if current else normalized
-            data[owner] = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
-            self._save_locked(data)
-            return list(data[owner])
+            self._data[owner] = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
+            self._dirty = True
+            self._save_locked()
+            return list(self._data[owner])
 
     def save_many(self, identity: dict[str, object], conversations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         owner = _owner_key(identity)
@@ -204,30 +213,30 @@ class ImageConversationService:
             if item is not None
         ]
         with self._lock:
-            data = self._load_locked()
-            by_id = {item["id"]: item for item in data.get(owner, [])}
+            by_id = {item["id"]: item for item in self._data.get(owner, [])}
             for conversation in normalized_items:
                 current = by_id.get(conversation["id"])
                 by_id[conversation["id"]] = _pick_latest(current, conversation) if current else conversation
-            data[owner] = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
-            self._save_locked(data)
-            return list(data[owner])
+            self._data[owner] = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
+            self._dirty = True
+            self._save_locked()
+            return list(self._data[owner])
 
     def delete(self, identity: dict[str, object], conversation_id: str) -> list[dict[str, Any]]:
         owner = _owner_key(identity)
         normalized_id = _clean(conversation_id)
         with self._lock:
-            data = self._load_locked()
-            data[owner] = [item for item in data.get(owner, []) if item.get("id") != normalized_id]
-            self._save_locked(data)
-            return list(data[owner])
+            self._data[owner] = [item for item in self._data.get(owner, []) if item.get("id") != normalized_id]
+            self._dirty = True
+            self._save_locked()
+            return list(self._data[owner])
 
     def clear(self, identity: dict[str, object]) -> list[dict[str, Any]]:
         owner = _owner_key(identity)
         with self._lock:
-            data = self._load_locked()
-            data[owner] = []
-            self._save_locked(data)
+            self._data[owner] = []
+            self._dirty = True
+            self._save_locked()
             return []
 
 

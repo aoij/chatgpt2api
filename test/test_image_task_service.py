@@ -144,6 +144,34 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
 
+    def test_tasks_run_with_worker_pool(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            starts: list[float] = []
+
+            def handler(_payload):
+                starts.append(time.time())
+                time.sleep(0.25)
+                return {"data": [{"url": "http://example.test/image.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            started = time.time()
+            for index in range(4):
+                service.submit_generation(
+                    OWNER,
+                    client_task_id=f"parallel-{index}",
+                    prompt="cat",
+                    model="gpt-image-2",
+                    size=None,
+                    base_url="http://local.test",
+                )
+
+            for index in range(4):
+                wait_for_task(service, OWNER, f"parallel-{index}", "success", timeout=2.0)
+
+            elapsed = time.time() - started
+            self.assertLess(elapsed, 0.8)
+            self.assertEqual(len(starts), 4)
+
 
 if __name__ == "__main__":
     unittest.main()
