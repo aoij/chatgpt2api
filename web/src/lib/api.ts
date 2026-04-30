@@ -131,6 +131,47 @@ export type LoginResponse = {
   key?: string;
 };
 
+export type RechargePayType = "wxpay" | "alipay";
+export type RechargeStatus = "pending" | "paid" | "issued" | "failed";
+
+export type RechargeOption = {
+  amount: number;
+  money: string;
+  quota: number;
+};
+
+export type RechargePayTypeOption = {
+  type: RechargePayType;
+  label: string;
+};
+
+export type RechargeOptionsResponse = {
+  enabled: boolean;
+  amounts: RechargeOption[];
+  pay_types: RechargePayTypeOption[];
+  notice: string[];
+};
+
+export type RechargeOrder = {
+  out_trade_no: string;
+  amount: string;
+  quota: number;
+  pay_type: RechargePayType;
+  pay_type_label: string;
+  token_name: string;
+  status: RechargeStatus;
+  created_at?: string | null;
+  paid_at?: string | null;
+  issued_at?: string | null;
+  login_url?: string | null;
+  link_token?: string | null;
+  auth_key_id?: string | null;
+};
+
+export type RechargeOrderCreateResponse = RechargeOrder & {
+  pay_url: string;
+};
+
 export type UserKey = {
   id: string;
   name: string;
@@ -212,6 +253,24 @@ export type PublicConfig = {
 
 export async function fetchPublicConfig() {
   return httpRequest<PublicConfig>("/api/public/config", { redirectOnUnauthorized: false });
+}
+
+export async function fetchRechargeOptions() {
+  return httpRequest<RechargeOptionsResponse>("/api/recharge/options", { redirectOnUnauthorized: false });
+}
+
+export async function createRechargeOrder(body: { amount: number; pay_type: RechargePayType; token_name: string }) {
+  return httpRequest<RechargeOrderCreateResponse>("/api/recharge/orders", {
+    method: "POST",
+    body,
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function fetchRechargeOrder(outTradeNo: string) {
+  return httpRequest<RechargeOrder>(`/api/recharge/orders/${encodeURIComponent(outTradeNo)}`, {
+    redirectOnUnauthorized: false,
+  });
 }
 
 export async function fetchCurrentUser() {
