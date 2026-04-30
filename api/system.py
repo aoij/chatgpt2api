@@ -4,7 +4,13 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict
 
-from api.support import require_admin, require_identity, resolve_image_base_url
+from api.support import (
+    authenticate_admin_password,
+    create_admin_session_token,
+    require_admin,
+    require_identity,
+    resolve_image_base_url,
+)
 from services.auth_service import auth_service
 from services.config import config
 from services.image_service import add_log_image_thumbnails, delete_images, list_images
@@ -27,13 +33,25 @@ class ImageDeleteRequest(BaseModel):
     all_matching: bool = False
 
 
+class LoginRequest(BaseModel):
+    username: str = ""
+    password: str = ""
+
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
     @router.post("/auth/login")
-    async def login(authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        return {
+    async def login(body: LoginRequest | None = None, authorization: str | None = Header(default=None)):
+        session_key = ""
+        if body is not None and (body.username or body.password):
+            identity = authenticate_admin_password(body.username, body.password)
+            if identity is None:
+                raise HTTPException(status_code=401, detail={"error": "username or password is invalid"})
+            session_key = create_admin_session_token(str(identity.get("name") or body.username))
+        else:
+            identity = require_identity(authorization)
+        result = {
             "ok": True,
             "version": app_version,
             "role": identity.get("role"),
@@ -43,6 +61,9 @@ def create_router(app_version: str) -> APIRouter:
             "auth_mode": identity.get("auth_mode", "key"),
             "scope": identity.get("scope", "full"),
         }
+        if session_key:
+            result["key"] = session_key
+        return result
 
     @router.get("/api/auth/me")
     async def get_me(authorization: str | None = Header(default=None)):

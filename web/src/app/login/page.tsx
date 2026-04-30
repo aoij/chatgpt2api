@@ -8,34 +8,53 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { login } from "@/lib/api";
+import { login, loginWithPassword } from "@/lib/api";
 import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
+import { cn } from "@/lib/utils";
 import { getDefaultRouteForSession, setStoredAuthSession, type StoredAuthSession } from "@/store/auth";
+
+type LoginMode = "password" | "key";
 
 export default function LoginPage() {
   const router = useRouter();
+  const [loginMode, setLoginMode] = useState<LoginMode>("password");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [authKey, setAuthKey] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const { isCheckingAuth } = useRedirectIfAuthenticated();
 
   const handleLogin = async () => {
+    const normalizedUsername = username.trim();
+    const normalizedPassword = password.trim();
     const normalizedAuthKey = authKey.trim();
-    if (!normalizedAuthKey) {
-      toast.error("请输入 密钥");
+
+    if (loginMode === "password" && (!normalizedUsername || !normalizedPassword)) {
+      toast.error("请输入账号和密码");
+      return;
+    }
+    if (loginMode === "key" && !normalizedAuthKey) {
+      toast.error("请输入密钥");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const data = await login(normalizedAuthKey);
+      const data = loginMode === "password"
+        ? await loginWithPassword(normalizedUsername, normalizedPassword)
+        : await login(normalizedAuthKey);
+      const sessionKey = data.key || normalizedAuthKey;
+      if (!sessionKey) {
+        throw new Error("登录响应缺少会话凭证");
+      }
       const session: StoredAuthSession = {
-        key: normalizedAuthKey,
+        key: sessionKey,
         role: data.role,
         subjectId: data.subject_id,
         name: data.name,
         quota: data.quota,
-        scope: data.scope === "image" || normalizedAuthKey.startsWith("lk-") ? "image" : "full",
-        authMode: data.auth_mode || (normalizedAuthKey.startsWith("lk-") ? "link" : "key"),
+        scope: data.scope === "image" || sessionKey.startsWith("lk-") ? "image" : "full",
+        authMode: data.auth_mode || (loginMode === "password" ? "password" : sessionKey.startsWith("lk-") ? "link" : "key"),
       };
       await setStoredAuthSession(session);
       router.replace(getDefaultRouteForSession(session));
@@ -65,28 +84,89 @@ export default function LoginPage() {
             </div>
             <div className="space-y-2">
               <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="text-sm leading-6 text-stone-500">输入密钥后继续使用账号管理和图片生成功能。</p>
+              <p className="text-sm leading-6 text-stone-500">管理员可使用账号密码登录；普通用户仍可使用密钥或免登录链接。</p>
             </div>
           </div>
 
-          <div className="space-y-3">
-            <label htmlFor="auth-key" className="block text-sm font-medium text-stone-700">
-              密钥
-            </label>
-            <Input
-              id="auth-key"
-              type="password"
-              value={authKey}
-              onChange={(event) => setAuthKey(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  void handleLogin();
-                }
-              }}
-              placeholder="请输入密钥"
-              className="h-13 rounded-2xl border-stone-200 bg-white px-4"
-            />
+          <div className="grid grid-cols-2 gap-2 rounded-2xl bg-stone-100 p-1">
+            {([
+              ["password", "账号密码"],
+              ["key", "密钥登录"],
+            ] as const).map(([mode, label]) => (
+              <button
+                key={mode}
+                type="button"
+                className={cn(
+                  "h-10 rounded-xl text-sm font-medium transition",
+                  loginMode === mode ? "bg-white text-stone-950 shadow-sm" : "text-stone-500 hover:text-stone-800",
+                )}
+                onClick={() => setLoginMode(mode)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+
+          {loginMode === "password" ? (
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label htmlFor="username" className="block text-sm font-medium text-stone-700">
+                  账号
+                </label>
+                <Input
+                  id="username"
+                  autoComplete="username"
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      void handleLogin();
+                    }
+                  }}
+                  placeholder="请输入管理员账号"
+                  className="h-13 rounded-2xl border-stone-200 bg-white px-4"
+                />
+              </div>
+              <div className="space-y-2">
+                <label htmlFor="password" className="block text-sm font-medium text-stone-700">
+                  密码
+                </label>
+                <Input
+                  id="password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      void handleLogin();
+                    }
+                  }}
+                  placeholder="请输入管理员密码"
+                  className="h-13 rounded-2xl border-stone-200 bg-white px-4"
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <label htmlFor="auth-key" className="block text-sm font-medium text-stone-700">
+                密钥
+              </label>
+              <Input
+                id="auth-key"
+                type="password"
+                value={authKey}
+                onChange={(event) => setAuthKey(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void handleLogin();
+                  }
+                }}
+                placeholder="请输入管理员密钥或用户密钥"
+                className="h-13 rounded-2xl border-stone-200 bg-white px-4"
+              />
+            </div>
+          )}
 
           <Button
             className="h-13 w-full rounded-2xl bg-stone-950 text-white hover:bg-stone-800"

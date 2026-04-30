@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 from pathlib import Path
 from threading import Event, Thread
+import time
 
 from fastapi import HTTPException, Request
 
@@ -11,6 +16,8 @@ from services.config import config
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 WEB_DIST_DIR = BASE_DIR / "web_dist"
+ADMIN_SESSION_PREFIX = "adm-"
+ADMIN_SESSION_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def extract_bearer_token(authorization: str | None) -> str:
@@ -27,9 +34,85 @@ def _legacy_admin_identity(token: str) -> dict[str, object] | None:
     return None
 
 
+def _admin_session_secret() -> str:
+    return f"{config.auth_key}:{config.admin_username}:{config.admin_password}"
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+
+
+def authenticate_admin_password(username: str, password: str) -> dict[str, object] | None:
+    expected_username = str(config.admin_username or "").strip()
+    expected_password = str(config.admin_password or "").strip()
+    candidate_username = str(username or "").strip()
+    candidate_password = str(password or "").strip()
+    if not expected_username or not expected_password:
+        return None
+    if not hmac.compare_digest(candidate_username, expected_username):
+        return None
+    if not hmac.compare_digest(candidate_password, expected_password):
+        return None
+    return {"id": "admin", "name": expected_username, "role": "admin", "auth_mode": "password", "scope": "full"}
+
+
+def create_admin_session_token(username: str) -> str:
+    payload = {
+        "u": str(username or "").strip(),
+        "exp": int(time.time()) + ADMIN_SESSION_TTL_SECONDS,
+    }
+    payload_text = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(
+        _admin_session_secret().encode("utf-8"),
+        payload_text.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return f"{ADMIN_SESSION_PREFIX}{payload_text}.{_b64url_encode(signature)}"
+
+
+def _admin_session_identity(token: str) -> dict[str, object] | None:
+    candidate = str(token or "").strip()
+    if not candidate.startswith(ADMIN_SESSION_PREFIX):
+        return None
+    expected_username = str(config.admin_username or "").strip()
+    expected_password = str(config.admin_password or "").strip()
+    if not expected_username or not expected_password:
+        return None
+    raw = candidate[len(ADMIN_SESSION_PREFIX):]
+    payload_text, separator, signature_text = raw.partition(".")
+    if not separator or not payload_text or not signature_text:
+        return None
+    expected_signature = _b64url_encode(hmac.new(
+        _admin_session_secret().encode("utf-8"),
+        payload_text.encode("ascii"),
+        hashlib.sha256,
+    ).digest())
+    if not hmac.compare_digest(signature_text, expected_signature):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(payload_text).decode("utf-8"))
+    except Exception:
+        return None
+    username = str(payload.get("u") or "").strip() if isinstance(payload, dict) else ""
+    try:
+        expires_at = int(payload.get("exp") or 0) if isinstance(payload, dict) else 0
+    except (TypeError, ValueError):
+        expires_at = 0
+    if expires_at < int(time.time()):
+        return None
+    if not hmac.compare_digest(username, expected_username):
+        return None
+    return {"id": "admin", "name": expected_username, "role": "admin", "auth_mode": "password_session", "scope": "full"}
+
+
 def require_identity(authorization: str | None) -> dict[str, object]:
     token = extract_bearer_token(authorization)
-    identity = _legacy_admin_identity(token) or auth_service.authenticate(token)
+    identity = _legacy_admin_identity(token) or _admin_session_identity(token) or auth_service.authenticate(token)
     if identity is None:
         raise HTTPException(status_code=401, detail={"error": "authorization is invalid"})
     return identity

@@ -100,6 +100,22 @@ class ConfigStore:
         return _normalize_auth_key(os.getenv("CHATGPT2API_AUTH_KEY") or self.data.get("auth-key"))
 
     @property
+    def admin_username(self) -> str:
+        return str(
+            os.getenv("CHATGPT2API_ADMIN_USERNAME")
+            or self.data.get("admin_username")
+            or ""
+        ).strip()
+
+    @property
+    def admin_password(self) -> str:
+        return str(
+            os.getenv("CHATGPT2API_ADMIN_PASSWORD")
+            or self.data.get("admin_password")
+            or ""
+        ).strip()
+
+    @property
     def accounts_file(self) -> Path:
         return DATA_DIR / "accounts.json"
 
@@ -215,6 +231,7 @@ class ConfigStore:
         data["image_page_title"] = self.image_page_title
         data["image_page_subtitle"] = self.image_page_subtitle
         data.pop("auth-key", None)
+        data.pop("admin_password", None)
         return data
 
     def get_proxy_settings(self) -> str:

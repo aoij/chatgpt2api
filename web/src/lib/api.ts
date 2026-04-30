@@ -116,6 +116,7 @@ export type LoginResponse = {
   quota?: number | null;
   auth_mode?: string;
   scope?: "full" | "image";
+  key?: string;
 };
 
 export type UserKey = {
@@ -174,6 +175,17 @@ export async function login(authKey: string) {
     body: {},
     headers: {
       Authorization: `Bearer ${normalizedAuthKey}`,
+    },
+    redirectOnUnauthorized: false,
+  });
+}
+
+export async function loginWithPassword(username: string, password: string) {
+  return httpRequest<LoginResponse>("/auth/login", {
+    method: "POST",
+    body: {
+      username: String(username || "").trim(),
+      password: String(password || "").trim(),
     },
     redirectOnUnauthorized: false,
   });
