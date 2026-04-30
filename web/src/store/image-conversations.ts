@@ -59,7 +59,15 @@ const imageConversationStorage = localforage.createInstance({
 });
 
 const IMAGE_CONVERSATIONS_KEY = "items";
+const REMOTE_CACHE_TTL_MS = 12_000;
 let imageConversationWriteQueue: Promise<void> = Promise.resolve();
+let remoteConversationCache:
+  | {
+      subjectKey: string;
+      fetchedAt: number;
+      items: ImageConversation[];
+    }
+  | null = null;
 
 async function getScopedStorageKey() {
   const session = await getStoredAuthSession();
@@ -68,6 +76,10 @@ async function getScopedStorageKey() {
     return `${IMAGE_CONVERSATIONS_KEY}:${subjectId}`;
   }
   return IMAGE_CONVERSATIONS_KEY;
+}
+
+async function getScopedSubjectKey() {
+  return getScopedStorageKey();
 }
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
@@ -245,12 +257,26 @@ function mergeConversationLists(current: ImageConversation[], incoming: ImageCon
 }
 
 async function fetchRemoteImageConversations(): Promise<ImageConversation[] | null> {
+  const subjectKey = await getScopedSubjectKey();
+  if (
+    remoteConversationCache &&
+    remoteConversationCache.subjectKey === subjectKey &&
+    Date.now() - remoteConversationCache.fetchedAt < REMOTE_CACHE_TTL_MS
+  ) {
+    return remoteConversationCache.items;
+  }
   try {
     const data = await httpRequest<{ items: Array<ImageConversation & Record<string, unknown>> }>(
       "/api/image-conversations",
       { redirectOnUnauthorized: false },
     );
-    return sortImageConversations((data.items || []).map(normalizeConversation));
+    const items = sortImageConversations((data.items || []).map(normalizeConversation));
+    remoteConversationCache = {
+      subjectKey,
+      fetchedAt: Date.now(),
+      items,
+    };
+    return items;
   } catch {
     return null;
   }
@@ -258,11 +284,16 @@ async function fetchRemoteImageConversations(): Promise<ImageConversation[] | nu
 
 async function saveRemoteImageConversations(conversations: ImageConversation[]): Promise<void> {
   try {
-    await httpRequest<{ items: ImageConversation[] }>("/api/image-conversations", {
+    const data = await httpRequest<{ items: ImageConversation[] }>("/api/image-conversations", {
       method: "PUT",
       body: { items: conversations.map(normalizeConversation) },
       redirectOnUnauthorized: false,
     });
+    remoteConversationCache = {
+      subjectKey: await getScopedSubjectKey(),
+      fetchedAt: Date.now(),
+      items: sortImageConversations((data.items || conversations).map(normalizeConversation)),
+    };
   } catch {
     // 本地缓存兜底，服务端临时不可用时不影响画图。
   }
@@ -271,11 +302,16 @@ async function saveRemoteImageConversations(conversations: ImageConversation[]):
 async function saveRemoteImageConversation(conversation: ImageConversation): Promise<void> {
   const normalized = normalizeConversation(conversation);
   try {
-    await httpRequest<{ items: ImageConversation[] }>(`/api/image-conversations/${encodeURIComponent(normalized.id)}`, {
+    const data = await httpRequest<{ items: ImageConversation[] }>(`/api/image-conversations/${encodeURIComponent(normalized.id)}`, {
       method: "PUT",
       body: { conversation: normalized },
       redirectOnUnauthorized: false,
     });
+    remoteConversationCache = {
+      subjectKey: await getScopedSubjectKey(),
+      fetchedAt: Date.now(),
+      items: sortImageConversations((data.items || []).map(normalizeConversation)),
+    };
   } catch {
     // 本地缓存兜底，服务端临时不可用时不影响画图。
   }
@@ -290,9 +326,6 @@ export async function listImageConversations(): Promise<ImageConversation[]> {
 
   const mergedItems = mergeConversationLists(remoteItems, localItems);
   await writeStoredImageConversations(mergedItems);
-  if (localItems.length > 0) {
-    await saveRemoteImageConversations(mergedItems);
-  }
   return mergedItems;
 }
 
@@ -301,7 +334,8 @@ export async function saveImageConversations(conversations: ImageConversation[])
     const items = await readStoredImageConversations();
     const nextItems = mergeConversationLists(items, conversations);
     await writeStoredImageConversations(nextItems);
-    await saveRemoteImageConversations(nextItems);
+    const changedItems = conversations.map(normalizeConversation);
+    await Promise.all(changedItems.map((conversation) => saveRemoteImageConversation(conversation)));
   });
 }
 
@@ -325,10 +359,15 @@ export async function deleteImageConversation(id: string): Promise<void> {
     const items = await readStoredImageConversations();
     await writeStoredImageConversations(items.filter((item) => item.id !== id));
     try {
-      await httpRequest<{ items: ImageConversation[] }>(`/api/image-conversations/${encodeURIComponent(id)}`, {
+      const data = await httpRequest<{ items: ImageConversation[] }>(`/api/image-conversations/${encodeURIComponent(id)}`, {
         method: "DELETE",
         redirectOnUnauthorized: false,
       });
+      remoteConversationCache = {
+        subjectKey: await getScopedSubjectKey(),
+        fetchedAt: Date.now(),
+        items: sortImageConversations((data.items || []).map(normalizeConversation)),
+      };
     } catch {
       // 本地缓存兜底。
     }
@@ -339,10 +378,15 @@ export async function clearImageConversations(): Promise<void> {
   await queueImageConversationWrite(async () => {
     await imageConversationStorage.removeItem(await getScopedStorageKey());
     try {
-      await httpRequest<{ items: ImageConversation[] }>("/api/image-conversations", {
+      const data = await httpRequest<{ items: ImageConversation[] }>("/api/image-conversations", {
         method: "DELETE",
         redirectOnUnauthorized: false,
       });
+      remoteConversationCache = {
+        subjectKey: await getScopedSubjectKey(),
+        fetchedAt: Date.now(),
+        items: sortImageConversations((data.items || []).map(normalizeConversation)),
+      };
     } catch {
       // 本地缓存兜底。
     }

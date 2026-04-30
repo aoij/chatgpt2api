@@ -30,6 +30,7 @@ AMOUNT_QUOTA_MAP: dict[Decimal, int] = {
 ORDER_STATUSES = {"pending", "paid", "issued", "failed", "expired"}
 DEFAULT_ORDER_EXPIRE_MINUTES = 5
 DEFAULT_AUTO_CHECK_INTERVAL_SECONDS = 60
+DEFAULT_ORDER_GRACE_MINUTES = 30
 
 
 def _now_iso() -> str:
@@ -154,6 +155,15 @@ class RechargeService:
             maximum=3600,
         )
 
+    @property
+    def order_grace_minutes(self) -> int:
+        return _env_int(
+            "CHATGPT2API_RECHARGE_ORDER_GRACE_MINUTES",
+            DEFAULT_ORDER_GRACE_MINUTES,
+            minimum=0,
+            maximum=1440,
+        )
+
     def public_base_url(self, fallback: str = "") -> str:
         value = str(
             os.getenv("CHATGPT2API_PUBLIC_BASE_URL")
@@ -172,6 +182,7 @@ class RechargeService:
             "enabled": self.is_configured(),
             "order_expire_minutes": self.order_expire_minutes,
             "auto_check_interval_seconds": self.auto_check_interval_seconds,
+            "order_grace_minutes": self.order_grace_minutes,
             "amounts": [
                 {"amount": int(amount), "money": _money_text(amount), "quota": quota}
                 for amount, quota in sorted(AMOUNT_QUOTA_MAP.items())
@@ -182,7 +193,7 @@ class RechargeService:
             ],
             "notice": [
                 "充值金额只支持 1 元、5 元、10 元，分别对应 30 / 150 / 300 张图片额度。",
-                f"订单请在 {self.order_expire_minutes} 分钟内完成支付，超时后需要重新下单。",
+                f"订单请在 {self.order_expire_minutes} 分钟内完成支付；如果支付确认稍有延迟，系统仍会继续尝试同步。",
                 "支付成功后系统每 1 分钟自动检查一次订单，可能会有短暂延迟，请支付后回到本页耐心等待。",
                 "如果已完成支付，可点击「我已付款，立即检查」主动查询到账状态。",
                 "系统确认到账后会自动创建令牌，并回显一键登录画图链接。",
@@ -438,6 +449,17 @@ class RechargeService:
                 order["expire_reason"] = reason
             self._save_locked(items)
 
+    def _expires_at_for_order(self, order: dict[str, Any]) -> datetime:
+        expires_at = _parse_datetime(order.get("expires_at"))
+        if expires_at is not None:
+            return expires_at
+        created_at = _parse_datetime(order.get("created_at")) or datetime.now(timezone.utc)
+        return created_at + timedelta(minutes=self.order_expire_minutes)
+
+    def _is_in_grace_window(self, order: dict[str, Any]) -> bool:
+        expires_at = self._expires_at_for_order(order)
+        return datetime.now(timezone.utc) <= expires_at + timedelta(minutes=self.order_grace_minutes)
+
     def refresh_order(self, out_trade_no: str) -> dict[str, Any] | None:
         """立即向易支付查询单个订单，并在已到账时同步发放令牌。
 
@@ -456,7 +478,9 @@ class RechargeService:
 
         if order.get("status") == "issued" and order.get("login_url"):
             return self._public_order(order)
-        if order.get("status") in {"failed", "expired"}:
+        if order.get("status") == "failed":
+            return self.get_order(normalized)
+        if order.get("status") == "expired" and not self._is_in_grace_window(order):
             return self.get_order(normalized)
 
         remote_order = self._query_epay_order(normalized)
@@ -464,11 +488,8 @@ class RechargeService:
         if remote_status == 1 and remote_order is not None:
             return self.handle_paid_notify(self._build_paid_params(order, remote_order))
 
-        expires_at = _parse_datetime(order.get("expires_at"))
-        if expires_at is None:
-            created_at = _parse_datetime(order.get("created_at")) or datetime.now(timezone.utc)
-            expires_at = created_at + timedelta(minutes=self.order_expire_minutes)
-        if remote_status in {2, 3} or datetime.now(timezone.utc) > expires_at:
+        expires_at = self._expires_at_for_order(order)
+        if remote_status in {2, 3} or datetime.now(timezone.utc) > expires_at + timedelta(minutes=self.order_grace_minutes):
             self._mark_expired(normalized, "remote_expired" if remote_status in {2, 3} else "local_expired")
 
         return self.get_order(normalized)
@@ -483,7 +504,8 @@ class RechargeService:
             pending_orders = [
                 dict(item)
                 for item in self._load_locked()
-                if item.get("status") == "pending" and str(item.get("out_trade_no") or "").strip()
+                if item.get("status") in {"pending", "expired"} and str(item.get("out_trade_no") or "").strip()
+                and (item.get("status") == "pending" or self._is_in_grace_window(item))
             ][:limit]
 
         result = {"checked": 0, "issued": 0, "expired": 0, "failed": 0}
@@ -500,11 +522,8 @@ class RechargeService:
                     self.handle_paid_notify(self._build_paid_params(order, remote_order))
                     result["issued"] += 1
                     continue
-                expires_at = _parse_datetime(order.get("expires_at"))
-                if expires_at is None:
-                    created_at = _parse_datetime(order.get("created_at")) or now
-                    expires_at = created_at + timedelta(minutes=self.order_expire_minutes)
-                if remote_status in {2, 3} or now > expires_at:
+                expires_at = self._expires_at_for_order(order)
+                if remote_status in {2, 3} or now > expires_at + timedelta(minutes=self.order_grace_minutes):
                     self._mark_expired(out_trade_no, "remote_expired" if remote_status in {2, 3} else "local_expired")
                     result["expired"] += 1
             except Exception as exc:

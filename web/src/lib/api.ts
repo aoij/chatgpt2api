@@ -149,6 +149,7 @@ export type RechargeOptionsResponse = {
   enabled: boolean;
   order_expire_minutes?: number;
   auto_check_interval_seconds?: number;
+  order_grace_minutes?: number;
   amounts: RechargeOption[];
   pay_types: RechargePayTypeOption[];
   notice: string[];

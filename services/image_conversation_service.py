@@ -17,11 +17,11 @@ from sqlalchemy.pool import NullPool, StaticPool
 from services.config import DATA_DIR
 from services.storage.database_storage import Base, ImageConversationModel
 
-MAX_CONVERSATIONS_PER_OWNER = 200
-MAX_TURNS_PER_CONVERSATION = 200
+MAX_CONVERSATIONS_PER_OWNER = 80
+MAX_TURNS_PER_CONVERSATION = 80
 MAX_IMAGES_PER_TURN = 20
 MAX_REFERENCE_IMAGES_PER_TURN = 8
-DB_QUERY_LIMIT_PER_OWNER = MAX_CONVERSATIONS_PER_OWNER * 5
+DB_QUERY_LIMIT_PER_OWNER = MAX_CONVERSATIONS_PER_OWNER * 2
 
 
 def _now_iso() -> str:

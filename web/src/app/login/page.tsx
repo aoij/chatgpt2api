@@ -19,7 +19,6 @@ import { Input } from "@/components/ui/input";
 import {
   createRechargeOrder,
   fetchRechargeOptions,
-  fetchRechargeOrder,
   login,
   loginWithPassword,
   refreshRechargeOrder,
@@ -47,7 +46,7 @@ const FALLBACK_PAY_TYPES: RechargePayTypeOption[] = [
 
 const FALLBACK_NOTICE = [
   "充值金额只支持 1 元、5 元、10 元，分别对应 30 / 150 / 300 张图片额度。",
-  "订单请在 5 分钟内完成支付，超时后需要重新下单。",
+  "订单请在 5 分钟内完成支付；支付确认可能有短暂延迟，请勿重复支付。",
   "支付成功后系统每 1 分钟自动检查一次订单，可能会有短暂延迟，请支付后回到本页耐心等待。",
   "如果已完成支付，可点击「我已付款，立即检查」主动查询到账状态。",
   "系统确认到账后会自动创建令牌，并回显一键登录画图链接。",
@@ -98,6 +97,17 @@ function readStoredRechargePayUrl(outTradeNo: string) {
   }
 }
 
+function isRechargeOrderWithinGrace(order: RechargeOrder | null | undefined, graceMinutes: number) {
+  if (!order?.expires_at) {
+    return true;
+  }
+  const expiresAt = new Date(order.expires_at).getTime();
+  if (!Number.isFinite(expiresAt)) {
+    return true;
+  }
+  return Date.now() <= expiresAt + Math.max(0, graceMinutes) * 60 * 1000;
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [loginMode, setLoginMode] = useState<LoginMode>("password");
@@ -112,6 +122,7 @@ export default function LoginPage() {
   const [notice, setNotice] = useState<string[]>(FALLBACK_NOTICE);
   const [orderExpireMinutes, setOrderExpireMinutes] = useState(5);
   const [autoCheckIntervalSeconds, setAutoCheckIntervalSeconds] = useState(60);
+  const [orderGraceMinutes, setOrderGraceMinutes] = useState(30);
   const [selectedAmount, setSelectedAmount] = useState(1);
   const [selectedPayType, setSelectedPayType] = useState<RechargePayType>("wxpay");
   const [tokenName, setTokenName] = useState("");
@@ -129,6 +140,11 @@ export default function LoginPage() {
     [amounts, selectedAmount],
   );
 
+  const rechargeOrderInGrace = useMemo(
+    () => isRechargeOrderWithinGrace(rechargeOrder, orderGraceMinutes),
+    [orderGraceMinutes, rechargeOrder],
+  );
+
   const stopPolling = useCallback(() => {
     if (pollingRef.current) {
       window.clearInterval(pollingRef.current);
@@ -144,14 +160,20 @@ export default function LoginPage() {
 
       const tick = async () => {
         try {
-          const order = await fetchRechargeOrder(outTradeNo);
+          const order = await refreshRechargeOrder(outTradeNo);
           setRechargeOrder(order);
           if (order.status === "issued" && order.login_url) {
             stopPolling();
             toast.success("支付成功，令牌已创建");
           } else if (order.status === "expired") {
-            stopPolling();
-            toast.error("订单已超时，请重新下单");
+            if (isRechargeOrderWithinGrace(order, orderGraceMinutes)) {
+              setRechargeError("支付确认可能有延迟，系统仍在继续同步，请不要重复支付。");
+            } else {
+              stopPolling();
+              toast.error("订单确认超时；如果已付款请联系 QQ 909256107 处理");
+            }
+          } else {
+            setRechargeError("");
           }
         } catch (error) {
           setRechargeError(error instanceof Error ? error.message : "查询订单失败");
@@ -162,7 +184,7 @@ export default function LoginPage() {
       const intervalMs = Math.max(10, autoCheckIntervalSeconds) * 1000;
       pollingRef.current = window.setInterval(() => void tick(), intervalMs);
     },
-    [autoCheckIntervalSeconds, stopPolling],
+    [autoCheckIntervalSeconds, orderGraceMinutes, stopPolling],
   );
 
   useEffect(() => {
@@ -186,6 +208,9 @@ export default function LoginPage() {
         if (typeof data.auto_check_interval_seconds === "number" && data.auto_check_interval_seconds > 0) {
           setAutoCheckIntervalSeconds(data.auto_check_interval_seconds);
         }
+        if (typeof data.order_grace_minutes === "number" && data.order_grace_minutes >= 0) {
+          setOrderGraceMinutes(data.order_grace_minutes);
+        }
       })
       .catch(() => {
         setRechargeEnabled(false);
@@ -202,6 +227,7 @@ export default function LoginPage() {
     }
     setRechargeOpen(true);
     setPayUrl(readStoredRechargePayUrl(outTradeNo));
+    setRechargeError("正在确认支付结果，请稍等；确认可能有 10-60 秒延迟。");
     startPolling(outTradeNo);
   }, [startPolling]);
 
@@ -311,9 +337,18 @@ export default function LoginPage() {
         stopPolling();
         toast.success("支付成功，令牌已创建");
       } else if (order.status === "expired") {
-        stopPolling();
-        toast.error("订单已超时，请重新下单");
+        if (isRechargeOrderWithinGrace(order, orderGraceMinutes)) {
+          setRechargeError("支付确认可能有延迟，系统仍在继续同步，请不要重复支付。");
+          toast.message("确认可能有延迟，系统仍在同步，请稍后查看");
+          if (!pollingRef.current) {
+            startPolling(outTradeNo);
+          }
+        } else {
+          stopPolling();
+          toast.error("订单确认超时；如果已付款请联系 QQ 909256107 处理");
+        }
       } else {
+        setRechargeError("");
         toast.message("暂未查询到到账结果，请稍后再试或等待系统自动确认");
         if (!pollingRef.current) {
           startPolling(outTradeNo);
@@ -458,7 +493,7 @@ export default function LoginPage() {
           <DialogHeader className="gap-2 pr-8">
             <DialogTitle>充值购买画图令牌</DialogTitle>
             <DialogDescription className="leading-6">
-              支持微信、支付宝支付。订单 {orderExpireMinutes} 分钟内有效；支付后可点“我已付款，立即检查”，也会每 {Math.max(1, Math.round(autoCheckIntervalSeconds / 60))} 分钟自动检查一次。
+              支持微信、支付宝支付。订单 {orderExpireMinutes} 分钟内支付；确认可能有延迟，系统会自动检查，也可手动点“我已付款，立即检查”。
             </DialogDescription>
           </DialogHeader>
 
@@ -549,7 +584,9 @@ export default function LoginPage() {
                     {rechargeOrder.status === "issued"
                       ? "已到账"
                       : rechargeOrder.status === "expired"
-                        ? "已超时"
+                        ? rechargeOrderInGrace
+                          ? "延迟确认中"
+                          : "已超时"
                         : isPollingOrder
                           ? "系统自动检查中"
                           : "待支付"}
@@ -562,11 +599,11 @@ export default function LoginPage() {
                 </div>
                 {rechargeOrder.status !== "issued" ? (
                   <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
-                    请在 {orderExpireMinutes} 分钟内完成支付。为避免部分内置浏览器弹出空白页，订单创建后不会自动打开新窗口；请点击下方“打开支付页面”。支付成功后不需要重复下单，回到本页点击“我已付款，立即检查”可马上查询；如果支付平台回调有延迟，也会继续自动检查。
+                    请在 {orderExpireMinutes} 分钟内完成支付。支付确认可能有 10-60 秒延迟，请不要重复付款。付款后回到本页点击“我已付款，立即检查”会立刻触发确认；若确认稍慢，系统会在约 {orderGraceMinutes} 分钟宽限期内继续同步。
                   </div>
                 ) : null}
 
-                {payUrl && rechargeOrder.status !== "issued" && rechargeOrder.status !== "expired" ? (
+                {payUrl && rechargeOrder.status !== "issued" ? (
                   <div className="mt-3 grid gap-2 sm:grid-cols-3">
                     <Button
                       className="h-10 w-full rounded-xl bg-stone-950 text-white hover:bg-stone-800"
