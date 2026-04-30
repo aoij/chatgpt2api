@@ -184,8 +184,10 @@ class RechargeService:
                 "充值金额只支持 1 元、5 元、10 元，分别对应 30 / 150 / 300 张图片额度。",
                 f"订单请在 {self.order_expire_minutes} 分钟内完成支付，超时后需要重新下单。",
                 "支付成功后系统每 1 分钟自动检查一次订单，可能会有短暂延迟，请支付后回到本页耐心等待。",
+                "如果已完成支付，可点击「我已付款，立即检查」主动查询到账状态。",
                 "系统确认到账后会自动创建令牌，并回显一键登录画图链接。",
                 "请正确填写令牌名称，后续画图页面会显示该名称。",
+                f"图片仅保存 {config.image_retention_days} 天，请及时下载；超过后系统会自动删除。",
                 "有疑问可以加 QQ 909256107 联系；需要大量额度或者 API 对接也可以联系。",
             ],
         }
@@ -435,6 +437,41 @@ class RechargeService:
             if reason:
                 order["expire_reason"] = reason
             self._save_locked(items)
+
+    def refresh_order(self, out_trade_no: str) -> dict[str, Any] | None:
+        """立即向易支付查询单个订单，并在已到账时同步发放令牌。
+
+        用于前端“我已付款，立即检查”按钮：不再完全依赖 1 分钟后台轮询，
+        用户支付完成后可立刻触发一次主动查询。
+        """
+        normalized = _clean_text(out_trade_no, max_length=80)
+        if not normalized:
+            return None
+
+        with self._lock:
+            stored_order = self._find_locked(self._load_locked(), normalized)
+            if stored_order is None:
+                return None
+            order = dict(stored_order)
+
+        if order.get("status") == "issued" and order.get("login_url"):
+            return self._public_order(order)
+        if order.get("status") in {"failed", "expired"}:
+            return self.get_order(normalized)
+
+        remote_order = self._query_epay_order(normalized)
+        remote_status = int(remote_order.get("status") or -1) if isinstance(remote_order, dict) else -1
+        if remote_status == 1 and remote_order is not None:
+            return self.handle_paid_notify(self._build_paid_params(order, remote_order))
+
+        expires_at = _parse_datetime(order.get("expires_at"))
+        if expires_at is None:
+            created_at = _parse_datetime(order.get("created_at")) or datetime.now(timezone.utc)
+            expires_at = created_at + timedelta(minutes=self.order_expire_minutes)
+        if remote_status in {2, 3} or datetime.now(timezone.utc) > expires_at:
+            self._mark_expired(normalized, "remote_expired" if remote_status in {2, 3} else "local_expired")
+
+        return self.get_order(normalized)
 
     def sync_pending_orders(self, *, limit: int = 100) -> dict[str, int]:
         """主动查询易支付订单状态。

@@ -277,6 +277,14 @@ export async function fetchRechargeOrder(outTradeNo: string) {
   });
 }
 
+export async function refreshRechargeOrder(outTradeNo: string) {
+  return httpRequest<RechargeOrder>(`/api/recharge/orders/${encodeURIComponent(outTradeNo)}/refresh`, {
+    method: "POST",
+    body: {},
+    redirectOnUnauthorized: false,
+  });
+}
+
 export async function fetchCurrentUser() {
   return httpRequest<{ id: string; name: string; role: AuthRole; enabled: boolean; quota?: number | null; auth_mode?: string; scope?: "full" | "image" }>("/api/auth/me");
 }

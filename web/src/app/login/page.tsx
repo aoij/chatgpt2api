@@ -22,6 +22,7 @@ import {
   fetchRechargeOrder,
   login,
   loginWithPassword,
+  refreshRechargeOrder,
   type RechargeOption,
   type RechargeOrder,
   type RechargePayType,
@@ -48,8 +49,10 @@ const FALLBACK_NOTICE = [
   "充值金额只支持 1 元、5 元、10 元，分别对应 30 / 150 / 300 张图片额度。",
   "订单请在 5 分钟内完成支付，超时后需要重新下单。",
   "支付成功后系统每 1 分钟自动检查一次订单，可能会有短暂延迟，请支付后回到本页耐心等待。",
+  "如果已完成支付，可点击「我已付款，立即检查」主动查询到账状态。",
   "系统确认到账后会自动创建令牌，并回显一键登录画图链接。",
   "请正确填写令牌名称，后续画图页面会显示该名称。",
+  "图片仅保存 10 天，请及时下载；超过 10 天系统会自动删除。",
   "有疑问可以加 QQ 909256107 联系；需要大量额度或者 API 对接也可以联系。",
 ];
 
@@ -87,6 +90,7 @@ export default function LoginPage() {
   const [rechargeOrder, setRechargeOrder] = useState<RechargeOrder | null>(null);
   const [payUrl, setPayUrl] = useState("");
   const [isCreatingOrder, setIsCreatingOrder] = useState(false);
+  const [isRefreshingOrder, setIsRefreshingOrder] = useState(false);
   const [isPollingOrder, setIsPollingOrder] = useState(false);
   const [rechargeError, setRechargeError] = useState("");
   const pollingRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
@@ -258,6 +262,39 @@ export default function LoginPage() {
     }
   };
 
+  const handleRefreshRechargeOrder = async () => {
+    const outTradeNo = String(rechargeOrder?.out_trade_no || "").trim();
+    if (!outTradeNo) {
+      toast.error("请先创建支付订单");
+      return;
+    }
+
+    setIsRefreshingOrder(true);
+    setRechargeError("");
+    try {
+      const order = await refreshRechargeOrder(outTradeNo);
+      setRechargeOrder(order);
+      if (order.status === "issued" && order.login_url) {
+        stopPolling();
+        toast.success("支付成功，令牌已创建");
+      } else if (order.status === "expired") {
+        stopPolling();
+        toast.error("订单已超时，请重新下单");
+      } else {
+        toast.message("暂未查询到到账结果，请稍后再试或等待系统自动确认");
+        if (!pollingRef.current) {
+          startPolling(outTradeNo);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "查询支付状态失败";
+      setRechargeError(message);
+      toast.error(message);
+    } finally {
+      setIsRefreshingOrder(false);
+    }
+  };
+
   if (isCheckingAuth) {
     return (
       <div className="grid min-h-[calc(100vh-1rem)] w-full place-items-center px-4 py-6">
@@ -388,7 +425,7 @@ export default function LoginPage() {
           <DialogHeader className="gap-2 pr-8">
             <DialogTitle>充值购买画图令牌</DialogTitle>
             <DialogDescription className="leading-6">
-              支持微信、支付宝支付。订单 {orderExpireMinutes} 分钟内有效；支付后系统每 {Math.max(1, Math.round(autoCheckIntervalSeconds / 60))} 分钟自动检查一次，到账可能会有短暂延迟。
+              支持微信、支付宝支付。订单 {orderExpireMinutes} 分钟内有效；支付后可点“我已付款，立即检查”，也会每 {Math.max(1, Math.round(autoCheckIntervalSeconds / 60))} 分钟自动检查一次。
             </DialogDescription>
           </DialogHeader>
 
@@ -492,18 +529,28 @@ export default function LoginPage() {
                 </div>
                 {rechargeOrder.status !== "issued" ? (
                   <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
-                    请在 {orderExpireMinutes} 分钟内完成支付。支付成功后不需要重复下单，回到本页等待系统自动检查即可，通常会有 1 分钟左右延迟。
+                    请在 {orderExpireMinutes} 分钟内完成支付。支付成功后不需要重复下单，回到本页点击“我已付款，立即检查”可马上查询；如果支付平台回调有延迟，也会继续自动检查。
                   </div>
                 ) : null}
 
                 {payUrl && rechargeOrder.status !== "issued" && rechargeOrder.status !== "expired" ? (
-                  <Button
-                    variant="outline"
-                    className="mt-3 h-10 w-full rounded-xl border-stone-200 bg-white"
-                    onClick={() => window.open(payUrl, "_blank", "noopener,noreferrer")}
-                  >
-                    重新打开支付页面
-                  </Button>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    <Button
+                      variant="outline"
+                      className="h-10 w-full rounded-xl border-stone-200 bg-white"
+                      onClick={() => window.open(payUrl, "_blank", "noopener,noreferrer")}
+                    >
+                      重新打开支付页面
+                    </Button>
+                    <Button
+                      className="h-10 w-full rounded-xl bg-red-600 text-white hover:bg-red-700"
+                      onClick={() => void handleRefreshRechargeOrder()}
+                      disabled={isRefreshingOrder}
+                    >
+                      {isRefreshingOrder ? <LoaderCircle className="size-4 animate-spin" /> : null}
+                      我已付款，立即检查
+                    </Button>
+                  </div>
                 ) : null}
 
                 {issuedLoginUrl ? (

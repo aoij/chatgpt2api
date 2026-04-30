@@ -69,7 +69,13 @@ def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
 
 
 def save_image_bytes(image_data: bytes, base_url: str | None = None, uploader: dict[str, Any] | None = None) -> str:
-    config.cleanup_old_images()
+    try:
+        from services.image_service import cleanup_expired_images
+
+        cleanup_expired_images()
+    except Exception as exc:
+        logger.warning({"event": "image_cleanup_failed", "error": str(exc)})
+        config.cleanup_old_images()
     file_hash = hashlib.md5(image_data).hexdigest()
     filename = f"{int(time.time())}_{file_hash}.png"
     relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))

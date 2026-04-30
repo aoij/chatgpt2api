@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -296,8 +297,91 @@ def _build_uploader_summary(items: list[dict[str, object]]) -> list[dict[str, ob
     return sorted(uploaders.values(), key=lambda item: (-int(item.get("count") or 0), str(item.get("name") or "")))
 
 
+def cleanup_expired_images() -> dict[str, int]:
+    """删除超过保留期的图片、缩略图，并同步清理图片元数据。
+
+    图片保留期由 ``config.image_retention_days`` 控制，当前部署设置为 10 天。
+    兼容两种判断：
+    - 文件 mtime 超过保留期；
+    - 生成图片保存路径中的 YYYY/MM/DD 日期超过保留期。
+    """
+    try:
+        retention_days = max(1, int(config.image_retention_days))
+    except Exception:
+        retention_days = 10
+    cutoff_ts = time.time() - retention_days * 86400
+    cutoff_day = datetime.fromtimestamp(cutoff_ts).strftime("%Y-%m-%d")
+
+    root = config.images_dir.resolve()
+    thumb_root = _thumb_root().resolve()
+    removed_paths: list[str] = []
+    removed_thumbs = 0
+
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in _IMAGE_SUFFIXES:
+            continue
+        try:
+            rel = path.relative_to(root).as_posix()
+            expired_by_mtime = path.stat().st_mtime < cutoff_ts
+            expired_by_day = _image_day(path, rel) < cutoff_day
+            if not expired_by_mtime and not expired_by_day:
+                continue
+            path.unlink()
+            removed_paths.append(rel)
+        except Exception as exc:
+            print(f"[image-cleanup] remove image failed path={path}: {exc}")
+
+    for rel in removed_paths:
+        try:
+            thumb_path = _thumb_path_for(rel).resolve()
+            if _is_relative_to(thumb_path, thumb_root) and thumb_path.is_file():
+                thumb_path.unlink()
+                removed_thumbs += 1
+        except Exception as exc:
+            print(f"[image-cleanup] remove thumbnail failed rel={rel}: {exc}")
+
+    if thumb_root.exists():
+        for thumb_path in thumb_root.rglob("*"):
+            if not thumb_path.is_file():
+                continue
+            try:
+                thumb_rel_path = thumb_path.relative_to(thumb_root)
+                source_candidates = [(root / thumb_rel_path).with_suffix(suffix) for suffix in _IMAGE_SUFFIXES]
+                source_exists = any(candidate.is_file() for candidate in source_candidates)
+                if source_exists and thumb_path.stat().st_mtime >= cutoff_ts:
+                    continue
+                thumb_path.unlink()
+                removed_thumbs += 1
+            except Exception as exc:
+                print(f"[image-cleanup] remove orphan thumbnail failed path={thumb_path}: {exc}")
+
+    removed_metadata = 0
+    with _METADATA_LOCK:
+        metadata = _load_metadata()
+        if metadata:
+            next_metadata: dict[str, dict[str, Any]] = {}
+            for rel, value in metadata.items():
+                image_path = (root / rel).resolve()
+                if rel in removed_paths or not _is_relative_to(image_path, root) or not image_path.is_file():
+                    removed_metadata += 1
+                    continue
+                next_metadata[rel] = value
+            if removed_metadata:
+                _save_metadata(next_metadata)
+
+    _cleanup_empty_dirs(root)
+    _cleanup_empty_dirs(thumb_root)
+    if removed_paths or removed_thumbs or removed_metadata:
+        print(
+            "[image-cleanup] "
+            f"retention_days={retention_days}, removed_images={len(removed_paths)}, "
+            f"removed_thumbs={removed_thumbs}, removed_metadata={removed_metadata}"
+        )
+    return {"removed": len(removed_paths), "thumbnails_removed": removed_thumbs, "metadata_removed": removed_metadata}
+
+
 def list_images(base_url: str, start_date: str = "", end_date: str = "", uploader: str = "") -> dict[str, object]:
-    config.cleanup_old_images()
+    cleanup_expired_images()
     items: list[dict[str, object]] = []
     root = config.images_dir
     thumb_root = _thumb_root()

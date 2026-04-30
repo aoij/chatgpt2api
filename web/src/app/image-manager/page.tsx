@@ -270,14 +270,17 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
           </h1>
           <p className="text-sm leading-6 text-stone-500">
             {isSelfMode
-              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制和删除，移动端也可直接管理。"
-              : "支持按日期和上传人筛选图片，分组查看、批量选择并执行删除。"}
+              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制和删除；图片仅保存 10 天，请及时下载。"
+              : "支持按日期和上传人筛选图片，分组查看、批量选择并执行删除；图片仅保存 10 天，超过后自动清理。"}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-full bg-white/90 px-3 py-1.5 text-xs font-medium text-stone-600 shadow-sm ring-1 ring-stone-200/70">
             共 {items.length} 张
+          </span>
+          <span className="rounded-full bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 shadow-sm ring-1 ring-amber-200/70">
+            图片保存 10 天
           </span>
           {isSelfMode ? (
             <span className="rounded-full bg-white/90 px-3 py-1.5 text-xs font-medium text-stone-600 shadow-sm ring-1 ring-stone-200/70">

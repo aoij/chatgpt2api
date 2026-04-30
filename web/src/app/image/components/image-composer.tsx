@@ -191,6 +191,9 @@ export function ImageComposer({
                   <div className="text-[11px] text-stone-500">当前令牌</div>
                   <div className="mt-1 truncate text-sm font-semibold text-stone-900">{tokenName || "-"}</div>
                 </div>
+                <div className="col-span-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
+                  图片仅保存 10 天，请及时下载；超过 10 天系统会自动删除。
+                </div>
                 {activeTaskCount > 0 ? (
                   <div className="col-span-2 flex items-center gap-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
                     <LoaderCircle className="size-3.5 animate-spin" />
@@ -217,6 +220,9 @@ export function ImageComposer({
                   <div className="hidden max-w-[260px] shrink-0 items-center rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600 sm:flex">
                     <span className="mr-1">当前令牌</span>
                     <span className="truncate">{tokenName || "-"}</span>
+                  </div>
+                  <div className="hidden shrink-0 rounded-full bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 sm:block">
+                    图片保存 10 天
                   </div>
                   {activeTaskCount > 0 ? (
                     <div className="hidden shrink-0 items-center gap-1.5 rounded-full bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 sm:flex">

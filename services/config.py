@@ -129,9 +129,9 @@ class ConfigStore:
     @property
     def image_retention_days(self) -> int:
         try:
-            return max(1, int(self.data.get("image_retention_days", 30)))
+            return max(1, int(self.data.get("image_retention_days", 10)))
         except (TypeError, ValueError):
-            return 30
+            return 10
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:
@@ -170,11 +170,22 @@ class ConfigStore:
             if path.is_file() and path.stat().st_mtime < cutoff:
                 path.unlink()
                 removed += 1
+        thumbs_dir = self.images_dir.parent / "image_thumbs"
+        if thumbs_dir.exists():
+            for path in thumbs_dir.rglob("*"):
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
         for path in sorted((p for p in self.images_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
             try:
                 path.rmdir()
             except OSError:
                 pass
+        if thumbs_dir.exists():
+            for path in sorted((p for p in thumbs_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
         return removed
 
     @property

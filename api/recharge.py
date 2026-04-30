@@ -45,6 +45,17 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=404, detail={"error": "order not found"})
         return order
 
+    @router.post("/api/recharge/orders/{out_trade_no}/refresh")
+    async def refresh_recharge_order(out_trade_no: str):
+        try:
+            order = recharge_service.refresh_order(out_trade_no)
+        except Exception as exc:
+            print(f"[recharge] refresh failed: out_trade_no={out_trade_no}, error={exc}")
+            raise HTTPException(status_code=500, detail={"error": str(exc)}) from exc
+        if order is None:
+            raise HTTPException(status_code=404, detail={"error": "order not found"})
+        return order
+
     @router.api_route("/api/recharge/notify", methods=["GET", "POST"])
     async def recharge_notify(request: Request):
         if request.method.upper() == "POST":
