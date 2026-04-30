@@ -80,7 +80,7 @@ export function ImageSidebar({
                   <button
                     type="button"
                     onClick={() => onSelectConversation(conversation.id)}
-                    className={cn("block w-full text-left", hideActionButtons ? "pr-0" : "pr-8")}
+                    className={cn("block w-full text-left", hideActionButtons ? "pr-12" : "pr-8")}
                   >
                     <div className={cn("truncate font-semibold", hideActionButtons ? "text-base" : "text-sm")}>
                       <span className="truncate">{conversation.title}</span>
@@ -99,16 +99,23 @@ export function ImageSidebar({
                       </div>
                     ) : null}
                   </button>
-                  {!hideActionButtons ? (
-                    <button
-                      type="button"
-                      onClick={() => void onDeleteConversation(conversation.id)}
-                      className="absolute top-3 right-2 inline-flex size-7 items-center justify-center rounded-md text-stone-400 opacity-0 transition hover:bg-stone-100 hover:text-rose-500 group-hover:opacity-100"
-                      aria-label="删除会话"
-                    >
-                      <Trash2 className="size-4" />
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      void onDeleteConversation(conversation.id);
+                    }}
+                    className={cn(
+                      "absolute inline-flex items-center justify-center rounded-md text-stone-400 transition hover:bg-stone-100 hover:text-rose-500 focus:bg-stone-100 focus:text-rose-500 focus:opacity-100 focus:outline-none",
+                      hideActionButtons
+                        ? "top-1/2 right-3 size-9 -translate-y-1/2 rounded-xl bg-white/80 opacity-100 shadow-sm active:bg-rose-50 active:text-rose-500"
+                        : "top-3 right-2 size-7 opacity-0 group-hover:opacity-100",
+                    )}
+                    aria-label="删除会话"
+                    title="删除会话"
+                  >
+                    <Trash2 className={cn(hideActionButtons ? "size-4.5" : "size-4")} />
+                  </button>
                 </div>
               );
             })
