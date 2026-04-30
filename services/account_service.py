@@ -220,6 +220,65 @@ class AccountService:
             if (access_token := self._clean_token(account.get("access_token")))
         ]
 
+    def _public_items_compact(self, accounts: list[dict]) -> list[dict]:
+        items: list[dict] = []
+        for account in accounts:
+            access_token = self._clean_token(account.get("access_token"))
+            if not access_token:
+                continue
+            items.append({
+                "id": hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16],
+                "token_preview": anonymize_token(access_token),
+                "type": account.get("type") or "Free",
+                "status": account.get("status") or "正常",
+                "quota": account.get("quota") if account.get("quota") is not None else 0,
+                "imageQuotaUnknown": bool(account.get("image_quota_unknown")),
+                "email": account.get("email"),
+                "user_id": account.get("user_id"),
+                "default_model_slug": account.get("default_model_slug"),
+                "restoreAt": account.get("restore_at"),
+                "success": int(account.get("success") or 0),
+                "fail": int(account.get("fail") or 0),
+                "lastUsedAt": account.get("last_used_at"),
+            })
+        return items
+
+    def _token_by_id_locked(self, account_id: str) -> str:
+        target = self._clean_token(account_id)
+        if not target:
+            return ""
+        for account in self._accounts:
+            access_token = self._clean_token(account.get("access_token"))
+            if access_token and hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16] == target:
+                return access_token
+        return ""
+
+    def tokens_for_ids(self, ids: list[str]) -> list[str]:
+        cleaned_ids = self._clean_tokens(ids)
+        if not cleaned_ids:
+            return []
+        with self._lock:
+            tokens: list[str] = []
+            for account_id in cleaned_ids:
+                token = self._token_by_id_locked(account_id)
+                if token:
+                    tokens.append(token)
+            return tokens
+
+    def list_token_items(self, ids: list[str] | None = None) -> list[dict[str, str]]:
+        with self._lock:
+            items = []
+            target_ids = set(self._clean_tokens(ids or []))
+            for account in self._accounts:
+                access_token = self._clean_token(account.get("access_token"))
+                if not access_token:
+                    continue
+                account_id = hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16]
+                if target_ids and account_id not in target_ids:
+                    continue
+                items.append({"id": account_id, "access_token": access_token})
+            return items
+
     def list_tokens(self) -> list[str]:
         with self._lock:
             return [token for item in self._accounts if (token := self._clean_token(item.get("access_token")))]
@@ -311,9 +370,9 @@ class AccountService:
                 return dict(self._accounts[index])
         return None
 
-    def list_accounts(self) -> list[dict]:
+    def list_accounts(self, compact: bool = False) -> list[dict]:
         with self._lock:
-            return self._public_items(self._accounts)
+            return self._public_items_compact(self._accounts) if compact else self._public_items(self._accounts)
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
@@ -377,6 +436,15 @@ class AccountService:
     def remove_token(self, access_token: str) -> bool:
         return bool(self.delete_accounts([access_token])["removed"])
 
+    def delete_accounts_by_ids(self, ids: list[str]) -> dict:
+        return self.delete_accounts(self.tokens_for_ids(ids))
+
+    def update_account_by_id(self, account_id: str, updates: dict) -> dict | None:
+        tokens = self.tokens_for_ids([account_id])
+        if not tokens:
+            return None
+        return self.update_account(tokens[0], updates)
+
     def update_account(self, access_token: str, updates: dict) -> dict | None:
         access_token = self._clean_token(access_token)
         if not access_token:
@@ -434,6 +502,33 @@ class AccountService:
             return dict(account)
         return None
 
+    @staticmethod
+    def _extract_chatgpt_account_info(payload: dict[str, Any]) -> dict[str, Any]:
+        accounts = payload.get("accounts") if isinstance(payload, dict) else None
+        default_entry = payload.get("default") if isinstance(payload, dict) else None
+        account_id = ""
+        account_user_id = ""
+        plan_type = ""
+        if isinstance(default_entry, dict):
+            account = default_entry.get("account") if isinstance(default_entry.get("account"), dict) else {}
+            account_id = str(account.get("account_id") or "").strip()
+            account_user_id = str(account.get("account_user_id") or "").strip()
+            plan_type = str(account.get("plan_type") or "").strip()
+        if not account_id and isinstance(accounts, dict):
+            for key, entry in accounts.items():
+                if isinstance(entry, dict):
+                    account = entry.get("account") if isinstance(entry.get("account"), dict) else {}
+                    account_id = str(account.get("account_id") or key or "").strip()
+                    account_user_id = str(account.get("account_user_id") or "").strip()
+                    plan_type = str(account.get("plan_type") or "").strip()
+                    if account_id:
+                        break
+        return {
+            "chatgpt_account_id": account_id,
+            "chatgpt_account_user_id": account_user_id,
+            "chatgpt_plan_type": plan_type,
+        }
+
     def fetch_remote_info(self, access_token: str) -> dict[str, Any]:
         access_token = self._clean_token(access_token)
         if not access_token:
@@ -445,7 +540,7 @@ class AccountService:
         session = Session(**proxy_settings.build_session_kwargs(impersonate=impersonate, verify=True))
         session.headers.update(headers)
         try:
-            with ThreadPoolExecutor(max_workers=2) as executor:
+            with ThreadPoolExecutor(max_workers=3) as executor:
                 me_future = executor.submit(
                     session.get,
                     "https://chatgpt.com/backend-api/me",
@@ -466,9 +561,19 @@ class AccountService:
                     },
                     timeout=20,
                 )
+                account_future = executor.submit(
+                    session.get,
+                    "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
+                    headers={
+                        "x-openai-target-path": "/backend-api/accounts/check/v4-2023-04-27",
+                        "x-openai-target-route": "/backend-api/accounts/check/v4-2023-04-27",
+                    },
+                    timeout=20,
+                )
 
                 me_response = me_future.result()
                 init_response = init_future.result()
+                account_response = account_future.result()
 
             if me_response.status_code != 200:
                 raise RuntimeError(f"/backend-api/me failed: HTTP {me_response.status_code}")
@@ -478,6 +583,15 @@ class AccountService:
                 raise RuntimeError(f"/backend-api/conversation/init failed: HTTP {init_response.status_code}")
             init_payload = init_response.json()
 
+            account_payload: dict[str, Any] = {}
+            if account_response.status_code == 200:
+                try:
+                    raw_account_payload = account_response.json()
+                    if isinstance(raw_account_payload, dict):
+                        account_payload = raw_account_payload
+                except Exception:
+                    account_payload = {}
+
             limits_progress = init_payload.get("limits_progress")
             if not isinstance(limits_progress, list):
                 limits_progress = []
@@ -486,9 +600,13 @@ class AccountService:
             quota, restore_at, image_quota_unknown = self._extract_quota_and_restore_at(limits_progress)
             status = "正常" if image_quota_unknown and account_type != "Free" else ("限流" if quota == 0 else "正常")
 
+            account_info = self._extract_chatgpt_account_info(account_payload)
             result = {
                 "email": me_payload.get("email"),
                 "user_id": me_payload.get("id"),
+                "chatgpt_account_id": account_info.get("chatgpt_account_id"),
+                "chatgpt_account_user_id": account_info.get("chatgpt_account_user_id"),
+                "chatgpt_plan_type": account_info.get("chatgpt_plan_type"),
                 "type": account_type,
                 "quota": quota,
                 "image_quota_unknown": image_quota_unknown,

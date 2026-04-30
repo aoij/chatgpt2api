@@ -1,7 +1,10 @@
 import base64
 import hashlib
 import json
+import os
+import queue
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +16,7 @@ from utils.log import logger
 
 IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+SSE_HEARTBEAT_INTERVAL_SECONDS = float(os.getenv("SSE_HEARTBEAT_INTERVAL_SECONDS", "25"))
 
 
 def new_uuid() -> str:
@@ -38,21 +42,48 @@ def ensure_ok(response: requests.Response, context: str) -> None:
     raise RuntimeError(f"{context} failed: status={response.status_code}, body={body}")
 
 
-def sse_json_stream(items) -> Iterator[str]:
+def sse_json_stream(items, heartbeat_interval: float | None = None) -> Iterator[str]:
+    interval = SSE_HEARTBEAT_INTERVAL_SECONDS if heartbeat_interval is None else heartbeat_interval
+    if interval <= 0:
+        interval = SSE_HEARTBEAT_INTERVAL_SECONDS
+    chunks: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+    def producer() -> None:
+        try:
+            for item in items:
+                chunks.put(("item", item))
+        except Exception as exc:
+            chunks.put(("error", exc))
+        finally:
+            chunks.put(("done", None))
+
+    threading.Thread(target=producer, name="sse-json-producer", daemon=True).start()
     yield ": stream-open\n\n"
-    try:
-        for item in items:
+
+    while True:
+        try:
+            kind, payload = chunks.get(timeout=interval)
+        except queue.Empty:
+            yield f": heartbeat {int(time.time())}\n\n"
+            continue
+        if kind == "item":
+            item = payload
             yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-    except Exception as exc:
-        logger.warning({
-            "event": "sse_stream_error",
-            "error_type": exc.__class__.__name__,
-            "error": str(exc),
-        })
-        error = exc.to_openai_error() if hasattr(exc, "to_openai_error") else {
-            "error": {"message": str(exc), "type": exc.__class__.__name__}
-        }
-        yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+            continue
+        if kind == "error":
+            exc = payload
+            logger.warning({
+                "event": "sse_stream_error",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+            })
+            error = exc.to_openai_error() if hasattr(exc, "to_openai_error") else {
+                "error": {"message": str(exc), "type": exc.__class__.__name__}
+            }
+            yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
+            continue
+        if kind == "done":
+            break
     yield "data: [DONE]\n\n"
 
 

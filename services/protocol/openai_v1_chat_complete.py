@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import queue
+import threading
 import time
 import uuid
 from typing import Any, Iterable, Iterator
@@ -20,6 +22,7 @@ from services.protocol.conversation import (
     text_backend,
 )
 from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
+from utils.helper import SSE_HEARTBEAT_INTERVAL_SECONDS
 
 
 def completion_chunk(model: str, delta: dict[str, Any], finish_reason: str | None = None, completion_id: str = "", created: int | None = None) -> dict[str, Any]:
@@ -148,9 +151,38 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
 def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: str) -> Iterator[dict[str, Any]]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    sent_role = False
+    # Send a valid OpenAI-compatible chunk immediately, then keep sending
+    # no-op chunks while the upstream image task is still running.  This keeps
+    # Cloudflare Tunnel / browser-facing proxies from seeing a 120s idle
+    # response during long image generations.
+    yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
+    sent_role = True
     sent_text = ""
-    for output in image_outputs:
+    outputs: queue.Queue[tuple[str, object]] = queue.Queue()
+
+    def producer() -> None:
+        try:
+            for output in image_outputs:
+                outputs.put(("output", output))
+        except Exception as exc:
+            outputs.put(("error", exc))
+        finally:
+            outputs.put(("done", None))
+
+    threading.Thread(target=producer, name="image-chat-output-producer", daemon=True).start()
+    while True:
+        try:
+            kind, payload = outputs.get(timeout=SSE_HEARTBEAT_INTERVAL_SECONDS)
+        except queue.Empty:
+            yield completion_chunk(model, {"content": ""}, None, completion_id, created)
+            continue
+        if kind == "done":
+            break
+        if kind == "error":
+            raise payload
+        output = payload
+        if not isinstance(output, ImageOutput):
+            continue
         content = ""
         if output.kind == "progress":
             content = output.text

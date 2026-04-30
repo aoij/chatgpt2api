@@ -20,6 +20,32 @@ domain_lock = Lock()
 provider_lock = Lock()
 domain_index = 0
 provider_index = 0
+TMAILOR_DEFAULT_WHITELIST = {
+    "mikrotikvn.com",
+    "mikfarm.com",
+    "libinit.com",
+    "fbhotro.com",
+    "beelsil.com",
+    "emailracc.com",
+    "sonphuongthinh.com",
+    "dulich84.com",
+    "coffeejadore.com",
+    "accclone.com",
+    "emailcoffeehouse.com",
+}
+TMAILOR_DEFAULT_BLACKLIST = {
+    "benphim.com",
+    "groklan.com",
+    "haibabon.com",
+    "hetzez.com",
+    "img-free.com",
+    "nickmxh.com",
+    "pippoc.com",
+    "phimib.com",
+    "storebanme.com",
+    "topdatamaster.com",
+    "vinakop.com",
+}
 
 
 def _config(mail_config: dict) -> dict:
@@ -28,6 +54,7 @@ def _config(mail_config: dict) -> dict:
         "wait_timeout": float(mail_config.get("wait_timeout") or 30),
         "wait_interval": float(mail_config.get("wait_interval") or 2),
         "user_agent": str(mail_config.get("user_agent") or "Mozilla/5.0"),
+        "proxy": str(mail_config.get("proxy") or "").strip(),
     }
 
 
@@ -35,8 +62,24 @@ def _random_mailbox_name() -> str:
     return f"{''.join(random.choices(string.ascii_lowercase, k=5))}{''.join(random.choices(string.digits, k=random.randint(1, 3)))}{''.join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))}"
 
 
+def _requests_proxies(proxy: str) -> dict[str, str]:
+    value = str(proxy or "").strip()
+    return {"http": value, "https": value} if value else {}
+
+
 def _random_subdomain_label() -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(4, 10)))
+
+
+def _normalize_domain(value: Any) -> str:
+    return str(value or "").strip().lower().lstrip("@")
+
+
+def _extract_email_domain(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if "@" not in text:
+        return ""
+    return _normalize_domain(text.rsplit("@", 1)[1])
 
 
 def _next_domain(domains: list[str]) -> str:
@@ -145,7 +188,6 @@ def _extract_code(message: dict[str, Any]) -> str | None:
             return value
     return None
 
-
 def _message_tracking_ref(message: dict[str, Any]) -> str:
     provider = str(message.get("provider") or "").strip()
     mailbox = str(message.get("mailbox") or "").strip()
@@ -250,6 +292,7 @@ class TempMailLolProvider(BaseMailProvider):
         self.domain = [str(item).strip() for item in (entry.get("domain") or []) if str(item).strip()]
         self.session = requests.Session()
         self.session.trust_env = False
+        self.session.proxies.update(_requests_proxies(str(entry.get("proxy") or conf.get("proxy") or "")))
         self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
         if self.api_key:
             self.session.headers["Authorization"] = f"Bearer {self.api_key}"
@@ -453,16 +496,37 @@ class YydsMailProvider(BaseMailProvider):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
         self.api_base = str(entry.get("api_base") or "https://maliapi.215.im/v1").rstrip("/")
         self.api_key = str(entry["api_key"]).strip()
-        self.domain = [str(item).strip() for item in (entry.get("domain") or []) if str(item).strip()]
+        self.domain = [_normalize_domain(item) for item in (entry.get("domain") or []) if _normalize_domain(item)]
         self.subdomain = str(entry.get("subdomain") or "").strip()
         self.wildcard = bool(entry.get("wildcard"))
         self.session = requests.Session()
         self.session.trust_env = False
-        self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
+        self.session.proxies.update(_requests_proxies(conf.get("proxy") or ""))
+        self.session.headers.update({
+            "User-Agent": conf["user_agent"],
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        })
 
-    def _request(self, method: str, path: str, token: str = "", params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200, 201, 204)):
+    def _request(
+            self,
+            method: str,
+            path: str,
+            token: str = "",
+            params: dict | None = None,
+            payload: dict | None = None,
+            expected: tuple[int, ...] = (200, 201, 204),
+    ):
         headers = {"Authorization": f"Bearer {token}"} if token else {"X-API-Key": self.api_key}
-        resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers=headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = self.session.request(
+            method.upper(),
+            f"{self.api_base}{path}",
+            headers=headers,
+            params=params,
+            json=payload,
+            timeout=self.conf["request_timeout"],
+            verify=False,
+        )
         if resp.status_code not in expected:
             raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         if resp.status_code == 204:
@@ -508,6 +572,174 @@ class YydsMailProvider(BaseMailProvider):
         self.session.close()
 
 
+class TmailorProvider(BaseMailProvider):
+    name = "tmailor"
+
+    def __init__(self, entry: dict, conf: dict):
+        super().__init__(conf, str(entry.get("provider_ref") or ""))
+        self.api_base = str(entry.get("api_base") or "https://tmailor.com").rstrip("/")
+        self.domain = [_normalize_domain(item) for item in (entry.get("domain") or []) if _normalize_domain(item)]
+        self.session = curl_requests.Session(impersonate="chrome")
+        self._warmed = False
+
+    def _warmup(self) -> None:
+        if self._warmed:
+            return
+        resp = self.session.get(f"{self.api_base}/", timeout=self.conf["request_timeout"], verify=False)
+        if resp.status_code != 200:
+            body = resp.text[:300]
+            if "Just a moment" in body or "cf_chl" in body or "Cloudflare" in body:
+                raise RuntimeError("TMailor 触发了 Cloudflare 验证，请更换节点或代理后重试")
+            raise RuntimeError(f"TMailor 预热失败: HTTP {resp.status_code}, body={body}")
+        self._warmed = True
+
+    def _request(self, action: str, payload: dict | None = None, expected: tuple[int, ...] = (200,)) -> dict:
+        self._warmup()
+        resp = self.session.post(
+            f"{self.api_base}/api",
+            json={"action": action, "fbToken": None, **(payload or {})},
+            timeout=self.conf["request_timeout"],
+            verify=False,
+        )
+        if resp.status_code not in expected:
+            body = resp.text[:300]
+            if "Just a moment" in body or "cf_chl" in body or "Cloudflare" in body:
+                raise RuntimeError("TMailor 触发了 Cloudflare 验证，请更换节点或代理后重试")
+            raise RuntimeError(f"TMailor 请求失败: {action}, HTTP {resp.status_code}, body={body}")
+        try:
+            data = resp.json()
+        except Exception:
+            body = resp.text[:300]
+            if "Just a moment" in body or "cf_chl" in body or "Cloudflare" in body:
+                raise RuntimeError("TMailor 触发了 Cloudflare 验证，请更换节点或代理后重试")
+            raise RuntimeError(f"TMailor 返回了非 JSON 响应: {body}")
+        if not isinstance(data, dict):
+            raise RuntimeError(f"TMailor {action} 返回结构不是对象")
+        if str(data.get("msg") or "").strip().lower() != "ok":
+            code = str(data.get("code") or data.get("msg") or "unknown_error")
+            if "errorcaptcha" in code.lower():
+                raise RuntimeError("TMailor API 触发了验证码校验，请更换节点或代理后重试")
+            raise RuntimeError(f"TMailor {action} 失败: {code}")
+        return data
+
+    def _is_allowed_domain(self, domain: str) -> bool:
+        normalized = _normalize_domain(domain)
+        if not normalized:
+            return False
+        if self.domain:
+            return normalized in self.domain
+        if normalized in TMAILOR_DEFAULT_WHITELIST:
+            return True
+        return normalized.endswith(".com") and normalized not in TMAILOR_DEFAULT_BLACKLIST
+
+    @staticmethod
+    def _items(data: dict) -> list[dict[str, Any]]:
+        raw = data.get("data") or data.get("emails") or data.get("messages") or []
+        if isinstance(raw, list):
+            return [item for item in raw if isinstance(item, dict)]
+        if isinstance(raw, dict):
+            return [item for item in raw.values() if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _sort_key(item: dict[str, Any]) -> tuple[float, str]:
+        received_at = _parse_received_at(
+            item.get("created_at")
+            or item.get("createdAt")
+            or item.get("date")
+            or item.get("received_at")
+            or item.get("timestamp")
+            or item.get("create")
+            or item.get("sort")
+            or item.get("time")
+        )
+        timestamp = received_at.timestamp() if received_at else float(item.get("sort") or item.get("create") or item.get("timestamp") or 0)
+        message_id = str(item.get("id") or item.get("mail_id") or item.get("email_code") or "")
+        return timestamp, message_id
+
+    def _read_message(self, access_token: str, message: dict[str, Any]) -> dict[str, Any]:
+        message_id = str(message.get("id") or message.get("mail_id") or message.get("email_code") or "").strip()
+        email_token = str(message.get("email_id") or message.get("email_token") or "").strip()
+        if not message_id or not email_token:
+            return {}
+        data = self._request(
+            "read",
+            {
+                "accesstoken": access_token,
+                "curentToken": access_token,
+                "email_code": message_id,
+                "email_token": email_token,
+            },
+        )
+        detail = data.get("data")
+        return detail if isinstance(detail, dict) else {}
+
+    def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
+        del username
+        last_email = ""
+        for _ in range(50):
+            data = self._request("newemail", {"curentToken": None})
+            address = str(data.get("email") or "").strip().lower()
+            access_token = str(data.get("accesstoken") or "").strip()
+            if not address or not access_token:
+                raise RuntimeError("TMailor 缺少 email 或 accesstoken")
+            last_email = address
+            if self._is_allowed_domain(_extract_email_domain(address)):
+                return {
+                    "provider": self.name,
+                    "provider_ref": self.provider_ref,
+                    "address": address,
+                    "token": access_token,
+                    "access_token": access_token,
+                }
+        raise RuntimeError(f"TMailor 连续生成的邮箱域名都不在允许列表内，最后一个邮箱: {last_email}")
+
+    def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
+        access_token = str(mailbox.get("token") or mailbox.get("access_token") or "").strip()
+        if not access_token:
+            raise RuntimeError("TMailor mailbox 缺少 accesstoken")
+        data = self._request("listinbox", {"accesstoken": access_token, "curentToken": access_token})
+        messages = self._items(data)
+        if not messages:
+            return None
+        item = max(messages, key=self._sort_key)
+        detail = self._read_message(access_token, item)
+        merged = {**item, **detail}
+        text_content, html_content = _extract_content(
+            {
+                **merged,
+                "text_content": merged.get("text") or merged.get("body") or merged.get("content") or merged.get("textBody") or "",
+                "html_content": merged.get("html") or merged.get("html_content") or merged.get("body_html") or "",
+            }
+        )
+        sender = merged.get("from") or merged.get("sender") or ""
+        if isinstance(sender, dict):
+            sender = sender.get("address") or sender.get("email") or sender.get("name") or ""
+        return {
+            "provider": self.name,
+            "mailbox": mailbox["address"],
+            "message_id": str(merged.get("id") or merged.get("mail_id") or merged.get("email_code") or ""),
+            "subject": str(merged.get("subject") or ""),
+            "sender": str(sender),
+            "text_content": text_content,
+            "html_content": html_content,
+            "received_at": _parse_received_at(
+                merged.get("created_at")
+                or merged.get("createdAt")
+                or merged.get("date")
+                or merged.get("received_at")
+                or merged.get("timestamp")
+                or merged.get("create")
+                or merged.get("sort")
+                or merged.get("time")
+            ),
+            "raw": merged,
+        }
+
+    def close(self) -> None:
+        self.session.close()
+
+
 def _entries(mail_config: dict) -> list[dict]:
     return [{**item, "provider_ref": f"{item['type']}#{index + 1}"} for index, item in enumerate(mail_config["providers"])]
 
@@ -546,6 +778,8 @@ def _create_provider(mail_config: dict, provider: str = "", provider_ref: str = 
         return MoEmailProvider(entry, conf)
     if entry["type"] == "yyds_mail":
         return YydsMailProvider(entry, conf)
+    if entry["type"] == "tmailor":
+        return TmailorProvider(entry, conf)
     raise RuntimeError(f"不支持的 mail.provider: {entry['type']}")
 
 

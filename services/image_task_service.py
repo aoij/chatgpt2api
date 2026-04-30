@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from services.config import DATA_DIR, config
+from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 
 TASK_STATUS_QUEUED = "queued"
@@ -180,6 +181,8 @@ class ImageTaskService:
             task = {
                 "id": task_id,
                 "owner_id": owner,
+                "owner_name": _clean(identity.get("name")),
+                "owner_role": _clean(identity.get("role")),
                 "status": TASK_STATUS_QUEUED,
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
@@ -201,7 +204,39 @@ class ImageTaskService:
             thread.start()
         return _public_task(task)
 
+
+    def _log_task_call(self, key: str, *, started: float, status: str, result: object = None, error: str = "") -> None:
+        task = self._tasks.get(key, {})
+        endpoint = "/v1/images/edits" if task.get("mode") == "edit" else "/v1/images/generations"
+        detail: dict[str, Any] = {
+            "key_id": task.get("owner_id"),
+            "key_name": task.get("owner_name") or task.get("owner_id"),
+            "role": task.get("owner_role") or "user",
+            "endpoint": endpoint,
+            "model": task.get("model"),
+            "started_at": datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M:%S"),
+            "ended_at": _now_iso(),
+            "duration_ms": int((time.time() - started) * 1000),
+            "status": status,
+        }
+        if error:
+            detail["error"] = error
+        urls: list[str] = []
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and isinstance(item.get("url"), str):
+                        urls.append(item["url"])
+        if urls:
+            detail["urls"] = list(dict.fromkeys(urls))
+        summary = "图生图调用完成" if endpoint.endswith("/edits") else "文生图调用完成"
+        if status != "success":
+            summary = "图生图调用失败" if endpoint.endswith("/edits") else "文生图调用失败"
+        log_service.add(LOG_TYPE_CALL, summary, detail)
+
     def _run_task(self, key: str, mode: str, payload: dict[str, Any]) -> None:
+        started = time.time()
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
@@ -213,8 +248,11 @@ class ImageTaskService:
                 message = _clean(result.get("message")) or "image task returned no image data"
                 raise RuntimeError(message)
             self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
+            self._log_task_call(key, started=started, status="success", result=result)
         except Exception as exc:
-            self._update_task(key, status=TASK_STATUS_ERROR, error=str(exc) or "image task failed", data=[])
+            message = str(exc) or "image task failed"
+            self._update_task(key, status=TASK_STATUS_ERROR, error=message, data=[])
+            self._log_task_call(key, started=started, status="failed", error=message)
 
     def _update_task(self, key: str, **updates: Any) -> None:
         with self._lock:
@@ -249,6 +287,8 @@ class ImageTaskService:
             task = {
                 "id": task_id,
                 "owner_id": owner,
+                "owner_name": _clean(item.get("owner_name")),
+                "owner_role": _clean(item.get("owner_role")),
                 "status": status,
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
