@@ -58,6 +58,7 @@ export function ImageComposer({
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [isSizeMenuOpen, setIsSizeMenuOpen] = useState(false);
+  const [isMobilePanelExpanded, setIsMobilePanelExpanded] = useState(false);
   const sizeMenuRef = useRef<HTMLDivElement>(null);
   const lightboxImages = useMemo(
     () => referenceImages.map((image, index) => ({ id: `${image.name}-${index}`, src: image.dataUrl })),
@@ -65,6 +66,27 @@ export function ImageComposer({
   );
   const imageSizeLabel = imageSizeOptions.find((option) => option.value === imageSize)?.label || "未指定";
   const submitLabel = referenceImages.length > 0 ? "开始编辑" : "开始生图";
+  const hasPrompt = Boolean(prompt.trim());
+
+  const expandMobilePanel = () => {
+    setIsMobilePanelExpanded(true);
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  };
+
+  const submitAndCollapseMobilePanel = async () => {
+    if (!hasPrompt) {
+      expandMobilePanel();
+      return;
+    }
+    await onSubmit();
+    setIsMobilePanelExpanded(false);
+  };
+
+  useEffect(() => {
+    if (referenceImages.length > 0) {
+      setIsMobilePanelExpanded(true);
+    }
+  }, [referenceImages.length]);
 
   useEffect(() => {
     if (!isSizeMenuOpen) {
@@ -145,7 +167,72 @@ export function ImageComposer({
           </div>
         ) : null}
 
-        <div className="rounded-[24px] border border-stone-200 bg-white/95 shadow-[0_18px_65px_-42px_rgba(15,23,42,0.45)] sm:rounded-[32px] sm:shadow-none">
+        {!isMobilePanelExpanded ? (
+          <div className="rounded-[24px] border border-stone-200 bg-white/95 p-2 shadow-[0_18px_65px_-42px_rgba(15,23,42,0.45)] sm:hidden">
+            <button
+              type="button"
+              className="flex h-12 w-full items-center justify-between gap-3 rounded-2xl bg-stone-50 px-4 text-left"
+              onClick={expandMobilePanel}
+            >
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-sm font-medium text-stone-800">
+                  {prompt.trim() || (referenceImages.length > 0 ? `已添加 ${referenceImages.length} 张参考图` : "输入提示词 / 上传图片")}
+                </div>
+                <div className="mt-0.5 text-[11px] text-stone-500">
+                  额度 {availableQuota} · 图片保存 10 天
+                </div>
+              </div>
+              <span className="shrink-0 rounded-full bg-white px-3 py-1 text-xs font-medium text-stone-600 shadow-sm">
+                展开
+              </span>
+            </button>
+            <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 justify-center rounded-2xl border-stone-200 bg-white text-sm font-medium text-stone-700 shadow-none"
+                onClick={() => {
+                  setIsMobilePanelExpanded(true);
+                  onPickReferenceImage();
+                }}
+              >
+                <ImagePlus className="size-4" />
+                上传图片
+              </Button>
+              <button
+                type="button"
+                onClick={() => void submitAndCollapseMobilePanel()}
+                disabled={!hasPrompt}
+                className="inline-flex h-10 min-w-[104px] items-center justify-center gap-2 rounded-2xl bg-stone-950 px-4 text-sm font-medium text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300"
+              >
+                <ArrowUp className="size-4" />
+                {submitLabel}
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        <div className={cn(
+          "rounded-[24px] border border-stone-200 bg-white/95 shadow-[0_18px_65px_-42px_rgba(15,23,42,0.45)] sm:rounded-[32px] sm:shadow-none",
+          !isMobilePanelExpanded && "hidden sm:block",
+        )}>
+          <div className="flex items-center justify-between gap-2 border-b border-stone-100 px-3 py-2 sm:hidden">
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-stone-700">创作面板</div>
+              <div className="mt-0.5 truncate text-[11px] text-stone-500">可随时收起，方便查看上方图片</div>
+            </div>
+            <button
+              type="button"
+              className="inline-flex h-8 shrink-0 items-center gap-1 rounded-full bg-stone-100 px-3 text-xs font-medium text-stone-600"
+              onClick={() => {
+                setIsMobilePanelExpanded(false);
+                setIsSizeMenuOpen(false);
+              }}
+            >
+              收起
+              <ChevronDown className="size-3.5" />
+            </button>
+          </div>
           <div
             className="relative cursor-text"
             onClick={() => {
@@ -172,32 +259,30 @@ export function ImageComposer({
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
-                  void onSubmit();
+                  void submitAndCollapseMobilePanel();
                 }
               }}
-              className="min-h-[98px] resize-none rounded-[24px] border-0 bg-transparent px-4 pt-4 pb-3 text-[16px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[148px] sm:rounded-[32px] sm:px-6 sm:pt-6 sm:pb-20 sm:text-[15px] sm:leading-7"
+              className="min-h-[78px] resize-none rounded-[24px] border-0 bg-transparent px-4 pt-4 pb-3 text-[16px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[148px] sm:rounded-[32px] sm:px-6 sm:pt-6 sm:pb-20 sm:text-[15px] sm:leading-7"
             />
 
             <div
               className="border-t border-stone-100 bg-white px-3 pb-3 pt-3 sm:absolute sm:inset-x-0 sm:bottom-0 sm:border-t-0 sm:bg-gradient-to-t sm:from-white sm:via-white/95 sm:to-transparent sm:px-6 sm:pb-4 sm:pt-6"
               onClick={(event) => event.stopPropagation()}
             >
-              <div className="grid grid-cols-2 gap-2 sm:hidden">
-                <div className="rounded-2xl bg-stone-100/90 px-3 py-2">
-                  <div className="text-[11px] text-stone-500">剩余额度</div>
-                  <div className="mt-1 truncate text-sm font-semibold text-stone-900">{availableQuota}</div>
+              <div className="flex flex-wrap gap-2 sm:hidden">
+                <div className="rounded-full bg-stone-100/90 px-3 py-1.5 text-xs text-stone-500">
+                  剩余额度 <span className="font-semibold text-stone-900">{availableQuota}</span>
                 </div>
-                <div className="rounded-2xl bg-stone-100/90 px-3 py-2">
-                  <div className="text-[11px] text-stone-500">当前令牌</div>
-                  <div className="mt-1 truncate text-sm font-semibold text-stone-900">{tokenName || "-"}</div>
+                <div className="max-w-full rounded-full bg-stone-100/90 px-3 py-1.5 text-xs text-stone-500">
+                  当前令牌 <span className="font-semibold text-stone-900">{tokenName || "-"}</span>
                 </div>
-                <div className="col-span-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
-                  图片仅保存 10 天，请及时下载；超过 10 天系统会自动删除。
+                <div className="rounded-full bg-amber-50 px-3 py-1.5 text-xs text-amber-700">
+                  图片保存 10 天
                 </div>
                 {activeTaskCount > 0 ? (
-                  <div className="col-span-2 flex items-center gap-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+                  <div className="flex items-center gap-2 rounded-full bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700">
                     <LoaderCircle className="size-3.5 animate-spin" />
-                    当前有 {activeTaskCount} 个任务处理中
+                    {activeTaskCount} 个任务处理中
                   </div>
                 ) : null}
               </div>
@@ -288,8 +373,8 @@ export function ImageComposer({
 
                 <button
                   type="button"
-                  onClick={() => void onSubmit()}
-                  disabled={!prompt.trim()}
+                  onClick={() => void submitAndCollapseMobilePanel()}
+                  disabled={!hasPrompt}
                   className="inline-flex h-11 w-full shrink-0 items-center justify-center gap-2 rounded-2xl bg-stone-950 px-4 text-sm font-medium text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300 sm:size-11 sm:w-11 sm:rounded-full sm:px-0"
                   aria-label={referenceImages.length > 0 ? "编辑图片" : "生成图片"}
                 >
