@@ -114,8 +114,19 @@ class RechargeService:
         return str(os.getenv("CHATGPT2API_RECHARGE_EPAY_BASE_URL") or "").strip().rstrip("/")
 
     @property
+    def epay_public_base_url(self) -> str:
+        return str(
+            os.getenv("CHATGPT2API_RECHARGE_EPAY_PUBLIC_BASE_URL")
+            or self.epay_base_url
+        ).strip().rstrip("/")
+
+    @property
     def epay_query_base_url(self) -> str:
-        return str(os.getenv("CHATGPT2API_RECHARGE_EPAY_QUERY_BASE_URL") or self.epay_base_url).strip().rstrip("/")
+        return str(
+            os.getenv("CHATGPT2API_RECHARGE_EPAY_QUERY_BASE_URL")
+            or self.epay_base_url
+            or self.epay_public_base_url
+        ).strip().rstrip("/")
 
     @property
     def epay_pid(self) -> str:
@@ -154,7 +165,7 @@ class RechargeService:
         return value
 
     def is_configured(self) -> bool:
-        return bool(self.epay_base_url and self.epay_pid and self.epay_key)
+        return bool(self.epay_public_base_url and self.epay_pid and self.epay_key)
 
     def options(self) -> dict[str, object]:
         return {
@@ -290,7 +301,7 @@ class RechargeService:
             }
             params["sign"] = generate_epay_sign(params, self.epay_key)
             params["sign_type"] = "MD5"
-            pay_url = f"{self.epay_base_url}/submit.php?{urlencode(params)}"
+            pay_url = f"{self.epay_public_base_url}/submit.php?{urlencode(params)}"
 
             order = {
                 "out_trade_no": out_trade_no,

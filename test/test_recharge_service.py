@@ -14,6 +14,7 @@ class RechargeServiceTest(unittest.TestCase):
             key: os.environ.get(key)
             for key in (
                 "CHATGPT2API_RECHARGE_EPAY_BASE_URL",
+                "CHATGPT2API_RECHARGE_EPAY_PUBLIC_BASE_URL",
                 "CHATGPT2API_RECHARGE_EPAY_QUERY_BASE_URL",
                 "CHATGPT2API_RECHARGE_EPAY_PID",
             "CHATGPT2API_RECHARGE_EPAY_KEY",
@@ -23,6 +24,7 @@ class RechargeServiceTest(unittest.TestCase):
             )
         }
         os.environ["CHATGPT2API_RECHARGE_EPAY_BASE_URL"] = "http://pay.example.test"
+        os.environ.pop("CHATGPT2API_RECHARGE_EPAY_PUBLIC_BASE_URL", None)
         os.environ["CHATGPT2API_RECHARGE_EPAY_QUERY_BASE_URL"] = "http://pay.example.test"
         os.environ["CHATGPT2API_RECHARGE_EPAY_PID"] = "MNEWAPI001"
         os.environ["CHATGPT2API_RECHARGE_EPAY_KEY"] = "secret"
@@ -105,6 +107,22 @@ class RechargeServiceTest(unittest.TestCase):
                     token_name="测试令牌",
                     public_base_url="http://localhost:3002",
                 )
+
+    def test_public_pay_url_can_differ_from_query_base_url(self) -> None:
+        os.environ["CHATGPT2API_RECHARGE_EPAY_BASE_URL"] = "http://internal-pay.example.test"
+        os.environ["CHATGPT2API_RECHARGE_EPAY_PUBLIC_BASE_URL"] = "https://pay.example.test/fastpay-server"
+        os.environ["CHATGPT2API_RECHARGE_EPAY_QUERY_BASE_URL"] = "http://internal-pay.example.test/fastpay-server"
+        with TemporaryDirectory() as temp_dir:
+            service = RechargeService(Path(temp_dir) / "orders.json")
+            order = service.create_order(
+                amount=1,
+                pay_type="wxpay",
+                token_name="public url",
+                public_base_url="http://localhost:3002",
+            )
+
+            self.assertTrue(str(order["pay_url"]).startswith("https://pay.example.test/fastpay-server/submit.php?"))
+            self.assertEqual(service.epay_query_base_url, "http://internal-pay.example.test/fastpay-server")
 
 
 if __name__ == "__main__":
