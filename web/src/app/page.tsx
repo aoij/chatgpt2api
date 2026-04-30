@@ -3,7 +3,8 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 
-import { getDefaultRouteForRole, getStoredAuthSession } from "@/store/auth";
+import { consumeShareKeyFromUrl } from "@/lib/request";
+import { getDefaultRouteForSession, getStoredAuthSession } from "@/store/auth";
 
 export default function HomePage() {
   const router = useRouter();
@@ -12,11 +13,12 @@ export default function HomePage() {
     let active = true;
 
     const redirect = async () => {
+      await consumeShareKeyFromUrl();
       const session = await getStoredAuthSession();
       if (!active) {
         return;
       }
-      router.replace(session ? getDefaultRouteForRole(session.role) : "/login");
+      router.replace(session ? getDefaultRouteForSession(session) : "/login");
     };
 
     void redirect();

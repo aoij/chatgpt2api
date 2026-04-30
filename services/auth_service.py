@@ -203,7 +203,10 @@ class AuthService:
                         self._last_used_flush_at[item_id] = now
                     except Exception:
                         pass
-                return self._public_item(next_item)
+                identity = self._public_item(next_item)
+                identity["auth_mode"] = "link" if link_matched else "key"
+                identity["scope"] = "image" if link_matched else "full"
+                return identity
         return None
 
     def get_public_key(self, key_id: str) -> dict[str, object] | None:

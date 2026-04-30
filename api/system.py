@@ -40,6 +40,8 @@ def create_router(app_version: str) -> APIRouter:
             "subject_id": identity.get("id"),
             "name": identity.get("name"),
             "quota": identity.get("quota"),
+            "auth_mode": identity.get("auth_mode", "key"),
+            "scope": identity.get("scope", "full"),
         }
 
     @router.get("/api/auth/me")
@@ -54,6 +56,8 @@ def create_router(app_version: str) -> APIRouter:
             "role": item.get("role"),
             "enabled": item.get("enabled", True),
             "quota": item.get("quota"),
+            "auth_mode": identity.get("auth_mode", "key"),
+            "scope": identity.get("scope", "full"),
         }
 
     @router.get("/api/public/config")

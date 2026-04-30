@@ -114,6 +114,8 @@ export type LoginResponse = {
   subject_id: string;
   name: string;
   quota?: number | null;
+  auth_mode?: string;
+  scope?: "full" | "image";
 };
 
 export type UserKey = {
@@ -189,7 +191,7 @@ export async function fetchPublicConfig() {
 }
 
 export async function fetchCurrentUser() {
-  return httpRequest<{ id: string; name: string; role: AuthRole; enabled: boolean; quota?: number | null }>("/api/auth/me");
+  return httpRequest<{ id: string; name: string; role: AuthRole; enabled: boolean; quota?: number | null; auth_mode?: string; scope?: "full" | "image" }>("/api/auth/me");
 }
 
 export async function fetchAccounts() {

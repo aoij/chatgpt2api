@@ -3,6 +3,8 @@
 import localforage from "localforage";
 
 export type AuthRole = "admin" | "user";
+export type AuthScope = "full" | "image";
+export type AuthMode = string;
 
 export type StoredAuthSession = {
   key: string;
@@ -10,6 +12,8 @@ export type StoredAuthSession = {
   subjectId: string;
   name: string;
   quota?: number | null;
+  scope?: AuthScope;
+  authMode?: AuthMode;
 };
 
 export const AUTH_KEY_STORAGE_KEY = "chatgpt2api_auth_key";
@@ -38,11 +42,17 @@ function normalizeSession(value: unknown, fallbackKey = ""): StoredAuthSession |
     subjectId: String(candidate.subjectId || "").trim(),
     name: String(candidate.name || "").trim(),
     quota: typeof candidate.quota === "number" ? candidate.quota : candidate.quota === null ? null : undefined,
+    scope: candidate.scope === "image" ? "image" : "full",
+    authMode: typeof candidate.authMode === "string" && candidate.authMode ? candidate.authMode : undefined,
   };
 }
 
 export function getDefaultRouteForRole(role: AuthRole) {
   return role === "admin" ? "/accounts" : "/image";
+}
+
+export function getDefaultRouteForSession(session: Pick<StoredAuthSession, "role" | "scope">) {
+  return session.scope === "image" ? "/image" : getDefaultRouteForRole(session.role);
 }
 
 export async function getStoredAuthKey() {

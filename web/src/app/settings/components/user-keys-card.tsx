@@ -45,6 +45,7 @@ export function UserKeysCard() {
   const [isCreating, setIsCreating] = useState(false);
   const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
   const [revealedKey, setRevealedKey] = useState("");
+  const [revealedLinkToken, setRevealedLinkToken] = useState("");
   const [deletingItem, setDeletingItem] = useState<UserKey | null>(null);
 
   const load = async () => {
@@ -73,6 +74,7 @@ export function UserKeysCard() {
       const data = await createUserKey(name.trim(), Math.max(0, Number(quota) || 0));
       setItems(data.items);
       setRevealedKey(data.key);
+      setRevealedLinkToken(String(data.item.link_token || ""));
       setName("");
       setQuota("30");
       setIsDialogOpen(false);
@@ -189,7 +191,8 @@ export function UserKeysCard() {
                     type="button"
                     variant="outline"
                     className="h-9 rounded-xl border-emerald-200 bg-white px-4 text-emerald-700"
-                    onClick={() => void handleCopy(`${window.location.origin}/image/?key=${encodeURIComponent(revealedKey)}`)}
+                    onClick={() => revealedLinkToken ? void handleCopy(`${window.location.origin}/image/?key=${encodeURIComponent(revealedLinkToken)}`) : undefined}
+                    disabled={!revealedLinkToken}
                   >
                     <Copy className="size-4" />
                     复制免登录链接

@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 import {
-  getDefaultRouteForRole,
+  getDefaultRouteForSession,
   getStoredAuthSession,
   type AuthRole,
   type StoredAuthSession,
@@ -16,8 +16,13 @@ type UseAuthGuardResult = {
   session: StoredAuthSession | null;
 };
 
+function isImageRoute(pathname: string) {
+  return pathname === "/image" || pathname.startsWith("/image/");
+}
+
 export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
   const router = useRouter();
+  const pathname = usePathname();
   const [session, setSession] = useState<StoredAuthSession | null>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const allowedRolesKey = (allowedRoles || []).join(",");
@@ -40,10 +45,17 @@ export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
         return;
       }
 
+      if (storedSession.scope === "image" && !isImageRoute(pathname)) {
+        setSession(storedSession);
+        setIsCheckingAuth(false);
+        router.replace("/image");
+        return;
+      }
+
       if (roleList.length > 0 && !roleList.includes(storedSession.role)) {
         setSession(storedSession);
         setIsCheckingAuth(false);
-        router.replace(getDefaultRouteForRole(storedSession.role));
+        router.replace(getDefaultRouteForSession(storedSession));
         return;
       }
 
@@ -55,7 +67,7 @@ export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
     return () => {
       active = false;
     };
-  }, [allowedRolesKey, router]);
+  }, [allowedRolesKey, pathname, router]);
 
   return { isCheckingAuth, session };
 }
@@ -75,7 +87,7 @@ export function useRedirectIfAuthenticated() {
       }
 
       if (storedSession) {
-        router.replace(getDefaultRouteForRole(storedSession.role));
+        router.replace(getDefaultRouteForSession(storedSession));
         return;
       }
 

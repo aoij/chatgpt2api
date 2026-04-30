@@ -77,7 +77,7 @@ export function TopNav() {
     return null;
   }
 
-  const navItems = session.role === "admin" ? adminNavItems : userNavItems;
+  const navItems = session.role === "admin" && session.scope !== "image" ? adminNavItems : userNavItems;
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
 
   return (

@@ -10,7 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { login } from "@/lib/api";
 import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
-import { getDefaultRouteForRole, setStoredAuthSession } from "@/store/auth";
+import { getDefaultRouteForSession, setStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -28,14 +28,17 @@ export default function LoginPage() {
     setIsSubmitting(true);
     try {
       const data = await login(normalizedAuthKey);
-      await setStoredAuthSession({
+      const session: StoredAuthSession = {
         key: normalizedAuthKey,
         role: data.role,
         subjectId: data.subject_id,
         name: data.name,
         quota: data.quota,
-      });
-      router.replace(getDefaultRouteForRole(data.role));
+        scope: data.scope === "image" || normalizedAuthKey.startsWith("lk-") ? "image" : "full",
+        authMode: data.auth_mode || (normalizedAuthKey.startsWith("lk-") ? "link" : "key"),
+      };
+      await setStoredAuthSession(session);
+      router.replace(getDefaultRouteForSession(session));
     } catch (error) {
       const message = error instanceof Error ? error.message : "登录失败";
       toast.error(message);

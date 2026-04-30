@@ -54,6 +54,10 @@ request.interceptors.request.use(async (config) => {
 
 let shareKeyLoginPromise: Promise<void> | null = null;
 
+function isImageRoute(pathname: string) {
+    return pathname === "/image" || pathname.startsWith("/image/");
+}
+
 export async function consumeShareKeyFromUrl() {
     if (typeof window === "undefined") {
         return;
@@ -76,6 +80,8 @@ export async function consumeShareKeyFromUrl() {
         subject_id: string;
         name: string;
         quota?: number | null;
+        auth_mode?: string;
+        scope?: "full" | "image";
     }>("/auth/login", {
         method: "POST",
         body: {},
@@ -83,15 +89,18 @@ export async function consumeShareKeyFromUrl() {
         redirectOnUnauthorized: false,
     })
         .then(async (data) => {
+            const isLinkToken = sharedKey.startsWith("lk-");
             await setStoredAuthSession({
                 key: sharedKey,
                 role: data.role,
                 subjectId: data.subject_id,
                 name: data.name,
                 quota: data.quota,
+                scope: data.scope === "image" || isLinkToken ? "image" : "full",
+                authMode: data.auth_mode || (isLinkToken ? "link" : "key"),
             });
-            if (data.role !== "user" && window.location.pathname.startsWith("/image")) {
-                return;
+            if ((data.scope === "image" || isLinkToken) && !isImageRoute(window.location.pathname)) {
+                window.location.replace("/image");
             }
         })
         .finally(() => {
