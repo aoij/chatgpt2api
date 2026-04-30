@@ -30,6 +30,17 @@ class AuthKeyModel(Base):
     data = Column(Text, nullable=False)
 
 
+class ImageConversationModel(Base):
+    """图片会话数据模型"""
+    __tablename__ = "image_conversations"
+
+    owner_id = Column(String(255), primary_key=True)
+    conversation_id = Column(String(255), primary_key=True)
+    payload = Column(Text, nullable=False)
+    created_at = Column(String(64), nullable=False, index=True)
+    updated_at = Column(String(64), nullable=False, index=True)
+
+
 class DatabaseStorageBackend(StorageBackend):
     """数据库存储后端（支持 SQLite、PostgreSQL、MySQL 等）"""
 

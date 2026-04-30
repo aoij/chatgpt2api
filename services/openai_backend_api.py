@@ -624,9 +624,37 @@ class OpenAIBackendAPI:
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
         images = []
         for url in urls:
-            response = self.session.get(url, timeout=120)
-            ensure_ok(response, "image_download")
-            images.append(response.content)
+            last_error: Exception | None = None
+            for attempt in range(1, 3):
+                try:
+                    response = self.session.get(url, timeout=120)
+                    ensure_ok(response, "image_download")
+                    images.append(response.content)
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    lower = str(exc).lower()
+                    retryable = (
+                        "curl: (28)" in lower
+                        or "operation timed out" in lower
+                        or "timed out after" in lower
+                        or "timeout" in lower
+                    )
+                    logger.warning({
+                        "event": "image_download_failed",
+                        "attempt": attempt,
+                        "retryable": retryable,
+                        "error": repr(exc),
+                    })
+                    if not retryable or attempt >= 2:
+                        break
+                    time.sleep(1.5 * attempt)
+            if last_error is not None:
+                lower = str(last_error).lower()
+                if "curl: (28)" in lower or "operation timed out" in lower or "timed out after" in lower or "timeout" in lower:
+                    raise RuntimeError("上游图片下载超时，请稍后重试；如连续出现请减少同时生成数量或切换账号/节点") from last_error
+                raise last_error
         return images
 
     def stream_conversation(
