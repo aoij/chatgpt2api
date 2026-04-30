@@ -337,7 +337,7 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 }
 
 
-function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
+function ImagePageContent({ isAdmin, initialTokenName }: { isAdmin: boolean; initialTokenName: string }) {
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
@@ -354,6 +354,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
   const [availableQuota, setAvailableQuota] = useState("加载中...");
+  const [tokenName, setTokenName] = useState(initialTokenName || "-");
   const [publicConfig, setPublicConfig] = useState<PublicConfig | null>(null);
   const [lightboxImages, setLightboxImages] = useState<ImageLightboxItem[]>([]);
   const [lightboxOpen, setLightboxOpen] = useState(false);
@@ -430,15 +431,19 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
     try {
       if (!isAdmin) {
         const data = await fetchCurrentUser();
+        setTokenName(data.name || initialTokenName || "-");
         setAvailableQuota(data.quota == null ? "不限" : String(Math.max(0, Number(data.quota) || 0)));
         return;
       }
+      fetchCurrentUser()
+        .then((data) => setTokenName(data.name || initialTokenName || "-"))
+        .catch(() => undefined);
       const data = await fetchAccounts();
       setAvailableQuota(formatAvailableQuota(data.items));
     } catch {
       setAvailableQuota((prev) => (prev === "加载中..." ? "--" : prev));
     }
-  }, [isAdmin]);
+  }, [initialTokenName, isAdmin]);
   useEffect(() => {
     let active = true;
     fetchPublicConfig()
@@ -1050,6 +1055,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             imageCount={imageCount}
             imageSize={imageSize}
             availableQuota={availableQuota}
+            tokenName={tokenName}
             activeTaskCount={activeTaskCount}
             referenceImages={referenceImages}
             textareaRef={textareaRef}
@@ -1108,5 +1114,5 @@ export default function ImagePage() {
     );
   }
 
-  return <ImagePageContent isAdmin={session.role === "admin"} />;
+  return <ImagePageContent isAdmin={session.role === "admin"} initialTokenName={session.name || "-"} />;
 }

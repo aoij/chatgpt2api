@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from api.support import raise_image_quota_error, require_identity, resolve_image_base_url
 from services.auth_service import ImageQuotaExceeded
+from services.image_conversation_service import image_conversation_service
 from services.image_task_service import image_task_service
 from services.log_service import log_service
 
@@ -18,6 +19,14 @@ class ImageGenerationTaskRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     size: str | None = None
+
+
+class ImageConversationSaveRequest(BaseModel):
+    items: list[dict[str, Any]] = []
+
+
+class ImageConversationItemRequest(BaseModel):
+    conversation: dict[str, Any]
 
 
 def _parse_task_ids(value: str) -> list[str]:
@@ -103,6 +112,37 @@ def create_router() -> APIRouter:
     ):
         identity = require_identity(authorization)
         return await run_in_threadpool(image_task_service.list_tasks, identity, _parse_task_ids(ids))
+
+    @router.get("/api/image-conversations")
+    async def list_image_conversations(authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return {"items": await run_in_threadpool(image_conversation_service.list, identity)}
+
+    @router.put("/api/image-conversations")
+    async def save_image_conversations(body: ImageConversationSaveRequest, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return {"items": await run_in_threadpool(image_conversation_service.save_many, identity, body.items)}
+
+    @router.put("/api/image-conversations/{conversation_id}")
+    async def save_image_conversation(
+        conversation_id: str,
+        body: ImageConversationItemRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        conversation = dict(body.conversation or {})
+        conversation["id"] = str(conversation.get("id") or conversation_id)
+        return {"items": await run_in_threadpool(image_conversation_service.save, identity, conversation)}
+
+    @router.delete("/api/image-conversations/{conversation_id}")
+    async def delete_image_conversation(conversation_id: str, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return {"items": await run_in_threadpool(image_conversation_service.delete, identity, conversation_id)}
+
+    @router.delete("/api/image-conversations")
+    async def clear_image_conversations(authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return {"items": await run_in_threadpool(image_conversation_service.clear, identity)}
 
     @router.post("/api/image-tasks/generations")
     async def create_generation_task(

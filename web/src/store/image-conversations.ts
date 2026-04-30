@@ -3,6 +3,8 @@
 import localforage from "localforage";
 
 import type { ImageModel } from "@/lib/api";
+import { httpRequest } from "@/lib/request";
+import { getStoredAuthSession } from "@/store/auth";
 
 export type ImageConversationMode = "generate" | "edit";
 
@@ -58,6 +60,15 @@ const imageConversationStorage = localforage.createInstance({
 
 const IMAGE_CONVERSATIONS_KEY = "items";
 let imageConversationWriteQueue: Promise<void> = Promise.resolve();
+
+async function getScopedStorageKey() {
+  const session = await getStoredAuthSession();
+  const subjectId = String(session?.subjectId || "").trim();
+  if (subjectId) {
+    return `${IMAGE_CONVERSATIONS_KEY}:${subjectId}`;
+  }
+  return IMAGE_CONVERSATIONS_KEY;
+}
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
   const normalized = {
@@ -202,29 +213,95 @@ function queueImageConversationWrite<T>(operation: () => Promise<T>): Promise<T>
 }
 
 async function readStoredImageConversations(): Promise<ImageConversation[]> {
-  const items =
-    (await imageConversationStorage.getItem<Array<ImageConversation & Record<string, unknown>>>(
-      IMAGE_CONVERSATIONS_KEY,
-    )) || [];
+  const scopedKey = await getScopedStorageKey();
+  let items =
+    (await imageConversationStorage.getItem<Array<ImageConversation & Record<string, unknown>>>(scopedKey)) || [];
+
+  if (items.length === 0 && scopedKey !== IMAGE_CONVERSATIONS_KEY) {
+    const legacyItems =
+      (await imageConversationStorage.getItem<Array<ImageConversation & Record<string, unknown>>>(
+        IMAGE_CONVERSATIONS_KEY,
+      )) || [];
+    if (legacyItems.length > 0) {
+      items = legacyItems;
+      await imageConversationStorage.setItem(scopedKey, legacyItems);
+    }
+  }
+
   return items.map(normalizeConversation);
 }
 
+async function writeStoredImageConversations(conversations: ImageConversation[]): Promise<void> {
+  await imageConversationStorage.setItem(await getScopedStorageKey(), sortImageConversations(conversations));
+}
+
+function mergeConversationLists(current: ImageConversation[], incoming: ImageConversation[]) {
+  const conversationMap = new Map(current.map((item) => [item.id, item]));
+  for (const conversation of incoming.map(normalizeConversation)) {
+    const existing = conversationMap.get(conversation.id);
+    conversationMap.set(conversation.id, existing ? pickLatestConversation(existing, conversation) : conversation);
+  }
+  return sortImageConversations([...conversationMap.values()]);
+}
+
+async function fetchRemoteImageConversations(): Promise<ImageConversation[] | null> {
+  try {
+    const data = await httpRequest<{ items: Array<ImageConversation & Record<string, unknown>> }>(
+      "/api/image-conversations",
+      { redirectOnUnauthorized: false },
+    );
+    return sortImageConversations((data.items || []).map(normalizeConversation));
+  } catch {
+    return null;
+  }
+}
+
+async function saveRemoteImageConversations(conversations: ImageConversation[]): Promise<void> {
+  try {
+    await httpRequest<{ items: ImageConversation[] }>("/api/image-conversations", {
+      method: "PUT",
+      body: { items: conversations.map(normalizeConversation) },
+      redirectOnUnauthorized: false,
+    });
+  } catch {
+    // 本地缓存兜底，服务端临时不可用时不影响画图。
+  }
+}
+
+async function saveRemoteImageConversation(conversation: ImageConversation): Promise<void> {
+  const normalized = normalizeConversation(conversation);
+  try {
+    await httpRequest<{ items: ImageConversation[] }>(`/api/image-conversations/${encodeURIComponent(normalized.id)}`, {
+      method: "PUT",
+      body: { conversation: normalized },
+      redirectOnUnauthorized: false,
+    });
+  } catch {
+    // 本地缓存兜底，服务端临时不可用时不影响画图。
+  }
+}
+
 export async function listImageConversations(): Promise<ImageConversation[]> {
-  return sortImageConversations(await readStoredImageConversations());
+  const localItems = await readStoredImageConversations();
+  const remoteItems = await fetchRemoteImageConversations();
+  if (remoteItems === null) {
+    return sortImageConversations(localItems);
+  }
+
+  const mergedItems = mergeConversationLists(remoteItems, localItems);
+  await writeStoredImageConversations(mergedItems);
+  if (localItems.length > 0) {
+    await saveRemoteImageConversations(mergedItems);
+  }
+  return mergedItems;
 }
 
 export async function saveImageConversations(conversations: ImageConversation[]): Promise<void> {
   await queueImageConversationWrite(async () => {
     const items = await readStoredImageConversations();
-    const conversationMap = new Map(items.map((item) => [item.id, item]));
-    for (const conversation of conversations.map(normalizeConversation)) {
-      const current = conversationMap.get(conversation.id);
-      conversationMap.set(conversation.id, current ? pickLatestConversation(current, conversation) : conversation);
-    }
-    await imageConversationStorage.setItem(
-      IMAGE_CONVERSATIONS_KEY,
-      sortImageConversations([...conversationMap.values()]),
-    );
+    const nextItems = mergeConversationLists(items, conversations);
+    await writeStoredImageConversations(nextItems);
+    await saveRemoteImageConversations(nextItems);
   });
 }
 
@@ -238,23 +315,37 @@ export async function saveImageConversation(conversation: ImageConversation): Pr
       persistedConversation,
       ...items.filter((item) => item.id !== persistedConversation.id),
     ]);
-    await imageConversationStorage.setItem(IMAGE_CONVERSATIONS_KEY, nextItems);
+    await writeStoredImageConversations(nextItems);
+    await saveRemoteImageConversation(persistedConversation);
   });
 }
 
 export async function deleteImageConversation(id: string): Promise<void> {
   await queueImageConversationWrite(async () => {
     const items = await readStoredImageConversations();
-    await imageConversationStorage.setItem(
-      IMAGE_CONVERSATIONS_KEY,
-      items.filter((item) => item.id !== id),
-    );
+    await writeStoredImageConversations(items.filter((item) => item.id !== id));
+    try {
+      await httpRequest<{ items: ImageConversation[] }>(`/api/image-conversations/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+        redirectOnUnauthorized: false,
+      });
+    } catch {
+      // 本地缓存兜底。
+    }
   });
 }
 
 export async function clearImageConversations(): Promise<void> {
   await queueImageConversationWrite(async () => {
-    await imageConversationStorage.removeItem(IMAGE_CONVERSATIONS_KEY);
+    await imageConversationStorage.removeItem(await getScopedStorageKey());
+    try {
+      await httpRequest<{ items: ImageConversation[] }>("/api/image-conversations", {
+        method: "DELETE",
+        redirectOnUnauthorized: false,
+      });
+    } catch {
+      // 本地缓存兜底。
+    }
   });
 }
 
