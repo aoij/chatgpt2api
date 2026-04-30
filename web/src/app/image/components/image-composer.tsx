@@ -1,4 +1,5 @@
 "use client";
+
 import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type RefObject } from "react";
 
@@ -27,6 +28,15 @@ type ImageComposerProps = {
   onRemoveReferenceImage: (index: number) => void;
 };
 
+const imageSizeOptions = [
+  { value: "", label: "未指定" },
+  { value: "1:1", label: "1:1（正方形）" },
+  { value: "16:9", label: "16:9（横版）" },
+  { value: "4:3", label: "4:3（横版）" },
+  { value: "3:4", label: "3:4（竖版）" },
+  { value: "9:16", label: "9:16（竖版）" },
+];
+
 export function ImageComposer({
   prompt,
   imageCount,
@@ -53,15 +63,8 @@ export function ImageComposer({
     () => referenceImages.map((image, index) => ({ id: `${image.name}-${index}`, src: image.dataUrl })),
     [referenceImages],
   );
-  const imageSizeOptions = [
-    { value: "", label: "未指定" },
-    { value: "1:1", label: "1:1 (正方形)" },
-    { value: "16:9", label: "16:9 (横版)" },
-    { value: "4:3", label: "4:3 (横版)" },
-    { value: "3:4", label: "3:4 (竖版)" },
-    { value: "9:16", label: "9:16 (竖版)" },
-  ];
   const imageSizeLabel = imageSizeOptions.find((option) => option.value === imageSize)?.label || "未指定";
+  const submitLabel = referenceImages.length > 0 ? "开始编辑" : "开始生图";
 
   useEffect(() => {
     if (!isSizeMenuOpen) {
@@ -89,7 +92,7 @@ export function ImageComposer({
   };
 
   return (
-    <div className="flex shrink-0 justify-center px-1 pb-[env(safe-area-inset-bottom)] sm:px-0 sm:pb-0">
+    <div className="flex shrink-0 justify-center px-0.5 pb-[env(safe-area-inset-bottom)] sm:px-0 sm:pb-0">
       <div className="w-full max-w-[980px]">
         <input
           ref={fileInputRef}
@@ -103,41 +106,46 @@ export function ImageComposer({
         />
 
         {referenceImages.length > 0 ? (
-          <div className="hide-scrollbar mb-2 flex gap-2 overflow-x-auto px-1 pb-1 sm:mb-3 sm:flex-wrap sm:overflow-visible sm:pb-0">
-            {referenceImages.map((image, index) => (
-              <div key={`${image.name}-${index}`} className="relative size-14 shrink-0 sm:size-16">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setLightboxIndex(index);
-                    setLightboxOpen(true);
-                  }}
-                  className="group size-14 overflow-hidden rounded-2xl border border-stone-200 bg-stone-50 transition hover:border-stone-300 sm:size-16"
-                  aria-label={`预览参考图 ${image.name || index + 1}`}
-                >
-                  <img
-                    src={image.dataUrl}
-                    alt={image.name || `参考图 ${index + 1}`}
-                    className="h-full w-full object-cover"
-                  />
-                </button>
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onRemoveReferenceImage(index);
-                  }}
-                  className="absolute -right-1 -top-1 inline-flex size-5 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 transition hover:border-stone-300 hover:text-stone-800"
-                  aria-label={`移除参考图 ${image.name || index + 1}`}
-                >
-                  <X className="size-3" />
-                </button>
-              </div>
-            ))}
+          <div className="mb-2 sm:mb-3">
+            <div className="mb-2 px-1 text-xs font-medium text-stone-500 sm:hidden">
+              已添加参考图 {referenceImages.length} 张
+            </div>
+            <div className="hide-scrollbar flex gap-2 overflow-x-auto px-1 pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0">
+              {referenceImages.map((image, index) => (
+                <div key={`${image.name}-${index}`} className="relative size-16 shrink-0 sm:size-16">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLightboxIndex(index);
+                      setLightboxOpen(true);
+                    }}
+                    className="group size-16 overflow-hidden rounded-2xl border border-stone-200 bg-stone-50 transition hover:border-stone-300 sm:size-16"
+                    aria-label={`预览参考图 ${image.name || index + 1}`}
+                  >
+                    <img
+                      src={image.dataUrl}
+                      alt={image.name || `参考图 ${index + 1}`}
+                      className="h-full w-full object-cover"
+                    />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRemoveReferenceImage(index);
+                    }}
+                    className="absolute -right-1 -top-1 inline-flex size-5 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 transition hover:border-stone-300 hover:text-stone-800"
+                    aria-label={`移除参考图 ${image.name || index + 1}`}
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
 
-        <div className="rounded-[22px] border border-stone-200 bg-white shadow-[0_14px_60px_-42px_rgba(15,23,42,0.45)] sm:rounded-[32px] sm:shadow-none">
+        <div className="rounded-[24px] border border-stone-200 bg-white/95 shadow-[0_18px_65px_-42px_rgba(15,23,42,0.45)] sm:rounded-[32px] sm:shadow-none">
           <div
             className="relative cursor-text"
             onClick={() => {
@@ -167,95 +175,120 @@ export function ImageComposer({
                   void onSubmit();
                 }
               }}
-              className="min-h-[76px] resize-none rounded-[22px] border-0 bg-transparent px-4 pt-4 pb-2 text-[16px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[148px] sm:rounded-[32px] sm:px-6 sm:pt-6 sm:pb-20 sm:text-[15px] sm:leading-7"
+              className="min-h-[98px] resize-none rounded-[24px] border-0 bg-transparent px-4 pt-4 pb-3 text-[16px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[148px] sm:rounded-[32px] sm:px-6 sm:pt-6 sm:pb-20 sm:text-[15px] sm:leading-7"
             />
 
-            <div className="border-t border-stone-100 bg-white px-2.5 pb-2.5 pt-2 sm:absolute sm:inset-x-0 sm:bottom-0 sm:border-t-0 sm:bg-gradient-to-t sm:from-white sm:via-white/95 sm:to-transparent sm:px-6 sm:pb-4 sm:pt-6" onClick={(event) => event.stopPropagation()}>
-              <div className="flex items-end justify-between gap-2 sm:gap-3">
-                <div className="hide-scrollbar flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto pb-0.5 sm:flex-wrap sm:gap-3 sm:overflow-visible sm:pb-0">
+            <div
+              className="border-t border-stone-100 bg-white px-3 pb-3 pt-3 sm:absolute sm:inset-x-0 sm:bottom-0 sm:border-t-0 sm:bg-gradient-to-t sm:from-white sm:via-white/95 sm:to-transparent sm:px-6 sm:pb-4 sm:pt-6"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="grid grid-cols-2 gap-2 sm:hidden">
+                <div className="rounded-2xl bg-stone-100/90 px-3 py-2">
+                  <div className="text-[11px] text-stone-500">剩余额度</div>
+                  <div className="mt-1 truncate text-sm font-semibold text-stone-900">{availableQuota}</div>
+                </div>
+                <div className="rounded-2xl bg-stone-100/90 px-3 py-2">
+                  <div className="text-[11px] text-stone-500">当前令牌</div>
+                  <div className="mt-1 truncate text-sm font-semibold text-stone-900">{tokenName || "-"}</div>
+                </div>
+                {activeTaskCount > 0 ? (
+                  <div className="col-span-2 flex items-center gap-2 rounded-2xl bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                    当前有 {activeTaskCount} 个任务处理中
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="mt-3 flex flex-col gap-2 sm:mt-0 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-1 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
                   <Button
                     type="button"
                     variant="outline"
-                    className="h-9 shrink-0 rounded-full border-stone-200 bg-white px-3 text-xs font-medium text-stone-700 shadow-none sm:h-10 sm:px-4 sm:text-sm"
+                    className="h-11 justify-start rounded-2xl border-stone-200 bg-white px-4 text-sm font-medium text-stone-700 shadow-none sm:h-10 sm:w-auto sm:justify-center sm:rounded-full sm:px-4 sm:text-sm"
                     onClick={onPickReferenceImage}
                   >
-                    <ImagePlus className="size-3.5 sm:size-4" />
-                    <span>{referenceImages.length > 0 ? "添加参考图" : "上传"}</span>
+                    <ImagePlus className="size-4" />
+                    <span>{referenceImages.length > 0 ? "添加参考图" : "上传图片"}</span>
                   </Button>
-                  <div className="shrink-0 rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:px-3 sm:py-2 sm:text-xs">
-                    <span className="hidden sm:inline">剩余额度 </span>{availableQuota}
-                  </div>
-                  <div className="flex max-w-[150px] shrink-0 items-center rounded-full bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-600 sm:max-w-[260px] sm:px-3 sm:py-2 sm:text-xs">
-                    <span className="hidden sm:inline">当前令牌 </span><span className="truncate">{tokenName || "-"}</span>
-                  </div>
-                  {activeTaskCount > 0 && (
-                    <div className="flex shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 py-1 text-[10px] font-medium text-amber-700 sm:gap-1.5 sm:px-3 sm:py-2 sm:text-xs">
-                      <LoaderCircle className="size-3 animate-spin" />
-                      {activeTaskCount}<span className="hidden sm:inline"> 个任务处理中</span>
-                    </div>
-                  )}
-                  <div className="flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2 py-0.5 sm:h-auto sm:gap-2 sm:px-3 sm:py-1">
-                    <span className="text-[11px] font-medium text-stone-700 sm:text-sm">张数</span>
-                    <Input
-                      type="number"
-                      inputMode="numeric"
-                      min="1"
-                      max="100"
-                      step="1"
-                      value={imageCount}
-                      onChange={(event) => onImageCountChange(event.target.value)}
-                      className="h-7 w-[40px] border-0 bg-transparent px-0 text-center text-xs font-medium text-stone-700 shadow-none focus-visible:ring-0 sm:h-8 sm:w-[64px] sm:text-sm"
-                    />
-                  </div>
-                  <div
-                    ref={sizeMenuRef}
-                    className="relative flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-stone-200 bg-white px-2 py-0.5 text-[11px] sm:h-auto sm:gap-2 sm:px-3 sm:py-1 sm:text-[13px]"
-                  >
-                    <span className="font-medium text-stone-700 sm:text-sm">比例</span>
-                    <button
-                      type="button"
-                      className="flex h-7 w-[78px] items-center justify-between bg-transparent text-left text-xs font-bold text-stone-700 min-[390px]:w-[96px] sm:h-8 sm:w-[132px]"
-                      onClick={() => setIsSizeMenuOpen((open) => !open)}
-                    >
-                      <span className="truncate">{imageSizeLabel}</span>
-                      <ChevronDown className={cn("size-4 shrink-0 opacity-60 transition", isSizeMenuOpen && "rotate-180")} />
-                    </button>
-                    {isSizeMenuOpen ? (
-                      <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+5.75rem)] z-[80] max-h-[45dvh] overflow-y-auto rounded-3xl border border-white/80 bg-white p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] sm:absolute sm:inset-x-auto sm:bottom-[calc(100%+10px)] sm:left-0 sm:w-[186px]">
-                        {imageSizeOptions.map((option) => {
-                          const active = option.value === imageSize;
-                          return (
-                            <button
-                              key={option.label}
-                              type="button"
-                              className={cn(
-                                "flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm text-stone-700 transition hover:bg-stone-100",
-                                active && "bg-stone-100 font-medium text-stone-950",
-                              )}
-                              onClick={() => {
-                                onImageSizeChange(option.value);
-                                setIsSizeMenuOpen(false);
-                              }}
-                            >
-                              <span>{option.label}</span>
-                              {active ? <Check className="size-4" /> : null}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </div>
 
+                  <div className="hidden shrink-0 rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600 sm:block">
+                    剩余额度 {availableQuota}
+                  </div>
+                  <div className="hidden max-w-[260px] shrink-0 items-center rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600 sm:flex">
+                    <span className="mr-1">当前令牌</span>
+                    <span className="truncate">{tokenName || "-"}</span>
+                  </div>
+                  {activeTaskCount > 0 ? (
+                    <div className="hidden shrink-0 items-center gap-1.5 rounded-full bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 sm:flex">
+                      <LoaderCircle className="size-3 animate-spin" />
+                      {activeTaskCount} 个任务处理中
+                    </div>
+                  ) : null}
+
+                  <div className="grid grid-cols-[108px_minmax(0,1fr)] gap-2 sm:flex sm:min-w-0 sm:items-center sm:gap-3">
+                    <div className="flex h-11 items-center justify-between rounded-2xl border border-stone-200 bg-white px-3 sm:h-10 sm:min-w-[112px] sm:rounded-full">
+                      <span className="text-xs font-medium text-stone-500">张数</span>
+                      <Input
+                        type="number"
+                        inputMode="numeric"
+                        min="1"
+                        max="100"
+                        step="1"
+                        value={imageCount}
+                        onChange={(event) => onImageCountChange(event.target.value)}
+                        className="h-8 w-12 border-0 bg-transparent px-0 text-right text-sm font-semibold text-stone-800 shadow-none focus-visible:ring-0 sm:h-7 sm:w-[52px] sm:text-center sm:text-sm"
+                      />
+                    </div>
+
+                    <div ref={sizeMenuRef} className="relative min-w-0 sm:min-w-[148px]">
+                      <button
+                        type="button"
+                        className="flex h-11 w-full items-center justify-between rounded-2xl border border-stone-200 bg-white px-3 text-left shadow-none sm:h-10 sm:rounded-full"
+                        onClick={() => setIsSizeMenuOpen((open) => !open)}
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-[11px] leading-none text-stone-500 sm:hidden">比例</span>
+                          <span className="block truncate text-sm font-semibold text-stone-800 sm:text-xs">{imageSizeLabel}</span>
+                        </span>
+                        <ChevronDown className={cn("size-4 shrink-0 opacity-60 transition", isSizeMenuOpen && "rotate-180")} />
+                      </button>
+                      {isSizeMenuOpen ? (
+                        <div className="fixed inset-x-4 bottom-[calc(env(safe-area-inset-bottom)+4.75rem)] z-[80] max-h-[45dvh] overflow-y-auto rounded-3xl border border-white/80 bg-white p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)] sm:absolute sm:inset-x-auto sm:bottom-[calc(100%+10px)] sm:left-0 sm:w-[210px]">
+                          {imageSizeOptions.map((option) => {
+                            const active = option.value === imageSize;
+                            return (
+                              <button
+                                key={option.label}
+                                type="button"
+                                className={cn(
+                                  "flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm text-stone-700 transition hover:bg-stone-100",
+                                  active && "bg-stone-100 font-medium text-stone-950",
+                                )}
+                                onClick={() => {
+                                  onImageSizeChange(option.value);
+                                  setIsSizeMenuOpen(false);
+                                }}
+                              >
+                                <span>{option.label}</span>
+                                {active ? <Check className="size-4" /> : null}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
 
                 <button
                   type="button"
                   onClick={() => void onSubmit()}
                   disabled={!prompt.trim()}
-                  className="inline-flex size-10 shrink-0 items-center justify-center rounded-full bg-stone-950 text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300 sm:size-11"
+                  className="inline-flex h-11 w-full shrink-0 items-center justify-center gap-2 rounded-2xl bg-stone-950 px-4 text-sm font-medium text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:bg-stone-300 sm:size-11 sm:w-11 sm:rounded-full sm:px-0"
                   aria-label={referenceImages.length > 0 ? "编辑图片" : "生成图片"}
                 >
-                  <ArrowUp className="size-3.5 sm:size-4" />
+                  <ArrowUp className="size-4" />
+                  <span className="sm:hidden">{submitLabel}</span>
                 </button>
               </div>
             </div>
@@ -265,4 +298,3 @@ export function ImageComposer({
     </div>
   );
 }
-

@@ -27,7 +27,6 @@ export function TopNav() {
   const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
   const [publicConfig, setPublicConfig] = useState<PublicConfig | null>(null);
 
-
   useEffect(() => {
     let active = true;
     fetchPublicConfig()
@@ -80,10 +79,16 @@ export function TopNav() {
 
   const navItems = session.role === "admin" && session.scope !== "image" ? adminNavItems : userNavItems;
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
+  const isImageOnlySession = session.scope === "image" && navItems.length === 1;
 
   return (
     <header className="sticky top-1 z-40 rounded-2xl border border-white/70 bg-white/80 shadow-sm backdrop-blur-xl sm:top-2 sm:rounded-none sm:border-x-0 sm:border-t-0 sm:bg-transparent sm:shadow-none sm:backdrop-blur-none">
-      <div className="flex min-h-12 min-w-0 flex-col gap-1 px-3 py-2 sm:h-12 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-6 sm:py-0">
+      <div
+        className={cn(
+          "flex min-w-0 flex-col gap-1 px-3 py-2 sm:h-12 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-6 sm:py-0",
+          isImageOnlySession ? "min-h-11" : "min-h-12",
+        )}
+      >
         <div className="flex min-w-0 items-center justify-between gap-2 sm:justify-start sm:gap-3">
           <Link
             href="/image"
@@ -96,10 +101,15 @@ export function TopNav() {
             className="ml-auto shrink-0 py-1 text-xs text-stone-400 transition hover:text-stone-700 sm:hidden"
             onClick={() => void handleLogout()}
           >
-            退出
+            {"退出"}
           </button>
         </div>
-        <nav className="hide-scrollbar -mx-1 flex min-w-0 flex-1 snap-x gap-1 overflow-x-auto px-1 pb-0.5 sm:mx-0 sm:justify-center sm:gap-8 sm:overflow-visible sm:px-0 sm:pb-0">
+        <nav
+          className={cn(
+            "hide-scrollbar -mx-1 min-w-0 flex-1 snap-x gap-1 overflow-x-auto px-1 pb-0.5 sm:mx-0 sm:flex sm:justify-center sm:gap-8 sm:overflow-visible sm:px-0 sm:pb-0",
+            isImageOnlySession ? "hidden" : "flex",
+          )}
+        >
           {navItems.map((item) => {
             const active = pathname === item.href;
             return (
@@ -131,7 +141,7 @@ export function TopNav() {
             className="py-1 text-xs text-stone-400 transition hover:text-stone-700 sm:text-sm"
             onClick={() => void handleLogout()}
           >
-            退出
+            {"退出"}
           </button>
         </div>
       </div>

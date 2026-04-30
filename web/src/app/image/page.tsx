@@ -43,6 +43,7 @@ import {
   type StoredImage,
   type StoredReferenceImage,
 } from "@/store/image-conversations";
+import { cn } from "@/lib/utils";
 
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
@@ -337,7 +338,15 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 }
 
 
-function ImagePageContent({ isAdmin, initialTokenName }: { isAdmin: boolean; initialTokenName: string }) {
+function ImagePageContent({
+  isAdmin,
+  isCompactUserView,
+  initialTokenName,
+}: {
+  isAdmin: boolean;
+  isCompactUserView: boolean;
+  initialTokenName: string;
+}) {
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
@@ -966,7 +975,7 @@ function ImagePageContent({ isAdmin, initialTokenName }: { isAdmin: boolean; ini
 
   return (
     <>
-      <section className="mx-auto grid h-[calc(100dvh-6.75rem)] min-h-0 w-full max-w-[1380px] grid-cols-1 gap-2 px-0 pb-[calc(env(safe-area-inset-bottom)+0.35rem)] sm:h-[calc(100dvh-5rem)] sm:gap-3 sm:px-3 sm:pb-6 lg:grid-cols-[240px_minmax(0,1fr)]">
+      <section className={cn("mx-auto grid min-h-0 w-full max-w-[1380px] grid-cols-1 gap-2 px-0 pb-[calc(env(safe-area-inset-bottom)+0.35rem)] sm:h-[calc(100dvh-5rem)] sm:gap-3 sm:px-3 sm:pb-6 lg:grid-cols-[240px_minmax(0,1fr)]", isCompactUserView ? "h-[calc(100dvh-5rem)]" : "h-[calc(100dvh-6.75rem)]")}>
         <div className="hidden h-full min-h-0 border-r border-stone-200/70 pr-3 lg:block">
           <ImageSidebar
             conversations={conversations}
@@ -981,12 +990,32 @@ function ImagePageContent({ isAdmin, initialTokenName }: { isAdmin: boolean; ini
         </div>
 
         <Dialog open={isHistoryOpen} onOpenChange={setIsHistoryOpen}>
-          <DialogContent className="flex h-[min(82dvh,760px)] w-[92vw] max-w-[460px] flex-col overflow-hidden rounded-[32px] border-white/80 bg-white p-0 shadow-[0_32px_110px_-38px_rgba(15,23,42,0.45)] sm:rounded-[36px]">
+          <DialogContent className="flex h-[min(88dvh,760px)] w-[92vw] max-w-[460px] flex-col overflow-hidden rounded-[32px] border-white/80 bg-white p-0 shadow-[0_32px_110px_-38px_rgba(15,23,42,0.45)] max-sm:top-auto max-sm:bottom-0 max-sm:left-0 max-sm:h-[min(88dvh,760px)] max-sm:w-full max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:rounded-t-[28px] sm:rounded-[36px]">
             <DialogHeader className="px-6 pt-7 pb-4 sm:px-8">
               <DialogTitle className="flex items-center gap-2 text-xl font-bold tracking-tight">
                 <History className="size-5" />
                 历史记录
               </DialogTitle>
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 pt-2 sm:hidden">
+                <Button
+                  className="h-10 min-w-0 rounded-2xl bg-stone-950 text-white shadow-sm"
+                  onClick={() => {
+                    handleCreateDraft();
+                    setIsHistoryOpen(false);
+                  }}
+                >
+                  <Plus className="size-4" />
+                  新建对话
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-2xl border-stone-200 bg-white px-3 text-stone-600 shadow-sm"
+                  onClick={openClearHistoryConfirm}
+                  disabled={conversations.length === 0}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </div>
             </DialogHeader>
             <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-8 sm:px-8">
               <ImageSidebar
@@ -1114,5 +1143,11 @@ export default function ImagePage() {
     );
   }
 
-  return <ImagePageContent isAdmin={session.role === "admin"} initialTokenName={session.name || "-"} />;
+  return (
+    <ImagePageContent
+      isAdmin={session.role === "admin"}
+      isCompactUserView={session.scope === "image"}
+      initialTokenName={session.name || "-"}
+    />
+  );
 }
