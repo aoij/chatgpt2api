@@ -70,6 +70,34 @@ function copyText(value: string) {
   toast.message(value);
 }
 
+const RECHARGE_PAY_URL_STORAGE_PREFIX = "chatgpt2api:recharge_pay_url:";
+
+function rechargePayUrlStorageKey(outTradeNo: string) {
+  return `${RECHARGE_PAY_URL_STORAGE_PREFIX}${outTradeNo}`;
+}
+
+function storeRechargePayUrl(outTradeNo: string, value: string) {
+  if (typeof window === "undefined" || !outTradeNo || !value) {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(rechargePayUrlStorageKey(outTradeNo), value);
+  } catch {
+    // ignore storage failures in privacy mode
+  }
+}
+
+function readStoredRechargePayUrl(outTradeNo: string) {
+  if (typeof window === "undefined" || !outTradeNo) {
+    return "";
+  }
+  try {
+    return window.sessionStorage.getItem(rechargePayUrlStorageKey(outTradeNo)) || "";
+  } catch {
+    return "";
+  }
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const [loginMode, setLoginMode] = useState<LoginMode>("password");
@@ -131,9 +159,10 @@ export default function LoginPage() {
       };
 
       void tick();
-      pollingRef.current = window.setInterval(() => void tick(), 3000);
+      const intervalMs = Math.max(10, autoCheckIntervalSeconds) * 1000;
+      pollingRef.current = window.setInterval(() => void tick(), intervalMs);
     },
-    [stopPolling],
+    [autoCheckIntervalSeconds, stopPolling],
   );
 
   useEffect(() => {
@@ -172,6 +201,7 @@ export default function LoginPage() {
       return;
     }
     setRechargeOpen(true);
+    setPayUrl(readStoredRechargePayUrl(outTradeNo));
     startPolling(outTradeNo);
   }, [startPolling]);
 
@@ -234,7 +264,6 @@ export default function LoginPage() {
     setRechargeError("");
     setRechargeOrder(null);
     setPayUrl("");
-    const payWindow = typeof window !== "undefined" ? window.open("about:blank", "_blank") : null;
     try {
       const order = await createRechargeOrder({
         amount: selectedPlan.amount,
@@ -243,23 +272,27 @@ export default function LoginPage() {
       });
       setRechargeOrder(order);
       setPayUrl(order.pay_url);
+      storeRechargePayUrl(order.out_trade_no, order.pay_url);
       startPolling(order.out_trade_no);
-      if (payWindow && !payWindow.closed) {
-        payWindow.location.href = order.pay_url;
-      } else {
-        window.open(order.pay_url, "_blank", "noopener,noreferrer");
-      }
-      toast.success("支付页面已打开，支付后请回到此页等待系统自动确认");
+      toast.success("订单已创建，请点击“打开支付页面”继续支付");
     } catch (error) {
-      if (payWindow && !payWindow.closed) {
-        payWindow.close();
-      }
       const message = error instanceof Error ? error.message : "创建支付订单失败";
       setRechargeError(message);
       toast.error(message);
     } finally {
       setIsCreatingOrder(false);
     }
+  };
+
+  const openRechargePayUrl = () => {
+    if (!payUrl) {
+      toast.error("支付链接不存在，请重新创建订单");
+      return;
+    }
+    if (rechargeOrder?.out_trade_no) {
+      storeRechargePayUrl(rechargeOrder.out_trade_no, payUrl);
+    }
+    window.location.href = payUrl;
   };
 
   const handleRefreshRechargeOrder = async () => {
@@ -529,18 +562,25 @@ export default function LoginPage() {
                 </div>
                 {rechargeOrder.status !== "issued" ? (
                   <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
-                    请在 {orderExpireMinutes} 分钟内完成支付。支付成功后不需要重复下单，回到本页点击“我已付款，立即检查”可马上查询；如果支付平台回调有延迟，也会继续自动检查。
+                    请在 {orderExpireMinutes} 分钟内完成支付。为避免部分内置浏览器弹出空白页，订单创建后不会自动打开新窗口；请点击下方“打开支付页面”。支付成功后不需要重复下单，回到本页点击“我已付款，立即检查”可马上查询；如果支付平台回调有延迟，也会继续自动检查。
                   </div>
                 ) : null}
 
                 {payUrl && rechargeOrder.status !== "issued" && rechargeOrder.status !== "expired" ? (
-                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                    <Button
+                      className="h-10 w-full rounded-xl bg-stone-950 text-white hover:bg-stone-800"
+                      onClick={openRechargePayUrl}
+                    >
+                      打开支付页面
+                    </Button>
                     <Button
                       variant="outline"
                       className="h-10 w-full rounded-xl border-stone-200 bg-white"
-                      onClick={() => window.open(payUrl, "_blank", "noopener,noreferrer")}
+                      onClick={() => copyText(payUrl)}
                     >
-                      重新打开支付页面
+                      <Copy className="size-4" />
+                      复制支付链接
                     </Button>
                     <Button
                       className="h-10 w-full rounded-xl bg-red-600 text-white hover:bg-red-700"
@@ -600,7 +640,7 @@ export default function LoginPage() {
               disabled={isCreatingOrder || !rechargeEnabled}
             >
               {isCreatingOrder ? <LoaderCircle className="size-4 animate-spin" /> : null}
-              {selectedPayType === "wxpay" ? "微信" : "支付宝"}支付 ￥{selectedPlan.amount} / {selectedPlan.quota} 张
+              创建{selectedPayType === "wxpay" ? "微信" : "支付宝"}支付订单 ￥{selectedPlan.amount} / {selectedPlan.quota} 张
             </Button>
           </DialogFooter>
         </DialogContent>
