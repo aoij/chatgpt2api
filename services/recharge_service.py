@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
 import secrets
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any
 from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from services.auth_service import auth_service
 from services.config import DATA_DIR, config
@@ -26,11 +27,34 @@ AMOUNT_QUOTA_MAP: dict[Decimal, int] = {
     Decimal("10.00"): 300,
 }
 
-ORDER_STATUSES = {"pending", "paid", "issued", "failed"}
+ORDER_STATUSES = {"pending", "paid", "issued", "failed", "expired"}
+DEFAULT_ORDER_EXPIRE_MINUTES = 5
+DEFAULT_AUTO_CHECK_INTERVAL_SECONDS = 60
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    try:
+        value = int(str(os.getenv(name) or "").strip() or default)
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, minimum), maximum)
 
 
 def _clean_text(value: object, *, max_length: int = 80) -> str:
@@ -90,12 +114,34 @@ class RechargeService:
         return str(os.getenv("CHATGPT2API_RECHARGE_EPAY_BASE_URL") or "").strip().rstrip("/")
 
     @property
+    def epay_query_base_url(self) -> str:
+        return str(os.getenv("CHATGPT2API_RECHARGE_EPAY_QUERY_BASE_URL") or self.epay_base_url).strip().rstrip("/")
+
+    @property
     def epay_pid(self) -> str:
         return str(os.getenv("CHATGPT2API_RECHARGE_EPAY_PID") or "").strip()
 
     @property
     def epay_key(self) -> str:
         return str(os.getenv("CHATGPT2API_RECHARGE_EPAY_KEY") or "").strip()
+
+    @property
+    def order_expire_minutes(self) -> int:
+        return _env_int(
+            "CHATGPT2API_RECHARGE_ORDER_EXPIRE_MINUTES",
+            DEFAULT_ORDER_EXPIRE_MINUTES,
+            minimum=1,
+            maximum=60,
+        )
+
+    @property
+    def auto_check_interval_seconds(self) -> int:
+        return _env_int(
+            "CHATGPT2API_RECHARGE_AUTO_CHECK_INTERVAL_SECONDS",
+            DEFAULT_AUTO_CHECK_INTERVAL_SECONDS,
+            minimum=10,
+            maximum=3600,
+        )
 
     def public_base_url(self, fallback: str = "") -> str:
         value = str(
@@ -113,6 +159,8 @@ class RechargeService:
     def options(self) -> dict[str, object]:
         return {
             "enabled": self.is_configured(),
+            "order_expire_minutes": self.order_expire_minutes,
+            "auto_check_interval_seconds": self.auto_check_interval_seconds,
             "amounts": [
                 {"amount": int(amount), "money": _money_text(amount), "quota": quota}
                 for amount, quota in sorted(AMOUNT_QUOTA_MAP.items())
@@ -123,7 +171,9 @@ class RechargeService:
             ],
             "notice": [
                 "充值金额只支持 1 元、5 元、10 元，分别对应 30 / 150 / 300 张图片额度。",
-                "支付成功后系统会自动创建令牌，并回显一键登录画图链接。",
+                f"订单请在 {self.order_expire_minutes} 分钟内完成支付，超时后需要重新下单。",
+                "支付成功后系统每 1 分钟自动检查一次订单，可能会有短暂延迟，请支付后回到本页耐心等待。",
+                "系统确认到账后会自动创建令牌，并回显一键登录画图链接。",
                 "请正确填写令牌名称，后续画图页面会显示该名称。",
                 "有疑问可以加 QQ 909256107 联系；需要大量额度或者 API 对接也可以联系。",
             ],
@@ -156,6 +206,10 @@ class RechargeService:
     def _public_order(self, order: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(order, dict):
             return None
+        created_at = _parse_datetime(order.get("created_at"))
+        expires_at = order.get("expires_at")
+        if not expires_at and created_at is not None:
+            expires_at = (created_at + timedelta(minutes=self.order_expire_minutes)).isoformat()
         result = {
             "out_trade_no": order.get("out_trade_no"),
             "amount": order.get("amount"),
@@ -167,6 +221,8 @@ class RechargeService:
             "created_at": order.get("created_at"),
             "paid_at": order.get("paid_at"),
             "issued_at": order.get("issued_at"),
+            "expires_at": expires_at,
+            "auto_check_interval_seconds": self.auto_check_interval_seconds,
         }
         if order.get("status") == "issued":
             result["login_url"] = order.get("login_url")
@@ -209,6 +265,7 @@ class RechargeService:
         now_text = _now_iso()
         quota = AMOUNT_QUOTA_MAP[money]
         money_text = _money_text(money)
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=self.order_expire_minutes)).isoformat()
         with self._lock:
             items = self._load_locked()
             existing_ids = {str(item.get("out_trade_no") or "") for item in items}
@@ -243,6 +300,7 @@ class RechargeService:
                 "token_name": normalized_token_name,
                 "status": "pending",
                 "created_at": now_text,
+                "expires_at": expires_at,
                 "updated_at": now_text,
                 "public_base_url": normalized_public_base_url,
                 "notify_url": notify_url,
@@ -322,6 +380,108 @@ class RechargeService:
             order["updated_at"] = now_text
             self._save_locked(items)
             return self._public_order(order) or {}
+
+    def _query_epay_order(self, out_trade_no: str) -> dict[str, Any] | None:
+        if not self.is_configured():
+            return None
+        params = urlencode({"merchantNo": self.epay_pid, "outTradeNo": out_trade_no})
+        url = f"{self.epay_query_base_url}/api/pay/query?{params}"
+        request = Request(url, headers={"Accept": "application/json", "User-Agent": "chatgpt2api-recharge-checker"})
+        with urlopen(request, timeout=10) as response:
+            body = response.read().decode("utf-8", errors="replace")
+        data = json.loads(body)
+        if not isinstance(data, dict) or int(data.get("code") or 0) != 200:
+            return None
+        detail = data.get("data")
+        return detail if isinstance(detail, dict) else None
+
+    def _build_paid_params(self, order: dict[str, Any], remote_order: dict[str, Any]) -> dict[str, object]:
+        params: dict[str, object] = {
+            "pid": self.epay_pid,
+            "trade_no": remote_order.get("orderNo") or order.get("trade_no") or order.get("out_trade_no"),
+            "out_trade_no": order.get("out_trade_no"),
+            "type": order.get("pay_type"),
+            "name": f"{order.get('token_name') or '充值用户'} 图片额度 {order.get('quota') or 0} 张",
+            "money": order.get("amount"),
+            "trade_status": "TRADE_SUCCESS",
+        }
+        if remote_order.get("payTime"):
+            params["endtime"] = remote_order.get("payTime")
+        params["sign"] = generate_epay_sign(params, self.epay_key)
+        params["sign_type"] = "MD5"
+        return params
+
+    def _mark_expired(self, out_trade_no: str, reason: str = "") -> None:
+        with self._lock:
+            items = self._load_locked()
+            order = self._find_locked(items, out_trade_no)
+            if order is None or order.get("status") != "pending":
+                return
+            now_text = _now_iso()
+            order["status"] = "expired"
+            order["expired_at"] = now_text
+            order["updated_at"] = now_text
+            if reason:
+                order["expire_reason"] = reason
+            self._save_locked(items)
+
+    def sync_pending_orders(self, *, limit: int = 100) -> dict[str, int]:
+        """主动查询易支付订单状态。
+
+        说明：该逻辑只负责把 FastPay 已确认的支付状态同步到本系统并发放令牌；
+        如果 FastPay 本身没有确认到账来源，订单仍会保持待支付直到超时。
+        """
+        with self._lock:
+            pending_orders = [
+                dict(item)
+                for item in self._load_locked()
+                if item.get("status") == "pending" and str(item.get("out_trade_no") or "").strip()
+            ][:limit]
+
+        result = {"checked": 0, "issued": 0, "expired": 0, "failed": 0}
+        now = datetime.now(timezone.utc)
+        for order in pending_orders:
+            out_trade_no = str(order.get("out_trade_no") or "").strip()
+            if not out_trade_no:
+                continue
+            result["checked"] += 1
+            try:
+                remote_order = self._query_epay_order(out_trade_no)
+                remote_status = int(remote_order.get("status") or -1) if isinstance(remote_order, dict) else -1
+                if remote_status == 1 and remote_order is not None:
+                    self.handle_paid_notify(self._build_paid_params(order, remote_order))
+                    result["issued"] += 1
+                    continue
+                expires_at = _parse_datetime(order.get("expires_at"))
+                if expires_at is None:
+                    created_at = _parse_datetime(order.get("created_at")) or now
+                    expires_at = created_at + timedelta(minutes=self.order_expire_minutes)
+                if remote_status in {2, 3} or now > expires_at:
+                    self._mark_expired(out_trade_no, "remote_expired" if remote_status in {2, 3} else "local_expired")
+                    result["expired"] += 1
+            except Exception as exc:
+                result["failed"] += 1
+                print(f"[recharge-checker] check order failed: out_trade_no={out_trade_no}, error={exc}")
+        if any(result[key] for key in ("issued", "expired", "failed")):
+            print(f"[recharge-checker] sync result: {result}")
+        return result
+
+
+def start_recharge_order_watcher(stop_event: Event) -> Thread:
+    def worker() -> None:
+        # 启动后先等一小段时间，避免服务尚未完全就绪时立刻请求自身依赖。
+        stop_event.wait(5)
+        while not stop_event.is_set():
+            try:
+                if recharge_service.is_configured():
+                    recharge_service.sync_pending_orders()
+            except Exception as exc:
+                print(f"[recharge-checker] worker failed: {exc}")
+            stop_event.wait(recharge_service.auto_check_interval_seconds)
+
+    thread = Thread(target=worker, name="recharge-order-checker", daemon=True)
+    thread.start()
+    return thread
 
 
 recharge_service = RechargeService()

@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from api import accounts, ai, image_tasks, recharge, register, system
 from api.support import resolve_web_asset, start_limited_account_watcher
 from services.config import config
+from services.recharge_service import start_recharge_order_watcher
 
 
 def _inject_runtime_web_config(text: str) -> str:
@@ -33,13 +34,15 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         stop_event = Event()
-        thread = start_limited_account_watcher(stop_event)
+        account_watcher_thread = start_limited_account_watcher(stop_event)
+        recharge_watcher_thread = start_recharge_order_watcher(stop_event)
         config.cleanup_old_images()
         try:
             yield
         finally:
             stop_event.set()
-            thread.join(timeout=1)
+            account_watcher_thread.join(timeout=1)
+            recharge_watcher_thread.join(timeout=1)
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1024)

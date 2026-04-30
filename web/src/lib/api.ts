@@ -132,7 +132,7 @@ export type LoginResponse = {
 };
 
 export type RechargePayType = "wxpay" | "alipay";
-export type RechargeStatus = "pending" | "paid" | "issued" | "failed";
+export type RechargeStatus = "pending" | "paid" | "issued" | "failed" | "expired";
 
 export type RechargeOption = {
   amount: number;
@@ -147,6 +147,8 @@ export type RechargePayTypeOption = {
 
 export type RechargeOptionsResponse = {
   enabled: boolean;
+  order_expire_minutes?: number;
+  auto_check_interval_seconds?: number;
   amounts: RechargeOption[];
   pay_types: RechargePayTypeOption[];
   notice: string[];
@@ -161,8 +163,10 @@ export type RechargeOrder = {
   token_name: string;
   status: RechargeStatus;
   created_at?: string | null;
+  expires_at?: string | null;
   paid_at?: string | null;
   issued_at?: string | null;
+  auto_check_interval_seconds?: number | null;
   login_url?: string | null;
   link_token?: string | null;
   auth_key_id?: string | null;

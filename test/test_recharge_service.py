@@ -14,15 +14,21 @@ class RechargeServiceTest(unittest.TestCase):
             key: os.environ.get(key)
             for key in (
                 "CHATGPT2API_RECHARGE_EPAY_BASE_URL",
+                "CHATGPT2API_RECHARGE_EPAY_QUERY_BASE_URL",
                 "CHATGPT2API_RECHARGE_EPAY_PID",
-                "CHATGPT2API_RECHARGE_EPAY_KEY",
-                "CHATGPT2API_PUBLIC_BASE_URL",
+            "CHATGPT2API_RECHARGE_EPAY_KEY",
+            "CHATGPT2API_PUBLIC_BASE_URL",
+            "CHATGPT2API_RECHARGE_ORDER_EXPIRE_MINUTES",
+            "CHATGPT2API_RECHARGE_AUTO_CHECK_INTERVAL_SECONDS",
             )
         }
         os.environ["CHATGPT2API_RECHARGE_EPAY_BASE_URL"] = "http://pay.example.test"
+        os.environ["CHATGPT2API_RECHARGE_EPAY_QUERY_BASE_URL"] = "http://pay.example.test"
         os.environ["CHATGPT2API_RECHARGE_EPAY_PID"] = "MNEWAPI001"
         os.environ["CHATGPT2API_RECHARGE_EPAY_KEY"] = "secret"
         os.environ["CHATGPT2API_PUBLIC_BASE_URL"] = "http://localhost:3002"
+        os.environ["CHATGPT2API_RECHARGE_ORDER_EXPIRE_MINUTES"] = "5"
+        os.environ["CHATGPT2API_RECHARGE_AUTO_CHECK_INTERVAL_SECONDS"] = "60"
 
     def tearDown(self) -> None:
         for key, value in self._env_backup.items():
@@ -65,6 +71,29 @@ class RechargeServiceTest(unittest.TestCase):
             # 重复通知必须幂等，不能二次创建不同登录链接。
             repeated = service.handle_paid_notify(params)
             self.assertEqual(repeated["login_url"], issued["login_url"])
+
+    def test_sync_pending_orders_issues_paid_remote_order(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            service = RechargeService(Path(temp_dir) / "orders.json")
+            order = service.create_order(
+                amount=1,
+                pay_type="wxpay",
+                token_name="自动检查",
+                public_base_url="http://localhost:3002",
+            )
+
+            service._query_epay_order = lambda out_trade_no: {  # type: ignore[method-assign]
+                "orderNo": "FP123",
+                "outTradeNo": out_trade_no,
+                "status": 1,
+                "payAmount": "1.00",
+            }
+            result = service.sync_pending_orders()
+            self.assertEqual(result["checked"], 1)
+            self.assertEqual(result["issued"], 1)
+            synced = service.get_order(order["out_trade_no"])
+            self.assertIsNotNone(synced)
+            self.assertEqual(synced["status"], "issued")
 
     def test_amount_must_be_allowed(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -46,7 +46,9 @@ const FALLBACK_PAY_TYPES: RechargePayTypeOption[] = [
 
 const FALLBACK_NOTICE = [
   "充值金额只支持 1 元、5 元、10 元，分别对应 30 / 150 / 300 张图片额度。",
-  "支付成功后系统会自动创建令牌，并回显一键登录画图链接。",
+  "订单请在 5 分钟内完成支付，超时后需要重新下单。",
+  "支付成功后系统每 1 分钟自动检查一次订单，可能会有短暂延迟，请支付后回到本页耐心等待。",
+  "系统确认到账后会自动创建令牌，并回显一键登录画图链接。",
   "请正确填写令牌名称，后续画图页面会显示该名称。",
   "有疑问可以加 QQ 909256107 联系；需要大量额度或者 API 对接也可以联系。",
 ];
@@ -77,6 +79,8 @@ export default function LoginPage() {
   const [amounts, setAmounts] = useState<RechargeOption[]>(FALLBACK_AMOUNTS);
   const [payTypes, setPayTypes] = useState<RechargePayTypeOption[]>(FALLBACK_PAY_TYPES);
   const [notice, setNotice] = useState<string[]>(FALLBACK_NOTICE);
+  const [orderExpireMinutes, setOrderExpireMinutes] = useState(5);
+  const [autoCheckIntervalSeconds, setAutoCheckIntervalSeconds] = useState(60);
   const [selectedAmount, setSelectedAmount] = useState(1);
   const [selectedPayType, setSelectedPayType] = useState<RechargePayType>("wxpay");
   const [tokenName, setTokenName] = useState("");
@@ -113,6 +117,9 @@ export default function LoginPage() {
           if (order.status === "issued" && order.login_url) {
             stopPolling();
             toast.success("支付成功，令牌已创建");
+          } else if (order.status === "expired") {
+            stopPolling();
+            toast.error("订单已超时，请重新下单");
           }
         } catch (error) {
           setRechargeError(error instanceof Error ? error.message : "查询订单失败");
@@ -139,6 +146,12 @@ export default function LoginPage() {
         }
         if (Array.isArray(data.notice) && data.notice.length > 0) {
           setNotice(data.notice);
+        }
+        if (typeof data.order_expire_minutes === "number" && data.order_expire_minutes > 0) {
+          setOrderExpireMinutes(data.order_expire_minutes);
+        }
+        if (typeof data.auto_check_interval_seconds === "number" && data.auto_check_interval_seconds > 0) {
+          setAutoCheckIntervalSeconds(data.auto_check_interval_seconds);
         }
       })
       .catch(() => {
@@ -232,7 +245,7 @@ export default function LoginPage() {
       } else {
         window.open(order.pay_url, "_blank", "noopener,noreferrer");
       }
-      toast.success("支付页面已打开，支付完成后请回到此页查看登录链接");
+      toast.success("支付页面已打开，支付后请回到此页等待系统自动确认");
     } catch (error) {
       if (payWindow && !payWindow.closed) {
         payWindow.close();
@@ -375,7 +388,7 @@ export default function LoginPage() {
           <DialogHeader className="gap-2 pr-8">
             <DialogTitle>充值购买画图令牌</DialogTitle>
             <DialogDescription className="leading-6">
-              支持微信、支付宝自动到账。支付成功后会自动创建令牌，并显示一键登录画图链接。
+              支持微信、支付宝支付。订单 {orderExpireMinutes} 分钟内有效；支付后系统每 {Math.max(1, Math.round(autoCheckIntervalSeconds / 60))} 分钟自动检查一次，到账可能会有短暂延迟。
             </DialogDescription>
           </DialogHeader>
 
@@ -463,7 +476,13 @@ export default function LoginPage() {
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="font-semibold text-stone-900">订单 {rechargeOrder.out_trade_no}</div>
                   <div className="rounded-full bg-white px-3 py-1 text-xs text-stone-600">
-                    {rechargeOrder.status === "issued" ? "已到账" : isPollingOrder ? "等待支付中" : "待支付"}
+                    {rechargeOrder.status === "issued"
+                      ? "已到账"
+                      : rechargeOrder.status === "expired"
+                        ? "已超时"
+                        : isPollingOrder
+                          ? "系统自动检查中"
+                          : "待支付"}
                   </div>
                 </div>
                 <div className="mt-3 grid gap-2 text-stone-600 sm:grid-cols-3">
@@ -471,8 +490,13 @@ export default function LoginPage() {
                   <div>额度：{rechargeOrder.quota} 张</div>
                   <div>方式：{rechargeOrder.pay_type_label}</div>
                 </div>
+                {rechargeOrder.status !== "issued" ? (
+                  <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
+                    请在 {orderExpireMinutes} 分钟内完成支付。支付成功后不需要重复下单，回到本页等待系统自动检查即可，通常会有 1 分钟左右延迟。
+                  </div>
+                ) : null}
 
-                {payUrl && rechargeOrder.status !== "issued" ? (
+                {payUrl && rechargeOrder.status !== "issued" && rechargeOrder.status !== "expired" ? (
                   <Button
                     variant="outline"
                     className="mt-3 h-10 w-full rounded-xl border-stone-200 bg-white"
