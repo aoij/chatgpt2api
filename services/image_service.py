@@ -394,6 +394,18 @@ def _iter_image_rel_paths(start_date: str = "", end_date: str = "", uploader: st
     return paths
 
 
+def _normalize_rel_paths(paths: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in paths or []:
+        rel = str(item or "").strip().lstrip("/")
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        normalized.append(rel)
+    return normalized
+
+
 def _cleanup_empty_dirs(root: Path) -> None:
     if not root.exists():
         return
@@ -414,7 +426,13 @@ def delete_images(
 ) -> dict[str, int]:
     root = config.images_dir.resolve()
     thumb_root = _thumb_root().resolve()
-    targets = _iter_image_rel_paths(start_date, end_date, uploader) if all_matching else (paths or [])
+    if all_matching:
+        targets = _iter_image_rel_paths(start_date, end_date, uploader)
+    else:
+        targets = _normalize_rel_paths(paths)
+        if start_date or end_date or uploader:
+            allowed = set(_iter_image_rel_paths(start_date, end_date, uploader))
+            targets = [rel for rel in targets if rel in allowed]
     removed = 0
     removed_paths: list[str] = []
 

@@ -16,8 +16,11 @@ type UseAuthGuardResult = {
   session: StoredAuthSession | null;
 };
 
-function isImageRoute(pathname: string) {
-  return pathname === "/image" || pathname.startsWith("/image/");
+function isImageScopeRoute(pathname: string) {
+  return pathname === "/image"
+    || pathname.startsWith("/image/")
+    || pathname === "/image-manager"
+    || pathname.startsWith("/image-manager/");
 }
 
 export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
@@ -45,7 +48,7 @@ export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
         return;
       }
 
-      if (storedSession.scope === "image" && !isImageRoute(pathname)) {
+      if (storedSession.scope === "image" && !isImageScopeRoute(pathname)) {
         setSession(storedSession);
         setIsCheckingAuth(false);
         router.replace("/image");

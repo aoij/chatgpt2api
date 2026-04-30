@@ -39,6 +39,12 @@ class LoginRequest(BaseModel):
     password: str = ""
 
 
+def _effective_image_uploader(identity: dict[str, object], uploader: str = "") -> str:
+    if identity.get("role") == "admin":
+        return uploader.strip()
+    return str(identity.get("id") or identity.get("subject_id") or "").strip()
+
+
 def create_router(app_version: str) -> APIRouter:
     router = APIRouter()
 
@@ -107,13 +113,24 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/api/images")
     async def get_images(request: Request, start_date: str = "", end_date: str = "", uploader: str = "", authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip(), uploader=uploader.strip())
+        identity = require_identity(authorization)
+        return list_images(
+            resolve_image_base_url(request),
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+            uploader=_effective_image_uploader(identity, uploader),
+        )
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), uploader=body.uploader.strip(), all_matching=body.all_matching)
+        identity = require_identity(authorization)
+        return delete_images(
+            body.paths,
+            start_date=body.start_date.strip(),
+            end_date=body.end_date.strip(),
+            uploader=_effective_image_uploader(identity, body.uploader),
+            all_matching=body.all_matching,
+        )
 
     @router.get("/api/logs")
     async def get_logs(request: Request, type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):

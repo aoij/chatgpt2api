@@ -54,8 +54,11 @@ request.interceptors.request.use(async (config) => {
 
 let shareKeyLoginPromise: Promise<void> | null = null;
 
-function isImageRoute(pathname: string) {
-    return pathname === "/image" || pathname.startsWith("/image/");
+function isImageScopeRoute(pathname: string) {
+    return pathname === "/image"
+        || pathname.startsWith("/image/")
+        || pathname === "/image-manager"
+        || pathname.startsWith("/image-manager/");
 }
 
 export async function consumeShareKeyFromUrl() {
@@ -99,7 +102,7 @@ export async function consumeShareKeyFromUrl() {
                 scope: data.scope === "image" || isLinkToken ? "image" : "full",
                 authMode: data.auth_mode || (isLinkToken ? "link" : "key"),
             });
-            if ((data.scope === "image" || isLinkToken) && !isImageRoute(window.location.pathname)) {
+            if ((data.scope === "image" || isLinkToken) && !isImageScopeRoute(window.location.pathname)) {
                 window.location.replace("/image");
             }
         })

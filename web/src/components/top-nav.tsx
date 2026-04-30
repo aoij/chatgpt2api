@@ -19,7 +19,10 @@ const adminNavItems = [
   { href: "/settings", label: "设置" },
 ];
 
-const userNavItems = [{ href: "/image", label: "画图" }];
+const userNavItems = [
+  { href: "/image", label: "画图" },
+  { href: "/image-manager", label: "图片管理" },
+];
 
 export function TopNav() {
   const pathname = usePathname();
