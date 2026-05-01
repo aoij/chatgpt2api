@@ -13,7 +13,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { fetchSystemLogs, getManagedImagePathFromUrl, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LogType = {
@@ -60,7 +60,15 @@ function LogsContent() {
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const detailUrls = getUrls(detailLog);
-  const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
+  const detailImages = detailUrls.map((url, index) => {
+    const downloadPath = getManagedImagePathFromUrl(url);
+    return {
+      id: `${index}`,
+      src: url,
+      downloadPath: downloadPath || undefined,
+      filename: downloadPath ? `${downloadPath.split("/").pop()?.replace(/\.[^.]+$/, "") || `image-${index + 1}`}.jpg` : undefined,
+    };
+  });
   const isCallLog = type === LogType.Call;
   const pageSize = 10;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));

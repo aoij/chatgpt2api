@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 
 from api.support import (
@@ -13,7 +16,7 @@ from api.support import (
 )
 from services.auth_service import auth_service
 from services.config import config
-from services.image_service import add_log_image_thumbnails, delete_images, list_images
+from services.image_service import add_log_image_thumbnails, build_image_download, build_images_zip, delete_images, list_images
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 
@@ -34,6 +37,10 @@ class ImageDeleteRequest(BaseModel):
     all_matching: bool = False
 
 
+class ImageDownloadRequest(BaseModel):
+    paths: list[str] = []
+
+
 class LoginRequest(BaseModel):
     username: str = ""
     password: str = ""
@@ -43,6 +50,22 @@ def _effective_image_uploader(identity: dict[str, object], uploader: str = "") -
     if identity.get("role") == "admin":
         return uploader.strip()
     return str(identity.get("id") or identity.get("subject_id") or "").strip()
+
+
+def _download_response(payload: dict[str, object]) -> Response:
+    filename = str(payload.get("filename") or "download")
+    content = payload.get("content") or b""
+    if not isinstance(content, bytes):
+        content = bytes(content)
+    return Response(
+        content=content,
+        media_type=str(payload.get("media_type") or "application/octet-stream"),
+        headers={
+            "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -131,6 +154,28 @@ def create_router(app_version: str) -> APIRouter:
             uploader=_effective_image_uploader(identity, body.uploader),
             all_matching=body.all_matching,
         )
+
+    @router.get("/api/images/download")
+    async def download_image(path: str = "", authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        payload = build_image_download(
+            path,
+            uploader=_effective_image_uploader(identity),
+        )
+        if payload is None:
+            raise HTTPException(status_code=404, detail={"error": "image not found"})
+        return _download_response(payload)
+
+    @router.post("/api/images/download")
+    async def download_images(body: ImageDownloadRequest, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        payload = build_images_zip(
+            body.paths,
+            uploader=_effective_image_uploader(identity),
+        )
+        if payload is None:
+            raise HTTPException(status_code=404, detail={"error": "images not found"})
+        return _download_response(payload)
 
     @router.get("/api/logs")
     async def get_logs(request: Request, type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):

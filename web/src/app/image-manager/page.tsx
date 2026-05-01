@@ -6,6 +6,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
+  Download,
   ImageIcon,
   LoaderCircle,
   Maximize2,
@@ -23,7 +24,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { fetchManagedImages, deleteManagedImages, type ManagedImage, type ManagedImageUploader } from "@/lib/api";
+import { fetchManagedImages, deleteManagedImages, downloadManagedImage, downloadManagedImages, type ManagedImage, type ManagedImageUploader } from "@/lib/api";
+import { defaultImageDownloadName, saveBlobAsFile } from "@/lib/download";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 import type { StoredAuthSession } from "@/store/auth";
@@ -71,6 +73,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
 
@@ -93,6 +96,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     src: item.url,
     sizeLabel: formatSize(item.size),
     dimensions: imageDimensions(item),
+    downloadPath: item.path || imageKey(item),
+    filename: item.name ? `${item.name.replace(/\.[^.]+$/, "")}.jpg` : undefined,
   }));
 
   const groupedCurrentRows = useMemo(() => {
@@ -170,6 +175,41 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     }
   };
 
+  const downloadOne = async (path: string, filename?: string) => {
+    if (!path) return;
+    setIsDownloading(true);
+    try {
+      const data = await downloadManagedImage(path);
+      saveBlobAsFile(data.blob, data.filename || filename || defaultImageDownloadName(path, "jpg"));
+      toast.success("已下载 JPG 图片，手机端可直接保存/查看");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "下载图片失败");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  const downloadSelected = async () => {
+    if (selectedPaths.length === 0) return;
+    setIsDownloading(true);
+    try {
+      if (selectedPaths.length === 1) {
+        const selected = items.find((item) => imageKey(item) === selectedPaths[0]);
+        const data = await downloadManagedImage(selectedPaths[0]);
+        saveBlobAsFile(data.blob, data.filename || (selected?.name ? `${selected.name.replace(/\.[^.]+$/, "")}.jpg` : defaultImageDownloadName(selectedPaths[0], "jpg")));
+        toast.success("已下载 JPG 图片");
+        return;
+      }
+      const data = await downloadManagedImages(selectedPaths);
+      saveBlobAsFile(data.blob, data.filename || "images.zip");
+      toast.success(`已打包下载 ${selectedPaths.length} 张图片`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "下载图片失败");
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
   useEffect(() => {
     void loadImages();
   }, [startDate, endDate, uploader, isAdmin]);
@@ -202,6 +242,16 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
               }}
             >
               <Copy className="size-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-8 rounded-xl text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+              disabled={isDownloading}
+              onClick={() => void downloadOne(key, item.name ? `${item.name.replace(/\.[^.]+$/, "")}.jpg` : undefined)}
+              title="下载 JPG 图片"
+            >
+              <Download className="size-4" />
             </Button>
             <span className="flex size-8 items-center justify-center rounded-xl border border-stone-200 bg-white">
               <Checkbox checked={selectedSet.has(key)} onCheckedChange={(checked) => togglePaths([key], Boolean(checked))} />
@@ -270,8 +320,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
           </h1>
           <p className="text-sm leading-6 text-stone-500">
             {isSelfMode
-              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制和删除；图片仅保存 10 天，请及时下载。"
-              : "支持按日期和上传人筛选图片，分组查看、批量选择并执行删除；图片仅保存 10 天，超过后自动清理。"}
+              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；下载会自动转成手机更友好的 JPG，图片仅保存 10 天，请及时保存。"
+              : "支持按日期和上传人筛选图片，分组查看、批量选择、打包下载并执行删除；下载会自动转成 JPG，图片仅保存 10 天。"}
           </p>
         </div>
 
@@ -380,7 +430,16 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
               </Button>
               <Button
                 variant="outline"
-                className="col-span-2 h-10 rounded-xl border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50 sm:col-span-1 sm:h-9"
+                className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700 hover:bg-stone-100 sm:h-9"
+                onClick={() => void downloadSelected()}
+                disabled={selectedPaths.length === 0 || isDownloading}
+              >
+                {isDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+                下载所选
+              </Button>
+              <Button
+                variant="outline"
+                className="h-10 rounded-xl border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50 sm:h-9"
                 onClick={() => setDeleteMode("selected")}
                 disabled={selectedPaths.length === 0 || isDeleting}
               >

@@ -1,4 +1,4 @@
-import { httpRequest } from "@/lib/request";
+import { httpBlobRequest, httpRequest } from "@/lib/request";
 
 export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
@@ -444,6 +444,27 @@ export async function fetchManagedImages(filters: { start_date?: string; end_dat
 
 export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; uploader?: string; all_matching?: boolean }) {
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
+}
+
+export async function downloadManagedImage(path: string) {
+  const params = new URLSearchParams({ path });
+  return httpBlobRequest(`/api/images/download?${params.toString()}`);
+}
+
+export async function downloadManagedImages(paths: string[]) {
+  return httpBlobRequest("/api/images/download", { method: "POST", body: { paths } });
+}
+
+export function getManagedImagePathFromUrl(src: string) {
+  const marker = "/images/";
+  const index = String(src || "").indexOf(marker);
+  if (index < 0) return "";
+  const rawPath = String(src).slice(index + marker.length).split(/[?#]/)[0] || "";
+  try {
+    return decodeURIComponent(rawPath).replace(/^\/+/, "");
+  } catch {
+    return rawPath.replace(/^\/+/, "");
+  }
 }
 
 export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {

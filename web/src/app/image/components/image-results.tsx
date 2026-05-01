@@ -5,7 +5,7 @@ import { Clock3, LoaderCircle, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { PublicConfig } from "@/lib/api";
+import { getManagedImagePathFromUrl, type PublicConfig } from "@/lib/api";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
 
 export type ImageLightboxItem = {
@@ -13,6 +13,8 @@ export type ImageLightboxItem = {
   src: string;
   sizeLabel?: string;
   dimensions?: string;
+  downloadPath?: string;
+  filename?: string;
 };
 
 type ImageResultsProps = {
@@ -90,6 +92,8 @@ export function ImageResults({
                   src,
                   sizeLabel: image.b64_json ? formatBase64ImageSize(image.b64_json) : undefined,
                   dimensions: imageDimensions[image.id],
+                  downloadPath: image.url ? getManagedImagePathFromUrl(image.url) : undefined,
+                  filename: image.url ? `${image.id}.jpg` : undefined,
                 },
               ]
             : [];

@@ -132,7 +132,7 @@ export default function LoginPage() {
   const [isRefreshingOrder, setIsRefreshingOrder] = useState(false);
   const [isPollingOrder, setIsPollingOrder] = useState(false);
   const [rechargeError, setRechargeError] = useState("");
-  const pollingRef = useRef<ReturnType<typeof window.setInterval> | null>(null);
+  const pollingRef = useRef<number | null>(null);
   const { isCheckingAuth } = useRedirectIfAuthenticated();
 
   const selectedPlan = useMemo(

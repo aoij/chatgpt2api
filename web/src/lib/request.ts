@@ -146,6 +146,23 @@ type RequestOptions = {
     redirectOnUnauthorized?: boolean;
 };
 
+function filenameFromContentDisposition(value: unknown) {
+    const header = String(value || "");
+    if (!header) {
+        return "";
+    }
+    const encoded = /filename\*=UTF-8''([^;]+)/i.exec(header);
+    if (encoded?.[1]) {
+        try {
+            return decodeURIComponent(encoded[1].replace(/^"|"$/g, ""));
+        } catch {
+            return encoded[1].replace(/^"|"$/g, "");
+        }
+    }
+    const plain = /filename="?([^";]+)"?/i.exec(header);
+    return plain?.[1] ? plain[1].trim() : "";
+}
+
 export async function httpRequest<T>(path: string, options: RequestOptions = {}) {
     const {method = "GET", body, headers, redirectOnUnauthorized = true} = options;
     const config: RequestConfig = {
@@ -157,4 +174,22 @@ export async function httpRequest<T>(path: string, options: RequestOptions = {})
     };
     const response = await request.request<T>(config);
     return response.data;
+}
+
+export async function httpBlobRequest(path: string, options: RequestOptions = {}) {
+    const {method = "GET", body, headers, redirectOnUnauthorized = true} = options;
+    const config: RequestConfig = {
+        url: path,
+        method,
+        data: body,
+        headers,
+        redirectOnUnauthorized,
+        responseType: "blob",
+    };
+    const response = await request.request<Blob>(config);
+    return {
+        blob: response.data,
+        filename: filenameFromContentDisposition(response.headers["content-disposition"]),
+        contentType: String(response.headers["content-type"] || response.data.type || ""),
+    };
 }

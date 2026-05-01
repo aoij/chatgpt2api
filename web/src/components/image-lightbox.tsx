@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronLeft, ChevronRight, Download, RotateCcw, RotateCw, X } from "lucide-react";
+import { toast } from "sonner";
 
+import { downloadManagedImage } from "@/lib/api";
+import { defaultImageDownloadName, saveBlobAsFile } from "@/lib/download";
 import { cn } from "@/lib/utils";
 
 type LightboxImage = {
@@ -11,6 +14,8 @@ type LightboxImage = {
   src: string;
   sizeLabel?: string;
   dimensions?: string;
+  downloadPath?: string;
+  filename?: string;
 };
 
 type ImageLightboxProps = {
@@ -30,6 +35,7 @@ export function ImageLightbox({
 }: ImageLightboxProps) {
   const current = images[currentIndex];
   const [rotation, setRotation] = useState(0);
+  const [isDownloading, setIsDownloading] = useState(false);
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < images.length - 1;
 
@@ -62,12 +68,37 @@ export function ImageLightbox({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, goPrev, goNext, currentIndex]);
 
-  const handleDownload = useCallback(() => {
+  const handleDownload = useCallback(async () => {
     if (!current) return;
-    const link = document.createElement("a");
-    link.href = current.src;
-    link.download = `image-${current.id}.png`;
-    link.click();
+    setIsDownloading(true);
+    try {
+      if (current.downloadPath) {
+        const data = await downloadManagedImage(current.downloadPath);
+        saveBlobAsFile(data.blob, data.filename || current.filename || defaultImageDownloadName(current.id, "jpg"));
+        toast.success("已下载 JPG 图片");
+        return;
+      }
+
+      if (current.src.startsWith("data:")) {
+        const response = await fetch(current.src);
+        const blob = await response.blob();
+        saveBlobAsFile(blob, current.filename || defaultImageDownloadName(current.id, "png"));
+        toast.success("已下载图片");
+        return;
+      }
+
+      const link = document.createElement("a");
+      link.href = current.src;
+      link.download = current.filename || defaultImageDownloadName(current.id, "jpg");
+      link.rel = "noopener";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "下载图片失败");
+    } finally {
+      setIsDownloading(false);
+    }
   }, [current]);
 
   if (!current) return null;
@@ -115,10 +146,11 @@ export function ImageLightbox({
             <button
               type="button"
               onClick={handleDownload}
+              disabled={isDownloading}
               className="inline-flex size-9 items-center justify-center rounded-full bg-black/50 text-white/90 transition hover:bg-black/70"
               aria-label="下载图片"
             >
-              <Download className="size-4" />
+              <Download className={cn("size-4", isDownloading && "animate-pulse")} />
             </button>
             <DialogPrimitive.Close className="inline-flex size-9 items-center justify-center rounded-full bg-black/50 text-white/90 transition hover:bg-black/70">
               <X className="size-4" />

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import time
 from datetime import datetime
@@ -7,6 +8,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image, ImageOps
 
@@ -14,6 +16,8 @@ from services.config import DATA_DIR, config
 
 THUMB_MAX_SIZE = (480, 480)
 THUMB_QUALITY = 74
+DOWNLOAD_JPEG_QUALITY = 92
+MAX_BATCH_DOWNLOAD = 200
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _METADATA_FILE = DATA_DIR / "image_metadata.json"
 _METADATA_LOCK = RLock()
@@ -72,6 +76,55 @@ def _is_relative_to(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _safe_image_path(rel: str) -> tuple[str, Optional[Path]]:
+    image_rel = str(rel or "").strip().lstrip("/")
+    if not image_rel:
+        return "", None
+    root = config.images_dir.resolve()
+    path = (root / image_rel).resolve()
+    if not _is_relative_to(path, root) or not path.is_file() or path.suffix.lower() not in _IMAGE_SUFFIXES:
+        return image_rel, None
+    return image_rel, path
+
+
+def _jpeg_bytes(path: Path) -> bytes:
+    """Return mobile-friendly JPEG bytes for an image.
+
+    iOS/Android browsers save JPG files more consistently into the photo workflow
+    than WebP/PNG blobs. Transparent images are flattened onto a white background.
+    """
+    output = io.BytesIO()
+    with Image.open(path) as image:
+        image = ImageOps.exif_transpose(image)
+        has_alpha = image.mode in {"RGBA", "LA"} or "transparency" in image.info
+        if has_alpha:
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", rgba.size, (255, 255, 255))
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            image = background
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+        image.save(output, "JPEG", quality=DOWNLOAD_JPEG_QUALITY, optimize=True)
+    return output.getvalue()
+
+
+def _download_filename(rel: str, index: int | None = None) -> str:
+    path = Path(rel)
+    stem = path.stem or "image"
+    prefix = f"{index:03d}_" if index is not None else ""
+    return f"{prefix}{stem}.jpg"
+
+
+def _zip_entry_name(rel: str, index: int) -> str:
+    path = Path(rel).with_suffix(".jpg")
+    parts = [part for part in path.parts if part not in {"", ".", ".."}]
+    if not parts:
+        return _download_filename(rel, index)
+    if len(parts) == 1:
+        return _download_filename(rel, index)
+    return Path(*parts).as_posix()
 
 
 def _clean(value: object, default: str = "") -> str:
@@ -488,6 +541,94 @@ def _normalize_rel_paths(paths: list[str] | None) -> list[str]:
         seen.add(rel)
         normalized.append(rel)
     return normalized
+
+
+def build_image_download(rel: str, uploader: str = "") -> Optional[dict[str, object]]:
+    """Build a permission-checked, mobile-friendly JPEG download payload."""
+    cleanup_expired_images()
+    image_rel, path = _safe_image_path(rel)
+    if not image_rel or path is None:
+        return None
+
+    with _METADATA_LOCK:
+        stored_metadata = _load_metadata()
+    meta = _image_metadata(image_rel, stored_metadata, _log_uploader_index())
+    if not _matches_uploader(meta, uploader):
+        return None
+
+    try:
+        content = _jpeg_bytes(path)
+        filename = _download_filename(image_rel)
+        media_type = "image/jpeg"
+    except Exception as exc:
+        print(f"[image-download] convert jpeg failed path={path}: {exc}")
+        content = path.read_bytes()
+        filename = path.name
+        suffix = path.suffix.lower()
+        media_type = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
+
+    return {
+        "path": image_rel,
+        "filename": filename,
+        "content": content,
+        "media_type": media_type,
+        "size": len(content),
+    }
+
+
+def build_images_zip(paths: list[str] | None, uploader: str = "") -> Optional[dict[str, object]]:
+    """Build a permission-checked ZIP containing selected images as JPG files."""
+    normalized = _normalize_rel_paths(paths)
+    if not normalized:
+        return None
+    if len(normalized) > MAX_BATCH_DOWNLOAD:
+        normalized = normalized[:MAX_BATCH_DOWNLOAD]
+
+    cleanup_expired_images()
+    root = config.images_dir.resolve()
+    with _METADATA_LOCK:
+        stored_metadata = _load_metadata()
+    log_index = _log_uploader_index()
+
+    output = io.BytesIO()
+    added = 0
+    used_names: set[str] = set()
+    with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+        for rel in normalized:
+            image_rel, path = _safe_image_path(rel)
+            if not image_rel or path is None:
+                continue
+            meta = _image_metadata(image_rel, stored_metadata, log_index)
+            if not _matches_uploader(meta, uploader):
+                continue
+            try:
+                content = _jpeg_bytes(path)
+                entry_name = _zip_entry_name(image_rel, added + 1)
+            except Exception as exc:
+                print(f"[image-download] zip convert jpeg failed path={path}: {exc}")
+                content = path.read_bytes()
+                try:
+                    entry_name = path.relative_to(root).as_posix()
+                except Exception:
+                    entry_name = _download_filename(image_rel, added + 1)
+            if entry_name in used_names:
+                entry_name = _download_filename(image_rel, added + 1)
+            used_names.add(entry_name)
+            archive.writestr(entry_name, content)
+            added += 1
+
+    if added <= 0:
+        return None
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    content = output.getvalue()
+    return {
+        "filename": f"images-{timestamp}.zip",
+        "content": content,
+        "media_type": "application/zip",
+        "count": added,
+        "truncated": len(_normalize_rel_paths(paths)) > MAX_BATCH_DOWNLOAD,
+        "size": len(content),
+    }
 
 
 def _cleanup_empty_dirs(root: Path) -> None:

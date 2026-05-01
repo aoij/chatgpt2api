@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import api.system as system_module
 import services.image_service as image_service_module
@@ -91,6 +94,49 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
             self.assertEqual(result["removed"], 1)
             self.assertFalse(image_one.exists())
             self.assertTrue(image_two.exists())
+
+    def test_download_images_respects_uploader_and_returns_jpeg_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            images_dir = root / "images"
+            image_one = images_dir / "2026" / "04" / "30" / "user-1.png"
+            image_two = images_dir / "2026" / "04" / "30" / "user-2.png"
+            image_one.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (16, 16), (255, 0, 0)).save(image_one)
+            Image.new("RGB", (16, 16), (0, 0, 255)).save(image_two)
+
+            metadata_path = root / "image_metadata.json"
+            metadata_path.write_text(json.dumps({
+                "images": {
+                    "2026/04/30/user-1.png": {"uploader_id": "user-1", "uploader_name": "Alice"},
+                    "2026/04/30/user-2.png": {"uploader_id": "user-2", "uploader_name": "Bob"},
+                }
+            }, ensure_ascii=False), encoding="utf-8")
+
+            fake_config = SimpleNamespace(
+                images_dir=images_dir,
+                image_retention_days=10,
+                cleanup_old_images=lambda: None,
+            )
+
+            with (
+                mock.patch.object(image_service_module, "config", fake_config),
+                mock.patch.object(image_service_module, "_METADATA_FILE", metadata_path),
+            ):
+                single = image_service_module.build_image_download("2026/04/30/user-1.png", uploader="user-1")
+                denied = image_service_module.build_image_download("2026/04/30/user-2.png", uploader="user-1")
+                batch = image_service_module.build_images_zip(
+                    ["2026/04/30/user-1.png", "2026/04/30/user-2.png"],
+                    uploader="user-1",
+                )
+
+            self.assertIsNotNone(single)
+            self.assertEqual(single["media_type"], "image/jpeg")
+            self.assertTrue(str(single["filename"]).endswith(".jpg"))
+            self.assertIsNone(denied)
+            self.assertIsNotNone(batch)
+            with zipfile.ZipFile(BytesIO(batch["content"])) as archive:
+                self.assertEqual(archive.namelist(), ["2026/04/30/user-1.jpg"])
 
 
 if __name__ == "__main__":
