@@ -74,6 +74,26 @@ class DatabaseStorageBackend(StorageBackend):
         """保存账号数据到数据库"""
         self._save_rows(AccountModel, accounts, "access_token")
 
+    def save_account(self, account: dict[str, Any]) -> None:
+        """只更新单个账号，避免生图计数时重写全量 accounts 表。"""
+        access_token = str((account or {}).get("access_token") or "").strip()
+        if not access_token:
+            return
+        session = self.Session()
+        try:
+            payload = json.dumps(account, ensure_ascii=False)
+            row = session.query(AccountModel).filter(AccountModel.access_token == access_token).one_or_none()
+            if row is None:
+                session.add(AccountModel(access_token=access_token, data=payload))
+            else:
+                row.data = payload
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     def load_auth_keys(self) -> list[dict[str, Any]]:
         """从数据库加载鉴权密钥数据"""
         return self._load_rows(AuthKeyModel)

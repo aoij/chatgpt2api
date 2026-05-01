@@ -43,6 +43,7 @@ import {
 import {
   deleteAccounts,
   fetchAccounts,
+  fetchAccountTokens,
   refreshAccounts,
   updateAccount,
   type Account,
@@ -155,8 +156,13 @@ function maskToken(token?: string) {
   return `${token.slice(0, 16)}...${token.slice(-8)}`;
 }
 
-function downloadTokens(accounts: Account[]) {
-  const content = `${accounts.map((account) => account.access_token).join("\n")}\n`;
+function accountLabel(account: Account) {
+  return account.token_preview || maskToken(account.access_token) || account.id;
+}
+
+
+function downloadTokenLines(tokens: string[]) {
+  const content = `${tokens.filter(Boolean).join("\n")}\n`;
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -255,11 +261,11 @@ function AccountsPageContent() {
 
   const selectedTokens = useMemo(() => {
     const selectedSet = new Set(selectedIds);
-    return accounts.filter((item) => selectedSet.has(item.id)).map((item) => item.access_token);
+    return accounts.filter((item) => selectedSet.has(item.id)).map((item) => item.id);
   }, [accounts, selectedIds]);
 
   const abnormalTokens = useMemo(() => {
-    return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
+    return accounts.filter((item) => item.status === "异常").map((item) => item.id);
   }, [accounts]);
 
   const paginationItems = useMemo(() => {
@@ -323,6 +329,18 @@ function AccountsPageContent() {
     }
   };
 
+  const handleDownloadTokens = async () => {
+    if (accounts.length === 0) {
+      return;
+    }
+    try {
+      const data = await fetchAccountTokens(accounts.map((item) => item.id));
+      downloadTokenLines(data.items.map((item) => item.access_token));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "瀵煎嚭 Token 澶辫触");
+    }
+  };
+
   const openEditDialog = (account: Account) => {
     setEditingAccount(account);
     setEditType(account.type);
@@ -337,7 +355,7 @@ function AccountsPageContent() {
 
     setIsUpdating(true);
     try {
-      const data = await updateAccount(editingAccount.access_token, {
+      const data = await updateAccount(editingAccount.id, {
         type: editType,
         status: editStatus,
         quota: Number(editQuota || 0),
@@ -385,7 +403,7 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
+            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.id))}
             disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
           >
             <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
@@ -402,7 +420,7 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => downloadTokens(accounts)}
+            onClick={() => void handleDownloadTokens()}
             disabled={accounts.length === 0}
           >
             <Download className="size-4" />
@@ -649,13 +667,13 @@ function AccountsPageContent() {
                       <div className="min-w-0 flex-1 space-y-2">
                         <div className="flex min-w-0 items-center gap-2">
                           <span className="truncate text-sm font-semibold tracking-tight text-stone-800">
-                            {maskToken(account.access_token)}
+                            {accountLabel(account)}
                           </span>
                           <button
                             type="button"
                             className="shrink-0 rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
                             onClick={() => {
-                              void navigator.clipboard.writeText(account.access_token);
+                              void navigator.clipboard.writeText(account.id);
                               toast.success("token 已复制");
                             }}
                           >
@@ -703,7 +721,7 @@ function AccountsPageContent() {
                       <button
                         type="button"
                         className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                        onClick={() => void handleRefreshAccounts([account.access_token])}
+                        onClick={() => void handleRefreshAccounts([account.id])}
                         disabled={isRefreshing}
                       >
                         <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
@@ -711,7 +729,7 @@ function AccountsPageContent() {
                       <button
                         type="button"
                         className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                        onClick={() => void handleDeleteTokens([account.access_token])}
+                        onClick={() => void handleDeleteTokens([account.id])}
                         disabled={isDeleting}
                       >
                         <Trash2 className="size-4" />
@@ -780,13 +798,13 @@ function AccountsPageContent() {
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <span className="font-medium tracking-tight text-stone-700">
-                              {maskToken(account.access_token)}
+                              {accountLabel(account)}
                             </span>
                             <button
                               type="button"
                               className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
                               onClick={() => {
-                                void navigator.clipboard.writeText(account.access_token);
+                                void navigator.clipboard.writeText(account.id);
                                 toast.success("token 已复制");
                               }}
                             >
@@ -842,7 +860,7 @@ function AccountsPageContent() {
                             <button
                               type="button"
                               className="rounded-lg p-2 transition hover:bg-stone-100 hover:text-stone-700"
-                              onClick={() => void handleRefreshAccounts([account.access_token])}
+                              onClick={() => void handleRefreshAccounts([account.id])}
                               disabled={isRefreshing}
                             >
                               <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
@@ -850,7 +868,7 @@ function AccountsPageContent() {
                             <button
                               type="button"
                               className="rounded-lg p-2 transition hover:bg-rose-50 hover:text-rose-500"
-                              onClick={() => void handleDeleteTokens([account.access_token])}
+                              onClick={() => void handleDeleteTokens([account.id])}
                               disabled={isDeleting}
                             >
                               <Trash2 className="size-4" />

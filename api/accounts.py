@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from services.auth_service import auth_service
@@ -143,15 +144,28 @@ def create_router() -> APIRouter:
         return {"items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
-    async def get_accounts(compact: bool = Query(default=False), authorization: str | None = Header(default=None)):
+    async def get_accounts(compact: bool = Query(default=True), authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"items": account_service.list_accounts(compact=compact)}
+
+    @router.get("/api/accounts/summary")
+    async def get_account_summary(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return account_service.account_summary()
 
     @router.get("/api/accounts/tokens")
     async def get_account_tokens(ids: str = Query(default=""), authorization: str | None = Header(default=None)):
         require_admin(authorization)
         id_list = [item.strip() for item in ids.split(",") if item.strip()]
-        return {"items": account_service.list_token_items(id_list or None)}
+        items = account_service.list_token_items(id_list or None)
+        if not id_list:
+            content = "\n".join(item["access_token"] for item in items if item.get("access_token")) + "\n"
+            return Response(
+                content=content,
+                media_type="text/plain; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="accounts.txt"'},
+            )
+        return {"items": items}
 
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):

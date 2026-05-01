@@ -449,7 +449,18 @@ class ImageConversationService:
         with self._lock:
             if self._db_available:
                 try:
-                    by_id = {item["id"]: item for item in self._load_owner_from_db_locked(owner)}
+                    current_items = self._load_owner_from_db_locked(owner)
+                    # 前端现在会按会话增量保存。只保存少量会话时不要整表 replace，
+                    # 避免每次画图都删除并重写该用户全部历史，导致页签切换和多人并发变慢。
+                    if len(normalized_items) <= 8:
+                        by_id = {item["id"]: item for item in current_items}
+                        next_items = current_items
+                        for conversation in normalized_items:
+                            latest = _pick_latest(by_id.get(conversation["id"]), conversation)
+                            next_items = self._upsert_owner_row_locked(owner, latest, next_items)
+                            by_id[latest["id"]] = latest
+                        return list(next_items)
+                    by_id = {item["id"]: item for item in current_items}
                     for conversation in normalized_items:
                         by_id[conversation["id"]] = _pick_latest(by_id.get(conversation["id"]), conversation)
                     return list(self._replace_owner_rows_locked(owner, list(by_id.values())))

@@ -38,6 +38,7 @@ class AccountService:
         self._lock = Lock()
         self._index = 0
         self._accounts = self._load_accounts()
+        self._public_compact_cache: list[dict] | None = None
 
     @staticmethod
     def _clean_token(value: Any) -> str:
@@ -166,6 +167,11 @@ class AccountService:
 
     def _save_accounts(self) -> None:
         self.storage.save_accounts(self._accounts)
+        self._public_compact_cache = None
+
+    def _save_account(self, account: dict) -> None:
+        self.storage.save_account(account)
+        self._public_compact_cache = None
 
     def _build_remote_headers(self, access_token: str) -> tuple[dict[str, str], str]:
         account = self.get_account(access_token) or {}
@@ -372,7 +378,29 @@ class AccountService:
 
     def list_accounts(self, compact: bool = False) -> list[dict]:
         with self._lock:
-            return self._public_items_compact(self._accounts) if compact else self._public_items(self._accounts)
+            if compact:
+                if self._public_compact_cache is None:
+                    self._public_compact_cache = self._public_items_compact(self._accounts)
+                return [dict(item) for item in self._public_compact_cache]
+            return self._public_items(self._accounts)
+
+    def account_summary(self) -> dict[str, Any]:
+        with self._lock:
+            total = len(self._accounts)
+            active_items = [item for item in self._accounts if item.get("status") == "正常"]
+            available_unlimited = any(str(item.get("type") or "") in {"Pro", "ProLite"} for item in active_items)
+            available_unknown = any(bool(item.get("image_quota_unknown")) for item in active_items)
+            available_quota = sum(max(0, int(item.get("quota") or 0)) for item in active_items)
+            return {
+                "total": total,
+                "active": len(active_items),
+                "limited": sum(1 for item in self._accounts if item.get("status") == "限流"),
+                "abnormal": sum(1 for item in self._accounts if item.get("status") == "异常"),
+                "disabled": sum(1 for item in self._accounts if item.get("status") == "禁用"),
+                "available_quota": available_quota,
+                "available_unlimited": available_unlimited,
+                "available_unknown": available_unknown,
+            }
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
@@ -386,7 +414,7 @@ class AccountService:
     def add_accounts(self, tokens: list[str]) -> dict:
         cleaned_tokens = self._clean_tokens(tokens)
         if not cleaned_tokens:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            return {"added": 0, "skipped": 0, "items": self.list_accounts(compact=True)}
 
         with self._lock:
             indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
@@ -410,14 +438,14 @@ class AccountService:
                     indexed[access_token] = account
             self._accounts = list(indexed.values())
             self._save_accounts()
-            items = self._public_items(self._accounts)
+            items = self._public_items_compact(self._accounts)
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个", {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped, "items": items}
 
     def delete_accounts(self, tokens: list[str]) -> dict:
         target_set = set(self._clean_tokens(tokens))
         if not target_set:
-            return {"removed": 0, "items": self.list_accounts()}
+            return {"removed": 0, "items": self.list_accounts(compact=True)}
         with self._lock:
             before = len(self._accounts)
             self._accounts = [item for item in self._accounts if
@@ -430,7 +458,7 @@ class AccountService:
             if removed:
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
-            items = self._public_items(self._accounts)
+            items = self._public_items_compact(self._accounts)
         return {"removed": removed, "items": items}
 
     def remove_token(self, access_token: str) -> bool:
@@ -462,7 +490,7 @@ class AccountService:
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[index] = account
-            self._save_accounts()
+            self._save_account(account)
             log_service.add(LOG_TYPE_ACCOUNT, "更新账号", {"token": anonymize_token(access_token), "status": account.get("status")})
             return dict(account)
         return None
@@ -498,7 +526,7 @@ class AccountService:
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[index] = account
-            self._save_accounts()
+            self._save_account(account)
             return dict(account)
         return None
 
@@ -628,7 +656,7 @@ class AccountService:
     def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
         cleaned_tokens = self._clean_tokens(access_tokens)
         if not cleaned_tokens:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
+            return {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
 
         refreshed = 0
         errors: list[dict[str, str]] = []
@@ -656,7 +684,7 @@ class AccountService:
         return {
             "refreshed": refreshed,
             "errors": errors,
-            "items": self.list_accounts(),
+            "items": self.list_accounts(compact=True),
         }
 
 

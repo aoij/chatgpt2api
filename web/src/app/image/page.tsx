@@ -20,12 +20,11 @@ import { Button } from "@/components/ui/button";
 import {
   createImageEditTask,
   createImageGenerationTask,
-  fetchAccounts,
+  fetchAccountSummary,
   fetchCurrentUser,
   fetchImageTasks,
   fetchPublicConfig,
   type PublicConfig,
-  type Account,
   type ImageTask,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -82,9 +81,14 @@ function formatConversationTime(value: string) {
   }).format(date);
 }
 
-function formatAvailableQuota(accounts: Account[]) {
-  const availableAccounts = accounts.filter((account) => account.status !== "禁用");
-  return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+function formatAvailableQuotaSummary(summary: Awaited<ReturnType<typeof fetchAccountSummary>>) {
+  if (summary.available_unlimited) {
+    return "∞";
+  }
+  if (summary.available_unknown) {
+    return "未知";
+  }
+  return String(Math.max(0, Number(summary.available_quota) || 0));
 }
 
 function createId() {
@@ -576,8 +580,8 @@ function ImagePageContent({
       fetchCurrentUser()
         .then((data) => setTokenName(data.name || initialTokenName || "-"))
         .catch(() => undefined);
-      const data = await fetchAccounts();
-      setAvailableQuota(formatAvailableQuota(data.items));
+      const data = await fetchAccountSummary();
+      setAvailableQuota(formatAvailableQuotaSummary(data));
     } catch {
       setAvailableQuota((prev) => (prev === "加载中..." ? "--" : prev));
     }

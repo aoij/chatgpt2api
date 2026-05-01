@@ -24,6 +24,14 @@ _METADATA_FILE = DATA_DIR / "image_metadata.json"
 _METADATA_LOCK = RLock()
 _CLEANUP_LOCK = RLock()
 _LAST_CLEANUP_AT = 0.0
+_LIST_CACHE_LOCK = RLock()
+_LIST_CACHE: dict[str, object] = {
+    "signature": "",
+    "created_at": 0.0,
+    "items": [],
+    "uploaders": [],
+}
+LIST_CACHE_TTL_SECONDS = 20
 _UNKNOWN_UPLOADER = "未知上传人"
 
 
@@ -261,6 +269,7 @@ def record_image_metadata(rel: str, uploader: object = None, **extra: object) ->
         data = _load_metadata()
         data[image_rel] = metadata
         _save_metadata(data)
+    _invalidate_list_cache()
 
 
 def _remove_image_metadata(rel_paths: list[str]) -> None:
@@ -381,6 +390,22 @@ def _build_uploader_summary(items: list[dict[str, object]]) -> list[dict[str, ob
     return sorted(uploaders.values(), key=lambda item: (-int(item.get("count") or 0), str(item.get("name") or "")))
 
 
+def _invalidate_list_cache() -> None:
+    with _LIST_CACHE_LOCK:
+        _LIST_CACHE["signature"] = ""
+        _LIST_CACHE["created_at"] = 0.0
+        _LIST_CACHE["items"] = []
+        _LIST_CACHE["uploaders"] = []
+
+
+def _images_dir_signature(root: Path) -> str:
+    try:
+        stat = root.stat()
+        return f"{int(stat.st_mtime_ns)}:{stat.st_size}"
+    except OSError:
+        return "missing"
+
+
 def cleanup_expired_images() -> dict[str, int]:
     """删除超过保留期的图片、缩略图，并同步清理图片元数据。
 
@@ -481,6 +506,7 @@ def cleanup_expired_images() -> dict[str, int]:
     _cleanup_empty_dirs(thumb_root)
     _cleanup_empty_dirs(download_root)
     if removed_paths or removed_thumbs or removed_downloads or removed_metadata:
+        _invalidate_list_cache()
         print(
             "[image-cleanup] "
             f"retention_days={retention_days}, removed_images={len(removed_paths)}, "
@@ -505,63 +531,99 @@ def cleanup_expired_images_if_due() -> dict[str, int]:
     return cleanup_expired_images()
 
 
-def list_images(base_url: str, start_date: str = "", end_date: str = "", uploader: str = "") -> dict[str, object]:
+def list_images(
+    base_url: str,
+    start_date: str = "",
+    end_date: str = "",
+    uploader: str = "",
+    limit: int | None = 200,
+    offset: int = 0,
+) -> dict[str, object]:
     cleanup_expired_images_if_due()
-    items: list[dict[str, object]] = []
     root = config.images_dir
-    thumb_root = _thumb_root()
     normalized_base_url = base_url.rstrip("/")
-    with _METADATA_LOCK:
-        stored_metadata = _load_metadata()
-    log_index = _log_uploader_index()
+    signature = _images_dir_signature(root)
+    now = time.time()
+    with _LIST_CACHE_LOCK:
+        cache_items = _LIST_CACHE.get("items")
+        if (
+            _LIST_CACHE.get("signature") == signature
+            and isinstance(cache_items, list)
+            and now - float(_LIST_CACHE.get("created_at") or 0) < LIST_CACHE_TTL_SECONDS
+        ):
+            all_items = [dict(item) for item in cache_items if isinstance(item, dict)]
+        else:
+            all_items = []
 
-    for path in root.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in _IMAGE_SUFFIXES:
-            continue
-        rel = path.relative_to(root).as_posix()
-        day = _image_day(path, rel)
+    if not all_items:
+        thumb_root = _thumb_root()
+        with _METADATA_LOCK:
+            stored_metadata = _load_metadata()
+        log_index = _log_uploader_index()
+
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in _IMAGE_SUFFIXES:
+                continue
+            rel = path.relative_to(root).as_posix()
+            day = _image_day(path, rel)
+            meta = _image_metadata(rel, stored_metadata, log_index)
+            stat = path.stat()
+            thumb_path, dimensions = _ensure_thumbnail(path, rel)
+            thumbnail_path = ""
+            thumbnail_size = None
+            if thumb_path and thumb_path.exists():
+                thumbnail_path = thumb_path.relative_to(thumb_root).as_posix()
+                thumbnail_size = thumb_path.stat().st_size
+
+            item = {
+                "path": rel,
+                "name": path.name,
+                "date": day,
+                "size": stat.st_size,
+                "thumbnail_path": thumbnail_path,
+                "thumbnail_size": thumbnail_size,
+                "created_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                "uploader_key": _uploader_key(meta),
+                "uploader_id": _clean(meta.get("uploader_id")),
+                "uploader_name": _uploader_name(meta),
+                "uploader_role": _clean(meta.get("uploader_role")),
+            }
+            if dimensions:
+                item["dimensions"] = f"{dimensions[0]} x {dimensions[1]}"
+                item["width"] = dimensions[0]
+                item["height"] = dimensions[1]
+            all_items.append(item)
+
+        all_items.sort(key=lambda item: str(item["created_at"]), reverse=True)
+        with _LIST_CACHE_LOCK:
+            _LIST_CACHE["signature"] = signature
+            _LIST_CACHE["created_at"] = time.time()
+            _LIST_CACHE["items"] = [dict(item) for item in all_items]
+
+    items: list[dict[str, object]] = []
+    for item in all_items:
+        day = str(item.get("date") or "")
         if start_date and day < start_date:
             continue
         if end_date and day > end_date:
             continue
-
-        meta = _image_metadata(rel, stored_metadata, log_index)
-        if not _matches_uploader(meta, uploader):
+        if not _matches_uploader(item, uploader):
             continue
+        public_item = dict(item)
+        rel = str(public_item.get("path") or "")
+        thumbnail_path = str(public_item.pop("thumbnail_path", "") or "")
+        public_item["url"] = f"{normalized_base_url}/images/{rel}"
+        public_item["thumbnail_url"] = f"{normalized_base_url}/image-thumbs/{thumbnail_path}" if thumbnail_path else None
+        items.append(public_item)
 
-        stat = path.stat()
-        thumb_path, dimensions = _ensure_thumbnail(path, rel)
-        thumbnail_url = None
-        thumbnail_size = None
-        if thumb_path and thumb_path.exists():
-            thumb_rel = thumb_path.relative_to(thumb_root).as_posix()
-            thumbnail_url = f"{normalized_base_url}/image-thumbs/{thumb_rel}"
-            thumbnail_size = thumb_path.stat().st_size
+    total = len(items)
+    safe_offset = max(0, int(offset or 0))
+    safe_limit = max(1, min(int(limit or 200), 500)) if limit is not None else total
+    page_items = items[safe_offset:safe_offset + safe_limit]
 
-        item = {
-            "path": rel,
-            "name": path.name,
-            "date": day,
-            "size": stat.st_size,
-            "url": f"{normalized_base_url}/images/{rel}",
-            "thumbnail_url": thumbnail_url,
-            "thumbnail_size": thumbnail_size,
-            "created_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-            "uploader_key": _uploader_key(meta),
-            "uploader_id": _clean(meta.get("uploader_id")),
-            "uploader_name": _uploader_name(meta),
-            "uploader_role": _clean(meta.get("uploader_role")),
-        }
-        if dimensions:
-            item["dimensions"] = f"{dimensions[0]} x {dimensions[1]}"
-            item["width"] = dimensions[0]
-            item["height"] = dimensions[1]
-        items.append(item)
-
-    items.sort(key=lambda item: str(item["created_at"]), reverse=True)
     date_groups: dict[str, list[dict[str, object]]] = {}
     uploader_groups: dict[str, dict[str, object]] = {}
-    for item in items:
+    for item in page_items:
         date_groups.setdefault(str(item["date"]), []).append(item)
         uploader_key = str(item.get("uploader_key") or "unknown")
         group = uploader_groups.setdefault(uploader_key, {
@@ -575,7 +637,10 @@ def list_images(base_url: str, start_date: str = "", end_date: str = "", uploade
             group_items.append(item)
     uploaders = _build_uploader_summary(items)
     return {
-        "items": items,
+        "items": page_items,
+        "total": total,
+        "limit": safe_limit,
+        "offset": safe_offset,
         "groups": [{"date": key, "items": value} for key, value in date_groups.items()],
         "uploader_groups": sorted(uploader_groups.values(), key=lambda item: (-len(item.get("items") or []), str(item.get("uploader_name") or ""))),
         "uploaders": uploaders,
@@ -757,6 +822,8 @@ def delete_images(
             thumb_path.unlink()
 
     _remove_image_metadata(removed_paths)
+    if removed:
+        _invalidate_list_cache()
     _cleanup_empty_dirs(root)
     _cleanup_empty_dirs(thumb_root)
     return {"removed": removed}

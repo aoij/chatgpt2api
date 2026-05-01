@@ -7,7 +7,8 @@ export type AuthRole = "admin" | "user";
 
 export type Account = {
   id: string;
-  access_token: string;
+  access_token?: string;
+  token_preview?: string;
   type: AccountType;
   status: AccountStatus;
   quota: number;
@@ -28,6 +29,21 @@ export type Account = {
 
 type AccountListResponse = {
   items: Account[];
+};
+
+type AccountTokenListResponse = {
+  items: Array<{ id: string; access_token: string }>;
+};
+
+type AccountSummaryResponse = {
+  total: number;
+  active: number;
+  limited: number;
+  abnormal: number;
+  disabled: number;
+  available_quota: number;
+  available_unlimited: boolean;
+  available_unknown: boolean;
 };
 
 type AccountMutationResponse = {
@@ -291,7 +307,19 @@ export async function fetchCurrentUser() {
 }
 
 export async function fetchAccounts() {
-  return httpRequest<AccountListResponse>("/api/accounts");
+  return httpRequest<AccountListResponse>("/api/accounts?compact=true");
+}
+
+export async function fetchAccountSummary() {
+  return httpRequest<AccountSummaryResponse>("/api/accounts/summary");
+}
+
+export async function fetchAccountTokens(ids: string[] = []) {
+  const params = new URLSearchParams();
+  if (ids.length > 0) {
+    params.set("ids", ids.join(","));
+  }
+  return httpRequest<AccountTokenListResponse>(`/api/accounts/tokens${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
 export async function createAccounts(tokens: string[]) {
@@ -304,14 +332,14 @@ export async function createAccounts(tokens: string[]) {
 export async function deleteAccounts(tokens: string[]) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { tokens },
+    body: { ids: tokens },
   });
 }
 
 export async function refreshAccounts(accessTokens: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
-    body: { access_tokens: accessTokens },
+    body: { ids: accessTokens },
   });
 }
 
@@ -326,7 +354,7 @@ export async function updateAccount(
   return httpRequest<AccountUpdateResponse>("/api/accounts/update", {
     method: "POST",
     body: {
-      access_token: accessToken,
+      id: accessToken,
       ...updates,
     },
   });
@@ -432,12 +460,14 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
   });
 }
 
-export async function fetchManagedImages(filters: { start_date?: string; end_date?: string; uploader?: string }) {
+export async function fetchManagedImages(filters: { start_date?: string; end_date?: string; uploader?: string; limit?: number; offset?: number }) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   if (filters.uploader) params.set("uploader", filters.uploader);
-  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }>; uploaders: ManagedImageUploader[]; uploader_groups: Array<{ uploader_key: string; uploader_id?: string; uploader_name: string; items: ManagedImage[] }> }>(
+  if (filters.limit) params.set("limit", String(filters.limit));
+  if (filters.offset) params.set("offset", String(filters.offset));
+  return httpRequest<{ items: ManagedImage[]; total: number; limit: number; offset: number; groups: Array<{ date: string; items: ManagedImage[] }>; uploaders: ManagedImageUploader[]; uploader_groups: Array<{ uploader_key: string; uploader_id?: string; uploader_name: string; items: ManagedImage[] }> }>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
   );
 }

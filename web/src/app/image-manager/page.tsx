@@ -12,6 +12,7 @@ import {
   Maximize2,
   RefreshCw,
   Search,
+  SquareCheckBig,
   Trash2,
   Users,
 } from "lucide-react";
@@ -63,6 +64,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const isSelfMode = !isAdmin;
 
   const [items, setItems] = useState<ManagedImage[]>([]);
+  const [total, setTotal] = useState(0);
   const [uploaders, setUploaders] = useState<ManagedImageUploader[]>([]);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -79,17 +81,16 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
 
   const effectiveGroupMode: GroupMode = isAdmin ? groupMode : "none";
   const pageSize = 12;
-  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, pageCount);
-  const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
-  const selectedCount = deleteMode === "filtered" ? items.length : selectedPaths.length;
+  const selectedCount = deleteMode === "filtered" ? total : selectedPaths.length;
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(imageKey(item)));
-  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(imageKey(item)));
   const hasActiveFilter = Boolean(startDate || endDate || (isAdmin && uploader));
   const activeUploaderName = uploaders.find((item) => item.key === uploader)?.name || uploader;
   const fixedViewerLabel = session.name || "当前令牌";
-  const filterDeleteDisabled = isDeleting || items.length === 0 || !hasActiveFilter;
+  const filterDeleteDisabled = isDeleting || total === 0 || !hasActiveFilter;
 
   const lightboxImages = items.map((item) => ({
     id: imageKey(item),
@@ -121,15 +122,17 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
         start_date: startDate,
         end_date: endDate,
         ...(isAdmin && uploader ? { uploader } : {}),
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
       });
       setItems(data.items);
+      setTotal(data.total ?? data.items.length);
       if (isAdmin) {
         setUploaders((current) => uploader ? mergeUploaders(current, data.uploaders || []) : data.uploaders || []);
       } else {
         setUploaders(data.uploaders || []);
       }
       setSelectedPaths((current) => current.filter((path) => data.items.some((item) => imageKey(item) === path)));
-      setPage(1);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载图片失败");
     } finally {
@@ -152,6 +155,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
 
   const confirmDelete = async () => {
     if (!deleteMode || selectedCount === 0) return;
+    const previousPage = page;
     setIsDeleting(true);
     try {
       const data = await deleteManagedImages(
@@ -167,6 +171,12 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
       toast.success(`已删除 ${data.removed} 张图片`);
       setDeleteMode(null);
       setSelectedPaths([]);
+      const nextTotal = Math.max(0, total - Number(data.removed || 0));
+      const nextPage = Math.max(1, Math.min(previousPage, Math.ceil(nextTotal / pageSize) || 1));
+      if (nextPage !== previousPage) {
+        setPage(nextPage);
+        return;
+      }
       await loadImages();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除图片失败");
@@ -211,8 +221,12 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   };
 
   useEffect(() => {
-    void loadImages();
+    setPage(1);
   }, [startDate, endDate, uploader, isAdmin]);
+
+  useEffect(() => {
+    void loadImages();
+  }, [startDate, endDate, uploader, isAdmin, page]);
 
   const renderImageCard = (item: ManagedImage) => {
     const key = imageKey(item);
@@ -327,7 +341,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
 
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-full bg-white/90 px-3 py-1.5 text-xs font-medium text-stone-600 shadow-sm ring-1 ring-stone-200/70">
-            共 {items.length} 张
+            共 {total} 张
           </span>
           <span className="rounded-full bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 shadow-sm ring-1 ring-amber-200/70">
             图片保存 10 天
@@ -417,10 +431,15 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.map(imageKey), Boolean(checked))} />
                 本页全选
               </label>
-              <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 shadow-sm">
-                <Checkbox checked={allSelected} onCheckedChange={(checked) => togglePaths(items.map(imageKey), Boolean(checked))} />
-                全选结果
-              </label>
+              <Button
+                variant="outline"
+                className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700 sm:h-9"
+                onClick={() => setDeleteMode("filtered")}
+                disabled={filterDeleteDisabled}
+              >
+                <SquareCheckBig className="size-4" />
+                按筛选全删
+              </Button>
               <Button variant="ghost" className="h-10 rounded-xl px-3 text-stone-500 sm:h-9" onClick={() => void loadImages()} disabled={isLoading}>
                 <RefreshCw className={cn("size-4", isLoading && "animate-spin")} />
                 刷新
@@ -453,7 +472,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
             <div className="flex min-h-[320px] items-center justify-center rounded-[24px] border border-dashed border-stone-200 bg-stone-50/60">
               <LoaderCircle className="size-5 animate-spin text-stone-400" />
             </div>
-          ) : items.length === 0 ? (
+          ) : total === 0 ? (
             <div className="rounded-[24px] border border-dashed border-stone-200 bg-stone-50/60 px-6 py-14 text-center">
               <div className="text-base font-medium text-stone-700">
                 {isSelfMode ? "还没有找到你的图片" : "没有找到图片"}
@@ -483,7 +502,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
 
               <div className="flex items-center justify-between gap-2 border-t border-stone-100 pt-1 text-sm text-stone-500 sm:justify-end">
                 <span>
-                  第 {safePage} / {pageCount} 页，共 {items.length} 张
+                  第 {safePage} / {pageCount} 页，共 {total} 张
                 </span>
                 <Button
                   variant="outline"

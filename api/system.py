@@ -135,13 +135,23 @@ def create_router(app_version: str) -> APIRouter:
         return {"config": config.update(body.model_dump(mode="python"))}
 
     @router.get("/api/images")
-    async def get_images(request: Request, start_date: str = "", end_date: str = "", uploader: str = "", authorization: str | None = Header(default=None)):
+    async def get_images(
+        request: Request,
+        start_date: str = "",
+        end_date: str = "",
+        uploader: str = "",
+        limit: int = 200,
+        offset: int = 0,
+        authorization: str | None = Header(default=None),
+    ):
         identity = require_identity(authorization)
         return list_images(
             resolve_image_base_url(request),
             start_date=start_date.strip(),
             end_date=end_date.strip(),
             uploader=_effective_image_uploader(identity, uploader),
+            limit=limit,
+            offset=offset,
         )
 
     @router.post("/api/images/delete")
