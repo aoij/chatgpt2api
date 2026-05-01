@@ -49,6 +49,12 @@ import { cn } from "@/lib/utils";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_id";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
+const EDIT_TASK_SUBMIT_CONCURRENCY = 1;
+const GENERATE_TASK_SUBMIT_CONCURRENCY = 3;
+const TASK_SUBMIT_RETRY = 2;
+const TASK_POLL_RETRY = 4;
+const MAX_REFERENCE_IMAGE_EDGE = 1600;
+const REFERENCE_IMAGE_JPEG_QUALITY = 0.88;
 
 function clampImageCount(value: string) {
   return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
@@ -108,6 +114,119 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
   return new File([bytes], fileName, { type: mimeType || matchedMimeType || "image/png" });
 }
 
+function friendlyImageError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (!message || message === "Network Error") {
+    return "网络请求失败：可能是移动网络不稳定、服务刚重启，或一次上传图片过大，请稍后重试";
+  }
+  if (/network|failed to fetch|connection|reset|abort|timeout/i.test(message)) {
+    return `网络请求失败：${message}`;
+  }
+  return message;
+}
+
+function isRetryableTaskError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /network|failed to fetch|connection|reset|abort|timeout/i.test(message);
+}
+
+async function imageElementFromObjectUrl(url: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("读取参考图失败"));
+    image.src = url;
+  });
+}
+
+async function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number) {
+  return new Promise<Blob | null>((resolve) => {
+    canvas.toBlob((blob) => resolve(blob), type, quality);
+  });
+}
+
+async function optimizeReferenceFile(file: File) {
+  const fallback = async () => ({
+    file,
+    referenceImage: {
+      name: file.name,
+      type: file.type || "image/png",
+      dataUrl: await readFileAsDataUrl(file),
+    },
+  });
+
+  if (!file.type.startsWith("image/") || /svg|gif|heic|heif/i.test(file.type)) {
+    return fallback();
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const image = await imageElementFromObjectUrl(objectUrl);
+    const scale = Math.min(1, MAX_REFERENCE_IMAGE_EDGE / Math.max(image.naturalWidth || image.width, image.naturalHeight || image.height));
+    const width = Math.max(1, Math.round((image.naturalWidth || image.width) * scale));
+    const height = Math.max(1, Math.round((image.naturalHeight || image.height) * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return fallback();
+    }
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+    const blob = await canvasToBlob(canvas, "image/jpeg", REFERENCE_IMAGE_JPEG_QUALITY);
+    if (!blob) {
+      return fallback();
+    }
+    const shouldUseOptimized = scale < 1 || blob.size < file.size * 0.95 || file.type !== "image/jpeg";
+    if (!shouldUseOptimized) {
+      return fallback();
+    }
+    const optimizedName = `${file.name.replace(/\.[^.]+$/, "") || "reference"}.jpg`;
+    const optimizedFile = new File([blob], optimizedName, { type: "image/jpeg" });
+    return {
+      file: optimizedFile,
+      referenceImage: {
+        name: optimizedName,
+        type: "image/jpeg",
+        dataUrl: await readFileAsDataUrl(optimizedFile),
+      },
+    };
+  } catch {
+    return fallback();
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>,
+) {
+  const results: Array<{ item: T; index: number; value?: R; error?: unknown }> = [];
+  let nextIndex = 0;
+  const concurrency = Math.max(1, Math.min(limit, items.length || 1));
+
+  await Promise.all(
+    Array.from({ length: concurrency }, async () => {
+      while (nextIndex < items.length) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        const item = items[currentIndex];
+        try {
+          results[currentIndex] = { item, index: currentIndex, value: await worker(item, currentIndex) };
+        } catch (error) {
+          results[currentIndex] = { item, index: currentIndex, error };
+        }
+      }
+    }),
+  );
+
+  return results;
+}
+
 function buildReferenceImageFromResult(image: StoredImage, fileName: string): StoredReferenceImage | null {
   if (!image.b64_json) {
     return null;
@@ -142,14 +261,7 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
     return null;
   }
   const file = await fetchImageAsFile(image.url, fileName);
-  return {
-    referenceImage: {
-      name: file.name,
-      type: file.type || "image/png",
-      dataUrl: await readFileAsDataUrl(file),
-    },
-    file,
-  };
+  return optimizeReferenceFile(file);
 }
 
 function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage {
@@ -179,7 +291,7 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
       ...image,
       taskId: task.id,
       status: "error",
-      error: task.error || "生成失败",
+      error: friendlyImageError(task.error || "生成失败"),
     };
   }
 
@@ -663,16 +775,10 @@ function ImagePageContent({
     }
 
     try {
-      const previews = await Promise.all(
-        files.map(async (file) => ({
-          name: file.name,
-          type: file.type || "image/png",
-          dataUrl: await readFileAsDataUrl(file),
-        })),
-      );
+        const prepared = await Promise.all(files.map((file) => optimizeReferenceFile(file)));
 
-      setReferenceImageFiles((prev) => [...prev, ...files]);
-      setReferenceImages((prev) => [...prev, ...previews]);
+        setReferenceImageFiles((prev) => [...prev, ...prepared.map((item) => item.file)]);
+        setReferenceImages((prev) => [...prev, ...prepared.map((item) => item.referenceImage)]);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
@@ -789,6 +895,77 @@ function ImagePageContent({
         });
       };
 
+      const markImagesError = async (errors: Array<{ image: StoredImage; error: unknown }>) => {
+        if (errors.length === 0) {
+          return;
+        }
+        await updateConversation(conversationId, (current) => {
+          const conversation = current ?? snapshot;
+          const errorMap = new Map(errors.map(({ image, error }) => [image.id, friendlyImageError(error)]));
+          const turns = conversation.turns.map((turn) => {
+            if (turn.id !== activeTurn.id) {
+              return turn;
+            }
+            const images = turn.images.map((image) =>
+              errorMap.has(image.id)
+                ? {
+                    ...image,
+                    status: "error" as const,
+                    error: errorMap.get(image.id),
+                  }
+                : image,
+            );
+            const derived = deriveTurnStatus({ ...turn, status: "generating", images });
+            return {
+              ...turn,
+              ...derived,
+              images,
+            };
+          });
+          return {
+            ...conversation,
+            updatedAt: new Date().toISOString(),
+            turns,
+          };
+        });
+      };
+
+      const submitTaskWithRetry = async (image: StoredImage, referenceFiles: File[]) => {
+        const taskId = image.taskId || image.id;
+        let lastError: unknown = null;
+        for (let attempt = 0; attempt <= TASK_SUBMIT_RETRY; attempt += 1) {
+          try {
+            return activeTurn.mode === "edit"
+              ? await createImageEditTask(taskId, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size)
+              : await createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size);
+          } catch (error) {
+            lastError = error;
+            if (!isRetryableTaskError(error) || attempt >= TASK_SUBMIT_RETRY) {
+              throw error;
+            }
+            await sleep(800 * (attempt + 1));
+          }
+        }
+        throw lastError || new Error("提交图片任务失败");
+      };
+
+      const submitPendingTasks = async (images: StoredImage[], referenceFiles: File[]) => {
+        const results = await runWithConcurrency(
+          images,
+          activeTurn.mode === "edit" ? EDIT_TASK_SUBMIT_CONCURRENCY : GENERATE_TASK_SUBMIT_CONCURRENCY,
+          (image) => submitTaskWithRetry(image, referenceFiles),
+        );
+        const submitted = results.flatMap((result) => (result.value ? [result.value] : []));
+        const failed = results.flatMap((result) => (result.error ? [{ image: result.item, error: result.error }] : []));
+        if (submitted.length > 0) {
+          await applyTasks(submitted);
+        }
+        if (failed.length > 0) {
+          await markImagesError(failed);
+        }
+        return submitted;
+      };
+
       try {
         await updateConversation(conversationId, (current) => {
           const conversation = current ?? snapshot;
@@ -818,17 +995,10 @@ function ImagePageContent({
         }
 
         const pendingImages = activeTurn.images.filter((image) => image.status === "loading");
-        const submitted = await Promise.all(
-          pendingImages.map((image) => {
-            const taskId = image.taskId || image.id;
-            return activeTurn.mode === "edit"
-              ? createImageEditTask(taskId, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size)
-              : createImageGenerationTask(taskId, activeTurn.prompt, activeTurn.model, activeTurn.size);
-          }),
-        );
-        await applyTasks(submitted);
+        await submitPendingTasks(pendingImages, referenceFiles);
         await loadQuota();
 
+        let pollFailureCount = 0;
         while (true) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
           const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
@@ -841,7 +1011,17 @@ function ImagePageContent({
           }
 
           await sleep(2000);
-          const taskList = await fetchImageTasks(loadingTaskIds);
+          let taskList: Awaited<ReturnType<typeof fetchImageTasks>>;
+          try {
+            taskList = await fetchImageTasks(loadingTaskIds);
+            pollFailureCount = 0;
+          } catch (error) {
+            pollFailureCount += 1;
+            if (pollFailureCount < TASK_POLL_RETRY && isRetryableTaskError(error)) {
+              continue;
+            }
+            throw error;
+          }
           if (taskList.items.length > 0) {
             await applyTasks(taskList.items);
           }
@@ -849,22 +1029,13 @@ function ImagePageContent({
             const missingImages = latestTurn.images.filter(
               (image) => image.status === "loading" && image.taskId && taskList.missing_ids.includes(image.taskId),
             );
-            const resubmitted = await Promise.all(
-              missingImages.map((image) =>
-                activeTurn.mode === "edit"
-                  ? createImageEditTask(image.taskId || image.id, referenceFiles, activeTurn.prompt, activeTurn.model, activeTurn.size)
-                  : createImageGenerationTask(image.taskId || image.id, activeTurn.prompt, activeTurn.model, activeTurn.size),
-              ),
-            );
-            if (resubmitted.length > 0) {
-              await applyTasks(resubmitted);
-            }
+            await submitPendingTasks(missingImages, referenceFiles);
           }
         }
 
         await loadQuota();
       } catch (error) {
-        const message = error instanceof Error ? error.message : "生成图片失败";
+        const message = friendlyImageError(error) || "生成图片失败";
         await updateConversation(conversationId, (current) => {
           const conversation = current ?? snapshot;
           return {
