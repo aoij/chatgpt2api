@@ -116,7 +116,7 @@ export default function LoginPage() {
   const [authKey, setAuthKey] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [rechargeOpen, setRechargeOpen] = useState(false);
-  const [rechargeEnabled, setRechargeEnabled] = useState(true);
+  const [rechargeEnabled, setRechargeEnabled] = useState(false);
   const [amounts, setAmounts] = useState<RechargeOption[]>(FALLBACK_AMOUNTS);
   const [payTypes, setPayTypes] = useState<RechargePayTypeOption[]>(FALLBACK_PAY_TYPES);
   const [notice, setNotice] = useState<string[]>(FALLBACK_NOTICE);
@@ -476,14 +476,16 @@ export default function LoginPage() {
               {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
               登录
             </Button>
-            <Button
-              variant="outline"
-              className="h-13 w-full rounded-2xl border-red-200 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700"
-              onClick={() => setRechargeOpen(true)}
-            >
-              <ShoppingCart className="size-4" />
-              充值购买画图令牌
-            </Button>
+            {rechargeEnabled ? (
+              <Button
+                variant="outline"
+                className="h-13 w-full rounded-2xl border-red-200 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700"
+                onClick={() => setRechargeOpen(true)}
+              >
+                <ShoppingCart className="size-4" />
+                充值购买画图令牌
+              </Button>
+            ) : null}
           </div>
         </CardContent>
       </Card>

@@ -33,6 +33,13 @@ DEFAULT_AUTO_CHECK_INTERVAL_SECONDS = 60
 DEFAULT_ORDER_GRACE_MINUTES = 30
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = str(os.getenv(name) or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on", "enabled", "enable"}
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -177,9 +184,12 @@ class RechargeService:
     def is_configured(self) -> bool:
         return bool(self.epay_public_base_url and self.epay_pid and self.epay_key)
 
+    def is_purchase_enabled(self) -> bool:
+        return _env_bool("CHATGPT2API_RECHARGE_ENABLED", False) and self.is_configured()
+
     def options(self) -> dict[str, object]:
         return {
-            "enabled": self.is_configured(),
+            "enabled": self.is_purchase_enabled(),
             "order_expire_minutes": self.order_expire_minutes,
             "auto_check_interval_seconds": self.auto_check_interval_seconds,
             "order_grace_minutes": self.order_grace_minutes,
@@ -267,7 +277,7 @@ class RechargeService:
         return notify_url, return_url
 
     def create_order(self, *, amount: object, pay_type: str, token_name: str, public_base_url: str) -> dict[str, Any]:
-        if not self.is_configured():
+        if not self.is_purchase_enabled():
             raise ValueError("recharge payment is not configured")
 
         money = _decimal_money(amount)
