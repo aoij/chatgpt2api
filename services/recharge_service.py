@@ -373,9 +373,39 @@ class RechargeService:
                 raise ValueError("order amount mismatch")
 
             now_text = _now_iso()
+            public_base_url = self.public_base_url(str(order.get("public_base_url") or ""))
+
+            # 幂等保护：同一充值订单只能发放一次令牌。
+            # 1) 正常已发放订单直接返回原登录链接；
+            # 2) 如果订单状态被异常回退为 paid/pending，但已经记录 auth_key_id/link_token，
+            #    也只恢复原令牌，不再创建新令牌；
+            # 3) 新版本创建的充值令牌会写入 recharge_out_trade_no，重复回调/并发 refresh
+            #    会从 AuthService 查回同一个 key。
             if order.get("status") == "issued" and order.get("login_url"):
                 order["updated_at"] = now_text
                 order["last_notify_at"] = now_text
+                self._save_locked(items)
+                return self._public_order(order) or {}
+
+            existing_key: dict[str, Any] | None = None
+            existing_auth_key_id = _clean_text(order.get("auth_key_id"), max_length=80)
+            if existing_auth_key_id:
+                existing_key = auth_service.get_public_key(existing_auth_key_id)
+            if existing_key is None:
+                existing_key = auth_service.get_key_by_recharge_order(out_trade_no)
+            existing_link_token = str((existing_key or {}).get("link_token") or order.get("link_token") or "").strip()
+            if existing_link_token:
+                order["status"] = "issued"
+                order["paid_at"] = order.get("paid_at") or now_text
+                order["issued_at"] = order.get("issued_at") or now_text
+                order["trade_no"] = order.get("trade_no") or str(params.get("trade_no") or "").strip()
+                if existing_key is not None:
+                    order["auth_key_id"] = existing_key.get("id") or order.get("auth_key_id")
+                order["link_token"] = existing_link_token
+                order["login_url"] = order.get("login_url") or f"{public_base_url}/image/?key={existing_link_token}"
+                order["updated_at"] = now_text
+                order["last_notify_at"] = now_text
+                order["idempotent_reused_at"] = now_text
                 self._save_locked(items)
                 return self._public_order(order) or {}
 
@@ -389,11 +419,15 @@ class RechargeService:
             if quota <= 0:
                 raise ValueError("order quota is invalid")
 
-            item, _raw_key = auth_service.create_key(role="user", name=token_name, quota=quota)
+            item, _raw_key = auth_service.create_key(
+                role="user",
+                name=token_name,
+                quota=quota,
+                recharge_out_trade_no=out_trade_no,
+            )
             link_token = str(item.get("link_token") or "").strip()
             if not link_token:
                 raise RuntimeError("created token missing login link")
-            public_base_url = self.public_base_url(str(order.get("public_base_url") or ""))
             login_url = f"{public_base_url}/image/?key={link_token}"
 
             order["status"] = "issued"

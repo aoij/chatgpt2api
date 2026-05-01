@@ -70,6 +70,7 @@ class AuthService:
         if role == "user" and not link_token:
             link_token = f"lk-{secrets.token_urlsafe(24)}"
             self._needs_save = True
+        recharge_out_trade_no = self._clean(raw.get("recharge_out_trade_no"))
         return {
             "id": item_id,
             "name": name,
@@ -78,6 +79,7 @@ class AuthService:
             "enabled": bool(raw.get("enabled", True)),
             "quota": quota,
             "link_token": link_token,
+            "recharge_out_trade_no": recharge_out_trade_no,
             "created_at": created_at,
             "last_used_at": last_used_at,
         }
@@ -103,6 +105,7 @@ class AuthService:
             "enabled": bool(item.get("enabled", True)),
             "quota": item.get("quota"),
             "link_token": item.get("link_token") if item.get("role") == "user" else None,
+            "recharge_out_trade_no": item.get("recharge_out_trade_no") if item.get("role") == "user" else None,
             "created_at": item.get("created_at"),
             "last_used_at": item.get("last_used_at"),
         }
@@ -112,9 +115,27 @@ class AuthService:
             items = [item for item in self._items if role is None or item.get("role") == role]
             return [self._public_item(item) for item in items]
 
-    def create_key(self, *, role: AuthRole, name: str = "", quota: int | None = None) -> tuple[dict[str, object], str]:
+    def get_key_by_recharge_order(self, out_trade_no: object) -> dict[str, object] | None:
+        normalized_order_no = self._clean(out_trade_no)
+        if not normalized_order_no:
+            return None
+        with self._lock:
+            for item in self._items:
+                if item.get("role") == "user" and self._clean(item.get("recharge_out_trade_no")) == normalized_order_no:
+                    return self._public_item(item)
+        return None
+
+    def create_key(
+        self,
+        *,
+        role: AuthRole,
+        name: str = "",
+        quota: int | None = None,
+        recharge_out_trade_no: str = "",
+    ) -> tuple[dict[str, object], str]:
         normalized_name = self._clean(name) or ("管理员密钥" if role == "admin" else "普通用户")
         normalized_quota = self._normalize_quota(quota, default=0 if role == "user" else None)
+        normalized_order_no = self._clean(recharge_out_trade_no) if role == "user" else ""
         raw_key = f"sk-{secrets.token_urlsafe(24)}"
         item = {
             "id": uuid.uuid4().hex[:12],
@@ -124,10 +145,15 @@ class AuthService:
             "enabled": True,
             "quota": normalized_quota,
             "link_token": f"lk-{secrets.token_urlsafe(24)}" if role == "user" else "",
+            "recharge_out_trade_no": normalized_order_no,
             "created_at": _now_iso(),
             "last_used_at": None,
         }
         with self._lock:
+            if normalized_order_no:
+                for existing in self._items:
+                    if existing.get("role") == "user" and self._clean(existing.get("recharge_out_trade_no")) == normalized_order_no:
+                        return self._public_item(existing), ""
             self._items.append(item)
             self._save()
             return self._public_item(item), raw_key
