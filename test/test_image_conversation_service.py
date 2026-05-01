@@ -36,6 +36,12 @@ def conversation(conversation_id: str, prompt: str = "cat", updated_at: str = "2
     }
 
 
+def conversation_with_b64(conversation_id: str) -> dict[str, object]:
+    item = conversation(conversation_id)
+    item["turns"][0]["images"][0]["b64_json"] = "very-large-base64"
+    return item
+
+
 class ImageConversationServiceTests(unittest.TestCase):
     def test_save_and_reload_uses_database_without_writing_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -77,6 +83,33 @@ class ImageConversationServiceTests(unittest.TestCase):
                 items = service.list(OWNER)
 
                 self.assertEqual([item["id"] for item in items], ["legacy-1"])
+                conn = sqlite3.connect(db_path)
+                try:
+                    count = conn.execute("select count(*) from image_conversations").fetchone()[0]
+                finally:
+                    conn.close()
+                self.assertEqual(count, 1)
+            finally:
+                service.close()
+
+    def test_save_prunes_base64_when_url_exists_and_updates_single_row(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            json_path = tmp_path / "image_conversations.json"
+            db_path = tmp_path / "accounts.db"
+            database_url = f"sqlite:///{db_path.as_posix()}"
+
+            service = ImageConversationService(json_path, database_url=database_url)
+            try:
+                service.save(OWNER, conversation_with_b64("conv-1"))
+                service.save(OWNER, conversation("conv-1", "cat updated", "2026-01-01T00:01:00"))
+                items = service.list(OWNER)
+
+                self.assertEqual([item["id"] for item in items], ["conv-1"])
+                image = items[0]["turns"][0]["images"][0]
+                self.assertEqual(image["url"], "http://example.test/a.png")
+                self.assertNotIn("b64_json", image)
+
                 conn = sqlite3.connect(db_path)
                 try:
                     count = conn.execute("select count(*) from image_conversations").fetchone()[0]

@@ -21,6 +21,7 @@ MAX_CONVERSATIONS_PER_OWNER = 80
 MAX_TURNS_PER_CONVERSATION = 80
 MAX_IMAGES_PER_TURN = 20
 MAX_REFERENCE_IMAGES_PER_TURN = 8
+MAX_REFERENCE_DATA_URL_CHARS = 180_000
 DB_QUERY_LIMIT_PER_OWNER = MAX_CONVERSATIONS_PER_OWNER * 2
 
 
@@ -76,7 +77,10 @@ def _normalize_image(raw: object) -> dict[str, Any] | None:
         "id": image_id,
         "status": status,
     }
+    has_url = isinstance(raw.get("url"), str) and bool(str(raw.get("url") or "").strip())
     for key in ("taskId", "url", "b64_json", "revised_prompt", "error"):
+        if key == "b64_json" and has_url:
+            continue
         value = raw.get(key)
         if isinstance(value, str) and value:
             item[key] = value
@@ -88,6 +92,10 @@ def _normalize_reference_image(raw: object) -> dict[str, Any] | None:
         return None
     data_url = _clean(raw.get("dataUrl"))
     if not data_url:
+        return None
+    # 历史会话只需要参考图缩略预览。旧数据里直接保存原图 base64 会让
+    # /api/image-conversations 动辄数 MB，切换页签重新打开画图页时会明显变慢。
+    if len(data_url) > MAX_REFERENCE_DATA_URL_CHARS:
         return None
     return {
         "name": _clean(raw.get("name"), "reference.png"),
@@ -321,6 +329,65 @@ class ImageConversationService:
         finally:
             session.close()
 
+    def _upsert_owner_row_locked(
+        self,
+        owner: str,
+        normalized: dict[str, Any],
+        current_items: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if self._Session is None:
+            return []
+        session = self._Session()
+        try:
+            row = (
+                session.query(ImageConversationModel)
+                .filter(
+                    ImageConversationModel.owner_id == owner,
+                    ImageConversationModel.conversation_id == normalized["id"],
+                )
+                .one_or_none()
+            )
+            payload = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+            created_at = _clean(normalized.get("createdAt"), _now_iso())
+            updated_at = _clean(normalized.get("updatedAt"), created_at)
+            if row is None:
+                session.add(
+                    ImageConversationModel(
+                        owner_id=owner,
+                        conversation_id=normalized["id"],
+                        payload=payload,
+                        created_at=created_at,
+                        updated_at=updated_at,
+                    )
+                )
+            else:
+                row.payload = payload
+                row.created_at = created_at
+                row.updated_at = updated_at
+
+            extra_rows = (
+                session.query(ImageConversationModel)
+                .filter(ImageConversationModel.owner_id == owner)
+                .order_by(ImageConversationModel.updated_at.desc())
+                .offset(MAX_CONVERSATIONS_PER_OWNER)
+                .all()
+            )
+            for extra in extra_rows:
+                session.delete(extra)
+            session.commit()
+
+            base_items = current_items if current_items is not None else self._cache.get(owner, [])
+            by_id = {item["id"]: item for item in base_items}
+            by_id[normalized["id"]] = _pick_latest(by_id.get(normalized["id"]), normalized)
+            next_items = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
+            self._cache[owner] = next_items
+            return next_items
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     def _migrate_legacy_json_to_db(self) -> None:
         legacy = self._load_from_disk()
         if not legacy:
@@ -360,8 +427,8 @@ class ImageConversationService:
                 try:
                     items = self._load_owner_from_db_locked(owner)
                     by_id = {item["id"]: item for item in items}
-                    by_id[normalized["id"]] = _pick_latest(by_id.get(normalized["id"]), normalized)
-                    return list(self._replace_owner_rows_locked(owner, list(by_id.values())))
+                    latest = _pick_latest(by_id.get(normalized["id"]), normalized)
+                    return list(self._upsert_owner_row_locked(owner, latest, items))
                 except Exception as exc:
                     self._handle_db_error_locked("save", exc)
             items = self._data.get(owner, [])

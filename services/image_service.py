@@ -16,11 +16,14 @@ from services.config import DATA_DIR, config
 
 THUMB_MAX_SIZE = (480, 480)
 THUMB_QUALITY = 74
-DOWNLOAD_JPEG_QUALITY = 92
+DOWNLOAD_JPEG_QUALITY = 90
 MAX_BATCH_DOWNLOAD = 200
+CLEANUP_INTERVAL_SECONDS = 600
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _METADATA_FILE = DATA_DIR / "image_metadata.json"
 _METADATA_LOCK = RLock()
+_CLEANUP_LOCK = RLock()
+_LAST_CLEANUP_AT = 0.0
 _UNKNOWN_UPLOADER = "未知上传人"
 
 
@@ -30,8 +33,18 @@ def _thumb_root() -> Path:
     return path
 
 
+def _download_root() -> Path:
+    path = config.images_dir.parent / "image_downloads"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _thumb_path_for(rel: str) -> Path:
     return (_thumb_root() / Path(rel)).with_suffix(".webp")
+
+
+def _download_jpeg_path_for(rel: str) -> Path:
+    return (_download_root() / Path(rel)).with_suffix(".jpg")
 
 
 def _image_dimensions(path: Path) -> Optional[tuple[int, int]]:
@@ -89,14 +102,14 @@ def _safe_image_path(rel: str) -> tuple[str, Optional[Path]]:
     return image_rel, path
 
 
-def _jpeg_bytes(path: Path) -> bytes:
-    """Return mobile-friendly JPEG bytes for an image.
+def _write_jpeg(source_path: Path, target_path: Path) -> bytes:
+    """Convert and cache mobile-friendly JPEG bytes for an image.
 
     iOS/Android browsers save JPG files more consistently into the photo workflow
     than WebP/PNG blobs. Transparent images are flattened onto a white background.
     """
     output = io.BytesIO()
-    with Image.open(path) as image:
+    with Image.open(source_path) as image:
         image = ImageOps.exif_transpose(image)
         has_alpha = image.mode in {"RGBA", "LA"} or "transparency" in image.info
         if has_alpha:
@@ -106,8 +119,26 @@ def _jpeg_bytes(path: Path) -> bytes:
             image = background
         elif image.mode != "RGB":
             image = image.convert("RGB")
-        image.save(output, "JPEG", quality=DOWNLOAD_JPEG_QUALITY, optimize=True)
-    return output.getvalue()
+        image.save(output, "JPEG", quality=DOWNLOAD_JPEG_QUALITY)
+    content = output.getvalue()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(content)
+    return content
+
+
+def _jpeg_bytes(path: Path, rel: str) -> bytes:
+    """Return mobile-friendly JPEG bytes, using an on-disk conversion cache."""
+    if path.suffix.lower() in {".jpg", ".jpeg"}:
+        return path.read_bytes()
+
+    cache_path = _download_jpeg_path_for(rel)
+    try:
+        source_mtime = path.stat().st_mtime
+        if cache_path.exists() and cache_path.stat().st_mtime >= source_mtime:
+            return cache_path.read_bytes()
+    except OSError:
+        pass
+    return _write_jpeg(path, cache_path)
 
 
 def _download_filename(rel: str, index: int | None = None) -> str:
@@ -367,8 +398,10 @@ def cleanup_expired_images() -> dict[str, int]:
 
     root = config.images_dir.resolve()
     thumb_root = _thumb_root().resolve()
+    download_root = _download_root().resolve()
     removed_paths: list[str] = []
     removed_thumbs = 0
+    removed_downloads = 0
 
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in _IMAGE_SUFFIXES:
@@ -392,6 +425,13 @@ def cleanup_expired_images() -> dict[str, int]:
                 removed_thumbs += 1
         except Exception as exc:
             print(f"[image-cleanup] remove thumbnail failed rel={rel}: {exc}")
+        try:
+            download_path = _download_jpeg_path_for(rel).resolve()
+            if _is_relative_to(download_path, download_root) and download_path.is_file():
+                download_path.unlink()
+                removed_downloads += 1
+        except Exception as exc:
+            print(f"[image-cleanup] remove download cache failed rel={rel}: {exc}")
 
     if thumb_root.exists():
         for thumb_path in thumb_root.rglob("*"):
@@ -407,6 +447,21 @@ def cleanup_expired_images() -> dict[str, int]:
                 removed_thumbs += 1
             except Exception as exc:
                 print(f"[image-cleanup] remove orphan thumbnail failed path={thumb_path}: {exc}")
+
+    if download_root.exists():
+        for download_path in download_root.rglob("*"):
+            if not download_path.is_file():
+                continue
+            try:
+                download_rel_path = download_path.relative_to(download_root)
+                source_candidates = [(root / download_rel_path).with_suffix(suffix) for suffix in _IMAGE_SUFFIXES]
+                source_exists = any(candidate.is_file() for candidate in source_candidates)
+                if source_exists and download_path.stat().st_mtime >= cutoff_ts:
+                    continue
+                download_path.unlink()
+                removed_downloads += 1
+            except Exception as exc:
+                print(f"[image-cleanup] remove orphan download cache failed path={download_path}: {exc}")
 
     removed_metadata = 0
     with _METADATA_LOCK:
@@ -424,17 +479,34 @@ def cleanup_expired_images() -> dict[str, int]:
 
     _cleanup_empty_dirs(root)
     _cleanup_empty_dirs(thumb_root)
-    if removed_paths or removed_thumbs or removed_metadata:
+    _cleanup_empty_dirs(download_root)
+    if removed_paths or removed_thumbs or removed_downloads or removed_metadata:
         print(
             "[image-cleanup] "
             f"retention_days={retention_days}, removed_images={len(removed_paths)}, "
-            f"removed_thumbs={removed_thumbs}, removed_metadata={removed_metadata}"
+            f"removed_thumbs={removed_thumbs}, removed_downloads={removed_downloads}, "
+            f"removed_metadata={removed_metadata}"
         )
-    return {"removed": len(removed_paths), "thumbnails_removed": removed_thumbs, "metadata_removed": removed_metadata}
+    return {
+        "removed": len(removed_paths),
+        "thumbnails_removed": removed_thumbs,
+        "download_cache_removed": removed_downloads,
+        "metadata_removed": removed_metadata,
+    }
+
+
+def cleanup_expired_images_if_due() -> dict[str, int]:
+    global _LAST_CLEANUP_AT
+    now = time.time()
+    with _CLEANUP_LOCK:
+        if now - _LAST_CLEANUP_AT < CLEANUP_INTERVAL_SECONDS:
+            return {"removed": 0, "thumbnails_removed": 0, "download_cache_removed": 0, "metadata_removed": 0}
+        _LAST_CLEANUP_AT = now
+    return cleanup_expired_images()
 
 
 def list_images(base_url: str, start_date: str = "", end_date: str = "", uploader: str = "") -> dict[str, object]:
-    cleanup_expired_images()
+    cleanup_expired_images_if_due()
     items: list[dict[str, object]] = []
     root = config.images_dir
     thumb_root = _thumb_root()
@@ -545,7 +617,7 @@ def _normalize_rel_paths(paths: list[str] | None) -> list[str]:
 
 def build_image_download(rel: str, uploader: str = "") -> Optional[dict[str, object]]:
     """Build a permission-checked, mobile-friendly JPEG download payload."""
-    cleanup_expired_images()
+    cleanup_expired_images_if_due()
     image_rel, path = _safe_image_path(rel)
     if not image_rel or path is None:
         return None
@@ -557,7 +629,7 @@ def build_image_download(rel: str, uploader: str = "") -> Optional[dict[str, obj
         return None
 
     try:
-        content = _jpeg_bytes(path)
+        content = _jpeg_bytes(path, image_rel)
         filename = _download_filename(image_rel)
         media_type = "image/jpeg"
     except Exception as exc:
@@ -584,7 +656,7 @@ def build_images_zip(paths: list[str] | None, uploader: str = "") -> Optional[di
     if len(normalized) > MAX_BATCH_DOWNLOAD:
         normalized = normalized[:MAX_BATCH_DOWNLOAD]
 
-    cleanup_expired_images()
+    cleanup_expired_images_if_due()
     root = config.images_dir.resolve()
     with _METADATA_LOCK:
         stored_metadata = _load_metadata()
@@ -602,7 +674,7 @@ def build_images_zip(paths: list[str] | None, uploader: str = "") -> Optional[di
             if not _matches_uploader(meta, uploader):
                 continue
             try:
-                content = _jpeg_bytes(path)
+                content = _jpeg_bytes(path, image_rel)
                 entry_name = _zip_entry_name(image_rel, added + 1)
             except Exception as exc:
                 print(f"[image-download] zip convert jpeg failed path={path}: {exc}")

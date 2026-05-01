@@ -33,6 +33,7 @@ import {
   clearImageConversations,
   deleteImageConversation,
   getImageConversationStats,
+  IMAGE_CONVERSATIONS_SYNC_EVENT,
   listImageConversations,
   saveImageConversation,
   saveImageConversations,
@@ -166,7 +167,7 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
       ...image,
       taskId: task.id,
       status: "success",
-      b64_json: first.b64_json,
+      b64_json: first.url ? undefined : first.b64_json,
       url: first.url,
       revised_prompt: first.revised_prompt,
       error: undefined,
@@ -398,6 +399,25 @@ function ImagePageContent({
   useEffect(() => {
     let cancelled = false;
 
+    const applyHistory = async (items: ImageConversation[], options: { background?: boolean } = {}) => {
+      const normalizedItems = await recoverConversationHistory(items);
+      if (cancelled) {
+        return;
+      }
+
+      conversationsRef.current = normalizedItems;
+      setConversations(normalizedItems);
+      const storedConversationId =
+        typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) : null;
+      const nextSelectedConversationId =
+        (storedConversationId && normalizedItems.some((conversation) => conversation.id === storedConversationId)
+          ? storedConversationId
+          : null) ?? pickFallbackConversationId(normalizedItems);
+      if (!options.background || !selectedConversationId || !normalizedItems.some((item) => item.id === selectedConversationId)) {
+        setSelectedConversationId(nextSelectedConversationId);
+      }
+    };
+
     const loadHistory = async () => {
       try {
         const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
@@ -406,20 +426,7 @@ function ImagePageContent({
         setImageCount(storedCount ? clampImageCount(storedCount) : "1");
 
         const items = await listImageConversations();
-        const normalizedItems = await recoverConversationHistory(items);
-        if (cancelled) {
-          return;
-        }
-
-        conversationsRef.current = normalizedItems;
-        setConversations(normalizedItems);
-        const storedConversationId =
-          typeof window !== "undefined" ? window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY) : null;
-        const nextSelectedConversationId =
-          (storedConversationId && normalizedItems.some((conversation) => conversation.id === storedConversationId)
-            ? storedConversationId
-            : null) ?? pickFallbackConversationId(normalizedItems);
-        setSelectedConversationId(nextSelectedConversationId);
+        await applyHistory(items);
       } catch (error) {
         const message = error instanceof Error ? error.message : "读取会话记录失败";
         toast.error(message);
@@ -430,9 +437,19 @@ function ImagePageContent({
       }
     };
 
+    const handleSyncedHistory = (event: Event) => {
+      const items = (event as CustomEvent<{ items?: ImageConversation[] }>).detail?.items;
+      if (!Array.isArray(items)) {
+        return;
+      }
+      void applyHistory(items, { background: true });
+    };
+
+    window.addEventListener(IMAGE_CONVERSATIONS_SYNC_EVENT, handleSyncedHistory);
     void loadHistory();
     return () => {
       cancelled = true;
+      window.removeEventListener(IMAGE_CONVERSATIONS_SYNC_EVENT, handleSyncedHistory);
     };
   }, []);
 

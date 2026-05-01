@@ -84,10 +84,25 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "updated_at": task.get("updated_at"),
     }
     if task.get("data") is not None:
-        item["data"] = task.get("data")
+        item["data"] = _compact_image_data(task.get("data"))
     if task.get("error"):
         item["error"] = task.get("error")
     return item
+
+
+def _compact_image_data(data: object) -> object:
+    if not isinstance(data, list):
+        return data
+    result: list[object] = []
+    for item in data:
+        if not isinstance(item, dict):
+            result.append(item)
+            continue
+        next_item = dict(item)
+        if next_item.get("url"):
+            next_item.pop("b64_json", None)
+        result.append(next_item)
+    return result
 
 
 class ImageTaskService:
@@ -299,7 +314,7 @@ class ImageTaskService:
             if not isinstance(data, list) or not data:
                 message = _clean(result.get("message")) or "image task returned no image data"
                 raise RuntimeError(message)
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
+            self._update_task(key, status=TASK_STATUS_SUCCESS, data=_compact_image_data(data), error="")
             self._log_task_call(key, started=started, status="success", result=result)
         except Exception as exc:
             message = str(exc) or "image task failed"

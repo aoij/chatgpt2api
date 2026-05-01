@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import io
 import json
 import re
 import time
@@ -11,7 +10,6 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 import tiktoken
-from PIL import Image, ImageOps
 
 from services.account_service import account_service
 from services.config import config
@@ -70,37 +68,26 @@ def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
 
-def _to_mobile_friendly_jpeg(image_data: bytes) -> bytes:
-    output = io.BytesIO()
-    with Image.open(io.BytesIO(image_data)) as image:
-        image = ImageOps.exif_transpose(image)
-        has_alpha = image.mode in {"RGBA", "LA"} or "transparency" in image.info
-        if has_alpha:
-            rgba = image.convert("RGBA")
-            background = Image.new("RGB", rgba.size, (255, 255, 255))
-            background.paste(rgba, mask=rgba.getchannel("A"))
-            image = background
-        elif image.mode != "RGB":
-            image = image.convert("RGB")
-        image.save(output, "JPEG", quality=92, optimize=True)
-    return output.getvalue()
+def _image_suffix(image_data: bytes) -> str:
+    if image_data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if image_data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if image_data.startswith(b"RIFF") and image_data[8:12] == b"WEBP":
+        return "webp"
+    return "png"
 
 
 def save_image_bytes(image_data: bytes, base_url: str | None = None, uploader: dict[str, Any] | None = None) -> str:
     try:
-        from services.image_service import cleanup_expired_images
+        from services.image_service import cleanup_expired_images_if_due
 
-        cleanup_expired_images()
+        cleanup_expired_images_if_due()
     except Exception as exc:
         logger.warning({"event": "image_cleanup_failed", "error": str(exc)})
         config.cleanup_old_images()
-    try:
-        stored_image_data = _to_mobile_friendly_jpeg(image_data)
-        suffix = "jpg"
-    except Exception as exc:
-        logger.warning({"event": "image_jpeg_convert_failed", "error": str(exc)})
-        stored_image_data = image_data
-        suffix = "png"
+    stored_image_data = image_data
+    suffix = _image_suffix(stored_image_data)
     file_hash = hashlib.md5(stored_image_data).hexdigest()
     filename = f"{int(time.time())}_{file_hash}.{suffix}"
     relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
