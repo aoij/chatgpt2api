@@ -24,6 +24,7 @@ import {
   fetchCurrentUser,
   fetchImageTasks,
   fetchPublicConfig,
+  recoverImageTasks,
   type PublicConfig,
   type ImageTask,
 } from "@/lib/api";
@@ -343,7 +344,9 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
     new Set(
       items.flatMap((conversation) =>
         conversation.turns.flatMap((turn) =>
-          turn.images.flatMap((image) => (image.status === "loading" && image.taskId ? [image.taskId] : [])),
+          turn.images.flatMap((image) =>
+            image.taskId && (image.status !== "success" || (!image.url && !image.b64_json)) ? [image.taskId] : [],
+          ),
         ),
       ),
     ),
@@ -364,7 +367,7 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
     const turns = conversation.turns.map((turn) => {
       let turnChanged = false;
       const images = turn.images.map((image) => {
-        if (image.status !== "loading" || !image.taskId) {
+        if (!image.taskId || (image.status === "success" && (image.url || image.b64_json))) {
           return image;
         }
         const task = taskMap.get(image.taskId);
@@ -402,6 +405,72 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
     await saveImageConversations(normalized);
   }
   return normalized;
+}
+
+async function recoverFinishedTurnsFromLogs(items: ImageConversation[]) {
+  let changed = false;
+  const recovered = await Promise.all(
+    items.map(async (conversation) => {
+      const turns = await Promise.all(
+        conversation.turns.map(async (turn) => {
+          const loadingImages = turn.images.filter((image) => image.status === "loading");
+          if ((turn.status !== "queued" && turn.status !== "generating") || loadingImages.length === 0) {
+            return turn;
+          }
+          try {
+            const result = await recoverImageTasks({
+              started_at: turn.createdAt,
+              model: turn.model,
+              mode: turn.mode,
+              count: Math.min(loadingImages.length, turn.count || loadingImages.length),
+              window_seconds: 7200,
+            });
+            const recoveredUrls = result.items.flatMap((task) =>
+              (task.data || []).flatMap((image) => (image.url || image.b64_json ? [image] : [])),
+            );
+            if (recoveredUrls.length === 0) {
+              return turn;
+            }
+            let nextIndex = 0;
+            const images = turn.images.map((image) => {
+              if (image.status !== "loading" || nextIndex >= recoveredUrls.length) {
+                return image;
+              }
+              const data = recoveredUrls[nextIndex];
+              nextIndex += 1;
+              return {
+                ...image,
+                status: "success" as const,
+                url: data.url,
+                b64_json: data.url ? undefined : data.b64_json,
+                revised_prompt: data.revised_prompt,
+                error: undefined,
+              };
+            });
+            if (nextIndex === 0) {
+              return turn;
+            }
+            changed = true;
+            const derived = deriveTurnStatus({ ...turn, images });
+            return {
+              ...turn,
+              ...derived,
+              images,
+            };
+          } catch {
+            return turn;
+          }
+        }),
+      );
+      return turns.some((turn, index) => turn !== conversation.turns[index])
+        ? { ...conversation, turns, updatedAt: new Date().toISOString() }
+        : conversation;
+    }),
+  );
+  if (changed) {
+    await saveImageConversations(recovered);
+  }
+  return recovered;
 }
 
 async function recoverConversationHistory(items: ImageConversation[]) {
@@ -451,7 +520,7 @@ async function recoverConversationHistory(items: ImageConversation[]) {
     await saveImageConversations(normalized);
   }
 
-  return syncConversationImageTasks(normalized);
+  return recoverFinishedTurnsFromLogs(await syncConversationImageTasks(normalized));
 }
 
 

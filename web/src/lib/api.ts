@@ -449,6 +449,22 @@ export async function fetchImageTasks(ids: string[]) {
   return httpRequest<ImageTaskListResponse>(`/api/image-tasks${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
+export async function recoverImageTasks(options: {
+  started_at: string;
+  model?: ImageModel;
+  mode?: "generate" | "edit";
+  count?: number;
+  window_seconds?: number;
+}) {
+  const params = new URLSearchParams();
+  params.set("started_at", options.started_at);
+  if (options.model) params.set("model", options.model);
+  if (options.mode) params.set("mode", options.mode);
+  if (options.count) params.set("count", String(options.count));
+  if (options.window_seconds) params.set("window_seconds", String(options.window_seconds));
+  return httpRequest<{ items: ImageTask[] }>(`/api/image-tasks/recover?${params.toString()}`);
+}
+
 export async function fetchSettingsConfig() {
   return httpRequest<{ config: SettingsConfig }>("/api/settings");
 }

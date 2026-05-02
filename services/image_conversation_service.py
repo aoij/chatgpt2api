@@ -64,6 +64,82 @@ def _pick_latest(current: dict[str, Any] | None, incoming: dict[str, Any]) -> di
     return incoming if _timestamp(incoming.get("updatedAt")) >= _timestamp(current.get("updatedAt")) else current
 
 
+def _merge_images(current: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {item.get("id") or item.get("taskId"): dict(item) for item in current if item.get("id") or item.get("taskId")}
+    ordered_ids = [item.get("id") or item.get("taskId") for item in current if item.get("id") or item.get("taskId")]
+    for image in incoming:
+        image_id = image.get("id") or image.get("taskId")
+        if not image_id:
+            continue
+        existing = by_id.get(image_id)
+        existing_has_result = bool(existing and existing.get("status") == "success" and (existing.get("url") or existing.get("b64_json")))
+        incoming_has_result = bool(image.get("status") == "success" and (image.get("url") or image.get("b64_json")))
+        if existing_has_result and not incoming_has_result:
+            continue
+        by_id[image_id] = dict(image)
+        if image_id not in ordered_ids:
+            ordered_ids.append(image_id)
+    return [by_id[image_id] for image_id in ordered_ids if image_id in by_id][:MAX_IMAGES_PER_TURN]
+
+
+def _derive_turn_status(turn: dict[str, Any]) -> tuple[str, str]:
+    images = turn.get("images") if isinstance(turn.get("images"), list) else []
+    loading = sum(1 for image in images if image.get("status") == "loading")
+    failed = sum(1 for image in images if image.get("status") == "error")
+    success = sum(1 for image in images if image.get("status") == "success")
+    if loading:
+        return "generating", ""
+    if failed:
+        return "error", f"其中 {failed} 张未成功生成"
+    if success:
+        return "success", ""
+    return "queued", ""
+
+
+def _merge_turns(current: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id = {item.get("id"): dict(item) for item in current if item.get("id")}
+    ordered_ids = [item.get("id") for item in current if item.get("id")]
+    for turn in incoming:
+        turn_id = turn.get("id")
+        if not turn_id:
+            continue
+        existing = by_id.get(turn_id)
+        if existing:
+            merged = {**existing, **turn}
+            merged["images"] = _merge_images(
+                existing.get("images") if isinstance(existing.get("images"), list) else [],
+                turn.get("images") if isinstance(turn.get("images"), list) else [],
+            )
+            status, error = _derive_turn_status(merged)
+            merged["status"] = status
+            if error:
+                merged["error"] = error
+            else:
+                merged.pop("error", None)
+            by_id[turn_id] = merged
+        else:
+            by_id[turn_id] = dict(turn)
+            ordered_ids.append(turn_id)
+    return [by_id[turn_id] for turn_id in ordered_ids if turn_id in by_id][:MAX_TURNS_PER_CONVERSATION]
+
+
+def _merge_conversation(current: dict[str, Any] | None, incoming: dict[str, Any]) -> dict[str, Any]:
+    if current is None:
+        return incoming
+    merged = incoming if _timestamp(incoming.get("updatedAt")) >= _timestamp(current.get("updatedAt")) else {**incoming, **current}
+    merged["turns"] = _merge_turns(
+        current.get("turns") if isinstance(current.get("turns"), list) else [],
+        incoming.get("turns") if isinstance(incoming.get("turns"), list) else [],
+    )
+    if merged["turns"]:
+        merged["updatedAt"] = max(
+            _clean(current.get("updatedAt")),
+            _clean(incoming.get("updatedAt")),
+            key=_timestamp,
+        )
+    return merged
+
+
 def _normalize_image(raw: object) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
@@ -378,7 +454,7 @@ class ImageConversationService:
 
             base_items = current_items if current_items is not None else self._cache.get(owner, [])
             by_id = {item["id"]: item for item in base_items}
-            by_id[normalized["id"]] = _pick_latest(by_id.get(normalized["id"]), normalized)
+            by_id[normalized["id"]] = _merge_conversation(by_id.get(normalized["id"]), normalized)
             next_items = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
             self._cache[owner] = next_items
             return next_items
@@ -399,7 +475,7 @@ class ImageConversationService:
                     current = self._load_owner_from_db_locked(owner, refresh=True)
                     by_id = {item["id"]: item for item in current}
                     for conversation in legacy_items:
-                        by_id[conversation["id"]] = _pick_latest(by_id.get(conversation["id"]), conversation)
+                        by_id[conversation["id"]] = _merge_conversation(by_id.get(conversation["id"]), conversation)
                     next_items = self._replace_owner_rows_locked(owner, list(by_id.values()))
                     migrated += len(next_items)
                 except Exception as exc:
@@ -427,13 +503,13 @@ class ImageConversationService:
                 try:
                     items = self._load_owner_from_db_locked(owner)
                     by_id = {item["id"]: item for item in items}
-                    latest = _pick_latest(by_id.get(normalized["id"]), normalized)
+                    latest = _merge_conversation(by_id.get(normalized["id"]), normalized)
                     return list(self._upsert_owner_row_locked(owner, latest, items))
                 except Exception as exc:
                     self._handle_db_error_locked("save", exc)
             items = self._data.get(owner, [])
             by_id = {item["id"]: item for item in items}
-            by_id[normalized["id"]] = _pick_latest(by_id.get(normalized["id"]), normalized)
+            by_id[normalized["id"]] = _merge_conversation(by_id.get(normalized["id"]), normalized)
             self._data[owner] = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
             self._dirty = True
             self._save_locked()
@@ -456,19 +532,19 @@ class ImageConversationService:
                         by_id = {item["id"]: item for item in current_items}
                         next_items = current_items
                         for conversation in normalized_items:
-                            latest = _pick_latest(by_id.get(conversation["id"]), conversation)
+                            latest = _merge_conversation(by_id.get(conversation["id"]), conversation)
                             next_items = self._upsert_owner_row_locked(owner, latest, next_items)
                             by_id[latest["id"]] = latest
                         return list(next_items)
                     by_id = {item["id"]: item for item in current_items}
                     for conversation in normalized_items:
-                        by_id[conversation["id"]] = _pick_latest(by_id.get(conversation["id"]), conversation)
+                        by_id[conversation["id"]] = _merge_conversation(by_id.get(conversation["id"]), conversation)
                     return list(self._replace_owner_rows_locked(owner, list(by_id.values())))
                 except Exception as exc:
                     self._handle_db_error_locked("save_many", exc)
             by_id = {item["id"]: item for item in self._data.get(owner, [])}
             for conversation in normalized_items:
-                by_id[conversation["id"]] = _pick_latest(by_id.get(conversation["id"]), conversation)
+                by_id[conversation["id"]] = _merge_conversation(by_id.get(conversation["id"]), conversation)
             self._data[owner] = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
             self._dirty = True
             self._save_locked()

@@ -63,7 +63,7 @@ def _recover_image_results_from_logs(
     normalized_model = str(model or "").strip()
     endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
     owner_id = str(identity.get("id") or "").strip()
-    window = max(60, min(int(window_seconds or 900), 3600))
+    window = max(60, min(int(window_seconds or 900), 10800))
     limit = max(1, min(int(count or 1), 10))
 
     candidates: list[tuple[float, dict[str, Any]]] = []
@@ -102,6 +102,130 @@ def _recover_image_results_from_logs(
     return {"items": [item for _, item in candidates[:limit]]}
 
 
+def _sync_turn_status(turn: dict[str, Any]) -> tuple[str, str]:
+    images = turn.get("images") if isinstance(turn.get("images"), list) else []
+    loading = sum(1 for image in images if isinstance(image, dict) and image.get("status") == "loading")
+    failed = sum(1 for image in images if isinstance(image, dict) and image.get("status") == "error")
+    success = sum(1 for image in images if isinstance(image, dict) and image.get("status") == "success")
+    if loading:
+        return ("queued" if turn.get("status") == "queued" else "generating"), ""
+    if failed:
+        return "error", f"其中 {failed} 张未成功生成"
+    if success:
+        return "success", ""
+    return "queued", ""
+
+
+def _sync_conversations_with_tasks(identity: dict[str, object], items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    task_ids = sorted(
+        {
+            str(image.get("taskId") or image.get("id") or "").strip()
+            for conversation in items
+            if isinstance(conversation, dict)
+            for turn in (conversation.get("turns") if isinstance(conversation.get("turns"), list) else [])
+            if isinstance(turn, dict)
+            for image in (turn.get("images") if isinstance(turn.get("images"), list) else [])
+            if isinstance(image, dict)
+            and str(image.get("taskId") or image.get("id") or "").strip()
+            and (image.get("status") != "success" or not (image.get("url") or image.get("b64_json")))
+        }
+    )
+    if not task_ids:
+        return items, False
+
+    task_list = image_task_service.list_tasks(identity, task_ids)
+    task_map = {
+        str(task.get("id") or ""): task
+        for task in task_list.get("items", [])
+        if isinstance(task, dict) and str(task.get("id") or "")
+    }
+    if not task_map:
+        return items, False
+
+    changed = False
+    synced_items: list[dict[str, Any]] = []
+    for conversation in items:
+        if not isinstance(conversation, dict):
+            synced_items.append(conversation)
+            continue
+        conversation_changed = False
+        turns: list[dict[str, Any]] = []
+        raw_turns = conversation.get("turns") if isinstance(conversation.get("turns"), list) else []
+        for turn in raw_turns:
+            if not isinstance(turn, dict):
+                continue
+            turn_changed = False
+            images: list[dict[str, Any]] = []
+            raw_images = turn.get("images") if isinstance(turn.get("images"), list) else []
+            for image in raw_images:
+                if not isinstance(image, dict):
+                    continue
+                task_id = str(image.get("taskId") or image.get("id") or "").strip()
+                task = task_map.get(task_id)
+                if not task:
+                    images.append(image)
+                    continue
+                next_image = dict(image)
+                next_image["taskId"] = task_id
+                status = str(task.get("status") or "")
+                if status == "success":
+                    data = task.get("data") if isinstance(task.get("data"), list) else []
+                    first = next((item for item in data if isinstance(item, dict) and (item.get("url") or item.get("b64_json"))), None)
+                    if first:
+                        next_image["status"] = "success"
+                        if first.get("url"):
+                            next_image["url"] = first.get("url")
+                            next_image.pop("b64_json", None)
+                        elif first.get("b64_json"):
+                            next_image["b64_json"] = first.get("b64_json")
+                            next_image.pop("url", None)
+                        if first.get("revised_prompt"):
+                            next_image["revised_prompt"] = first.get("revised_prompt")
+                        next_image.pop("error", None)
+                elif status == "error":
+                    next_image["status"] = "error"
+                    next_image["error"] = str(task.get("error") or "生成失败")
+                elif status in {"queued", "running"}:
+                    next_image["status"] = "loading"
+                    next_image.pop("error", None)
+
+                if next_image != image:
+                    turn_changed = True
+                images.append(next_image)
+
+            if turn_changed:
+                next_turn = dict(turn)
+                next_turn["images"] = images
+                status, error = _sync_turn_status(next_turn)
+                next_turn["status"] = status
+                if error:
+                    next_turn["error"] = error
+                else:
+                    next_turn.pop("error", None)
+                turns.append(next_turn)
+                conversation_changed = True
+            else:
+                turns.append(turn)
+
+        if conversation_changed:
+            next_conversation = dict(conversation)
+            next_conversation["turns"] = turns
+            next_conversation["updatedAt"] = datetime.now().isoformat(timespec="milliseconds")
+            synced_items.append(next_conversation)
+            changed = True
+        else:
+            synced_items.append(conversation)
+
+    return synced_items, changed
+
+
+def _sync_and_save_conversations(identity: dict[str, object], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    synced_items, changed = _sync_conversations_with_tasks(identity, items)
+    if changed:
+        return image_conversation_service.save_many(identity, synced_items)
+    return synced_items
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -116,12 +240,18 @@ def create_router() -> APIRouter:
     @router.get("/api/image-conversations")
     async def list_image_conversations(authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        return {"items": await run_in_threadpool(image_conversation_service.list, identity)}
+        def _list() -> list[dict[str, Any]]:
+            return _sync_and_save_conversations(identity, image_conversation_service.list(identity))
+
+        return {"items": await run_in_threadpool(_list)}
 
     @router.put("/api/image-conversations")
     async def save_image_conversations(body: ImageConversationSaveRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        return {"items": await run_in_threadpool(image_conversation_service.save_many, identity, body.items)}
+        def _save_many() -> list[dict[str, Any]]:
+            return _sync_and_save_conversations(identity, image_conversation_service.save_many(identity, body.items))
+
+        return {"items": await run_in_threadpool(_save_many)}
 
     @router.put("/api/image-conversations/{conversation_id}")
     async def save_image_conversation(
@@ -132,7 +262,10 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         conversation = dict(body.conversation or {})
         conversation["id"] = str(conversation.get("id") or conversation_id)
-        return {"items": await run_in_threadpool(image_conversation_service.save, identity, conversation)}
+        def _save() -> list[dict[str, Any]]:
+            return _sync_and_save_conversations(identity, image_conversation_service.save(identity, conversation))
+
+        return {"items": await run_in_threadpool(_save)}
 
     @router.delete("/api/image-conversations/{conversation_id}")
     async def delete_image_conversation(conversation_id: str, authorization: str | None = Header(default=None)):
@@ -210,7 +343,7 @@ def create_router() -> APIRouter:
         model: str = Query(default=""),
         mode: str = Query(default="generate"),
         count: int = Query(default=1, ge=1, le=10),
-        window_seconds: int = Query(default=900, ge=60, le=3600),
+        window_seconds: int = Query(default=900, ge=60, le=10800),
         authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
