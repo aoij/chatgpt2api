@@ -1030,11 +1030,16 @@ function ImagePageContent({
         );
         const submitted = results.flatMap((result) => (result.value ? [result.value] : []));
         const failed = results.flatMap((result) => (result.error ? [{ image: result.item, error: result.error }] : []));
+        const terminalFailed = failed.filter((result) => !isRetryableTaskError(result.error));
+        const retryableFailed = failed.length - terminalFailed.length;
         if (submitted.length > 0) {
           await applyTasks(submitted);
         }
-        if (failed.length > 0) {
-          await markImagesError(failed);
+        if (terminalFailed.length > 0) {
+          await markImagesError(terminalFailed);
+        }
+        if (retryableFailed > 0) {
+          toast.warning("网络临时中断，图片任务会继续自动查询，请稍等");
         }
         return submitted;
       };
@@ -1109,6 +1114,33 @@ function ImagePageContent({
         await loadQuota();
       } catch (error) {
         const message = friendlyImageError(error) || "生成图片失败";
+        if (isRetryableTaskError(error)) {
+          const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
+          const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
+          const taskIds =
+            latestTurn?.images.flatMap((image) =>
+              image.status === "loading" && (image.taskId || image.id) ? [image.taskId || image.id] : [],
+            ) || [];
+          if (taskIds.length > 0) {
+            try {
+              const taskList = await fetchImageTasks(taskIds);
+              if (taskList.items.length > 0) {
+                await applyTasks(taskList.items);
+              }
+              const refreshedConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
+              const refreshedTurn = refreshedConversation?.turns.find((turn) => turn.id === activeTurn.id);
+              const stillLoading = refreshedTurn?.images.some((image) => image.status === "loading") ?? false;
+              if (!stillLoading) {
+                await loadQuota();
+                return;
+              }
+            } catch {
+              // Do not mark a background image task as failed when only the browser polling request failed.
+            }
+          }
+          toast.warning("网络查询临时失败，任务仍在后台继续，会自动重试同步结果");
+          return;
+        }
         await updateConversation(conversationId, (current) => {
           const conversation = current ?? snapshot;
           return {

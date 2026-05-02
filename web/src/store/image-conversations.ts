@@ -342,11 +342,16 @@ async function saveRemoteImageConversations(conversations: ImageConversation[]):
       body: { items: conversations.map(normalizeConversation) },
       redirectOnUnauthorized: false,
     });
+    const remoteItems = sortImageConversations((data.items || conversations).map(normalizeConversation));
     remoteConversationCache = {
       subjectKey: await getScopedSubjectKey(),
       fetchedAt: Date.now(),
-      items: sortImageConversations((data.items || conversations).map(normalizeConversation)),
+      items: remoteItems,
     };
+    const localItems = await readStoredImageConversations();
+    const mergedItems = mergeConversationLists(localItems, remoteItems);
+    await writeStoredImageConversations(mergedItems);
+    emitImageConversationsSynced(mergedItems);
   } catch {
     // 本地缓存兜底，服务端临时不可用时不影响画图。
   }
@@ -360,11 +365,16 @@ async function saveRemoteImageConversation(conversation: ImageConversation): Pro
       body: { conversation: normalized },
       redirectOnUnauthorized: false,
     });
+    const remoteItems = sortImageConversations((data.items || []).map(normalizeConversation));
     remoteConversationCache = {
       subjectKey: await getScopedSubjectKey(),
       fetchedAt: Date.now(),
-      items: sortImageConversations((data.items || []).map(normalizeConversation)),
+      items: remoteItems,
     };
+    const localItems = await readStoredImageConversations();
+    const mergedItems = mergeConversationLists(localItems, remoteItems);
+    await writeStoredImageConversations(mergedItems);
+    emitImageConversationsSynced(mergedItems);
   } catch {
     // 本地缓存兜底，服务端临时不可用时不影响画图。
   }
