@@ -1,6 +1,7 @@
 "use client";
 
-import { LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { LoaderCircle, MessageSquarePlus, Pencil, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -14,6 +15,7 @@ type ImageSidebarProps = {
   onClearHistory: () => void | Promise<void>;
   onSelectConversation: (id: string) => void;
   onDeleteConversation: (id: string) => void | Promise<void>;
+  onRenameConversation: (id: string, title: string) => void | Promise<void>;
   formatConversationTime: (value: string) => string;
   hideActionButtons?: boolean;
 };
@@ -26,9 +28,40 @@ export function ImageSidebar({
   onClearHistory,
   onSelectConversation,
   onDeleteConversation,
+  onRenameConversation,
   formatConversationTime,
   hideActionButtons = false,
 }: ImageSidebarProps) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const editInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editingId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingId]);
+
+  const startRename = useCallback((conversation: ImageConversationSummary, e: MouseEvent) => {
+    e.stopPropagation();
+    setEditingId(conversation.id);
+    setEditingTitle(conversation.title);
+  }, []);
+
+  const commitRename = useCallback(() => {
+    const trimmed = editingTitle.trim();
+    if (editingId && trimmed) {
+      void onRenameConversation(editingId, trimmed);
+    }
+    setEditingId(null);
+    setEditingTitle("");
+  }, [editingId, editingTitle, onRenameConversation]);
+
+  const cancelRename = useCallback(() => {
+    setEditingId(null);
+    setEditingTitle("");
+  }, []);
   return (
     <aside className="h-full min-h-0 overflow-hidden">
       <div className="flex h-full min-h-0 flex-col gap-2 py-1 sm:gap-3 sm:py-2">
@@ -82,10 +115,25 @@ export function ImageSidebar({
                   <button
                     type="button"
                     onClick={() => onSelectConversation(conversation.id)}
-                    className={cn("block w-full text-left", hideActionButtons ? "pr-12" : "pr-8")}
+                    className={cn("block w-full text-left", hideActionButtons ? "pr-20" : "pr-16")}
                   >
                     <div className={cn("truncate font-semibold", hideActionButtons ? "text-base" : "text-sm")}>
-                      <span className="truncate">{conversation.title}</span>
+                      {editingId === conversation.id ? (
+                        <input
+                          ref={editInputRef}
+                          value={editingTitle}
+                          onChange={(e) => setEditingTitle(e.target.value)}
+                          onBlur={commitRename}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") commitRename();
+                            if (e.key === "Escape") cancelRename();
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="w-full truncate rounded border border-stone-300 bg-white px-1 py-0.5 text-sm outline-none focus:border-stone-500"
+                        />
+                      ) : (
+                        <span className="truncate">{conversation.title}</span>
+                      )}
                     </div>
                     <div className={cn("mt-1 text-xs", active ? "text-stone-500" : "text-stone-400")}>
                       {conversation.turnCount} 轮 · {formatConversationTime(conversation.updatedAt)}
@@ -101,23 +149,42 @@ export function ImageSidebar({
                       </div>
                     ) : null}
                   </button>
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void onDeleteConversation(conversation.id);
-                    }}
+                  <div
                     className={cn(
-                      "absolute inline-flex items-center justify-center rounded-md text-stone-400 transition hover:bg-stone-100 hover:text-rose-500 focus:bg-stone-100 focus:text-rose-500 focus:opacity-100 focus:outline-none",
+                      "absolute flex items-center gap-0.5 transition",
                       hideActionButtons
-                        ? "top-1/2 right-3 size-9 -translate-y-1/2 rounded-xl bg-white/80 opacity-100 shadow-sm active:bg-rose-50 active:text-rose-500"
-                        : "top-3 right-2 size-7 opacity-0 group-hover:opacity-100",
+                        ? "top-1/2 right-3 -translate-y-1/2 opacity-100"
+                        : "top-2.5 right-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
                     )}
-                    aria-label="删除会话"
-                    title="删除会话"
                   >
-                    <Trash2 className={cn(hideActionButtons ? "size-4.5" : "size-4")} />
-                  </button>
+                    <button
+                      type="button"
+                      onClick={(event) => startRename(conversation, event)}
+                      className={cn(
+                        "inline-flex items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-stone-600 focus:bg-stone-100 focus:text-stone-600 focus:outline-none",
+                        hideActionButtons ? "size-9 rounded-xl bg-white/80 shadow-sm active:bg-stone-50" : "size-7",
+                      )}
+                      aria-label="重命名会话"
+                      title="重命名会话"
+                    >
+                      <Pencil className="size-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void onDeleteConversation(conversation.id);
+                      }}
+                      className={cn(
+                        "inline-flex items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-rose-500 focus:bg-stone-100 focus:text-rose-500 focus:outline-none",
+                        hideActionButtons ? "size-9 rounded-xl bg-white/80 shadow-sm active:bg-rose-50 active:text-rose-500" : "size-7",
+                      )}
+                      aria-label="删除会话"
+                      title="删除会话"
+                    >
+                      <Trash2 className="size-4" />
+                    </button>
+                  </div>
                 </div>
               );
             })

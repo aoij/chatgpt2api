@@ -36,6 +36,7 @@ import {
   fetchImageConversation,
   getImageConversationStats,
   listImageConversations,
+  renameImageConversation,
   saveImageConversation,
   saveImageConversations,
   subscribeImageConversationSync,
@@ -1231,6 +1232,20 @@ function ImagePageContent({
     }
   };
 
+  const handleRenameConversation = async (id: string, title: string) => {
+    const nextConversations = conversations.map((item) =>
+      item.id === id ? { ...item, title, updatedAt: new Date().toISOString() } : item,
+    );
+    conversationsRef.current = sortImageConversations(nextConversations);
+    setConversations(conversationsRef.current);
+    try {
+      await renameImageConversation(id, title);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "重命名失败";
+      toast.error(message);
+    }
+  };
+
   const openDeleteConversationConfirm = (id: string) => {
     setIsHistoryOpen(false);
     setDeleteConfirm({ type: "one", id });
@@ -1974,6 +1989,7 @@ function ImagePageContent({
             onClearHistory={openClearHistoryConfirm}
             onSelectConversation={setConversationSelection}
             onDeleteConversation={openDeleteConversationConfirm}
+            onRenameConversation={handleRenameConversation}
             formatConversationTime={formatConversationTime}
           />
         </div>
@@ -2021,6 +2037,7 @@ function ImagePageContent({
                   setIsHistoryOpen(false);
                 }}
                 onDeleteConversation={openDeleteConversationConfirm}
+                onRenameConversation={handleRenameConversation}
                 formatConversationTime={formatConversationTime}
                 hideActionButtons
               />
