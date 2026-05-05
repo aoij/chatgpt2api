@@ -116,6 +116,26 @@ def _sync_turn_status(turn: dict[str, Any]) -> tuple[str, str]:
     return "queued", ""
 
 
+def _friendly_image_task_error(error: object) -> str:
+    text = str(error or "").strip()
+    lower = text.lower()
+    if not text or text == "Network Error":
+        return "网络请求失败：可能是移动网络不稳定、服务刚重启，或一次上传图片过大，请稍后重试"
+    if (
+        "cloudflare" in lower
+        or "origin web server" in lower
+        or "invalid or incomplete response" in lower
+        or "proxy read timeout" in lower
+        or "error 520" in lower
+        or "error 522" in lower
+        or "error 524" in lower
+    ):
+        return "上游图片服务临时返回 Cloudflare 错误，可能是节点/账号或上游服务拥堵，请稍后重试；如连续出现请切换账号/节点"
+    if "curl: (28)" in lower or "operation timed out" in lower or "timed out after" in lower or "timeout" in lower:
+        return "上游图片生成或下载超时，请稍后重试；如果连续出现，请减少同时生成数量或切换账号/节点"
+    return text
+
+
 def _sync_conversations_with_tasks(identity: dict[str, object], items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
     task_ids = sorted(
         {
@@ -184,7 +204,7 @@ def _sync_conversations_with_tasks(identity: dict[str, object], items: list[dict
                         next_image.pop("error", None)
                 elif status == "error":
                     next_image["status"] = "error"
-                    next_image["error"] = str(task.get("error") or "生成失败")
+                    next_image["error"] = _friendly_image_task_error(task.get("error") or "生成失败")
                 elif status in {"queued", "running"}:
                     next_image["status"] = "loading"
                     next_image.pop("error", None)

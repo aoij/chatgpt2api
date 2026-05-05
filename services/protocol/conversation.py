@@ -57,6 +57,16 @@ def is_token_invalid_error(message: str) -> bool:
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     lower = text.lower()
+    if (
+        "cloudflare" in lower
+        or "origin web server" in lower
+        or "invalid or incomplete response" in lower
+        or "proxy read timeout" in lower
+        or "error 520" in lower
+        or "error 522" in lower
+        or "error 524" in lower
+    ):
+        return "上游图片服务临时返回 Cloudflare 错误，可能是节点/账号或上游服务拥堵，请稍后重试；如连续出现请切换账号/节点"
     if "curl: (28)" in lower or "operation timed out" in lower or "timed out after" in lower:
         return "上游图片生成或下载超时，请稍后重试；如果连续出现，请减少同时生成数量或切换账号/节点"
     if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:

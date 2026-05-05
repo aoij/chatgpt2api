@@ -32,6 +32,17 @@ function getStoredImageSrc(image: StoredImage) {
   return image.url || "";
 }
 
+function friendlyDisplayError(error?: string) {
+  const message = String(error || "").trim();
+  if (!message || message === "Network Error") {
+    return "网络请求失败：可能是移动网络不稳定、服务刚重启，或一次上传图片过大，请稍后重试";
+  }
+  if (/cloudflare|origin web server|invalid or incomplete response|proxy read timeout|error 52[024]/i.test(message)) {
+    return "上游图片服务临时返回 Cloudflare 错误，可能是节点/账号或上游服务拥堵，请稍后重试；如连续出现请切换账号/节点";
+  }
+  return message;
+}
+
 export function ImageResults({
   selectedConversation,
   onOpenLightbox,
@@ -223,7 +234,7 @@ export function ImageResults({
                             )}
                           >
                             <div className="flex h-full min-h-24 items-center justify-center px-4 py-5 text-center text-sm leading-6 text-rose-600 sm:min-h-16 sm:px-6 sm:py-8">
-                              {image.error || "生成失败"}
+                              {friendlyDisplayError(image.error || "生成失败")}
                             </div>
                           </div>
                         );
@@ -259,7 +270,7 @@ export function ImageResults({
 
                   {turn.status === "error" && turn.error ? (
                     <div className="mt-4 rounded-2xl border-l-4 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700">
-                      {turn.error}
+                      {friendlyDisplayError(turn.error)}
                     </div>
                   ) : null}
                 </div>

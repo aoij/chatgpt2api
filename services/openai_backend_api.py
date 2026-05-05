@@ -32,6 +32,56 @@ DEFAULT_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
 DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+IMAGE_DOWNLOAD_RETRY_ATTEMPTS = 4
+
+
+def _is_image_bytes(content: bytes) -> bool:
+    return (
+        content.startswith(b"\xff\xd8\xff")
+        or content.startswith(b"\x89PNG\r\n\x1a\n")
+        or (content.startswith(b"RIFF") and content[8:12] == b"WEBP")
+    )
+
+
+def _looks_like_cloudflare_error(text: str) -> bool:
+    lower = str(text or "").lower()
+    return (
+        "cloudflare" in lower
+        or "origin web server" in lower
+        or "invalid or incomplete response" in lower
+        or "proxy read timeout" in lower
+        or "cf-error" in lower
+        or "error 520" in lower
+        or "error 522" in lower
+        or "error 524" in lower
+        or "bad gateway" in lower
+        or "gateway timeout" in lower
+    )
+
+
+def _is_retryable_image_download_error(exc: Exception) -> bool:
+    lower = str(exc).lower()
+    return (
+        "curl: (28)" in lower
+        or "operation timed out" in lower
+        or "timed out after" in lower
+        or "timeout" in lower
+        or "network error" in lower
+        or "connection" in lower
+        or "reset" in lower
+        or _looks_like_cloudflare_error(lower)
+    )
+
+
+def _friendly_image_download_error(exc: Exception) -> str:
+    lower = str(exc).lower()
+    if _looks_like_cloudflare_error(lower):
+        return "上游图片服务临时返回 Cloudflare 错误，可能是节点/账号或上游服务拥堵，请稍后重试；如连续出现请切换账号/节点"
+    if "curl: (28)" in lower or "operation timed out" in lower or "timed out after" in lower or "timeout" in lower:
+        return "上游图片下载超时，请稍后重试；如连续出现请减少同时生成数量或切换账号/节点"
+    if "network error" in lower or "connection" in lower or "reset" in lower:
+        return "上游图片连接失败，请稍后重试或切换账号/节点"
+    return str(exc) or "上游图片下载失败，请稍后重试"
 
 
 class OpenAIBackendAPI:
@@ -625,36 +675,51 @@ class OpenAIBackendAPI:
         images = []
         for url in urls:
             last_error: Exception | None = None
-            for attempt in range(1, 3):
+            for attempt in range(1, IMAGE_DOWNLOAD_RETRY_ATTEMPTS + 1):
                 try:
                     response = self.session.get(url, timeout=120)
-                    ensure_ok(response, "image_download")
-                    images.append(response.content)
+                    try:
+                        ensure_ok(response, "image_download")
+                    except Exception as exc:
+                        body = ""
+                        try:
+                            body = str(response.text or "")
+                        except Exception:
+                            body = ""
+                        if _looks_like_cloudflare_error(body):
+                            raise RuntimeError("upstream image download returned Cloudflare error") from exc
+                        raise
+                    content = bytes(response.content or b"")
+                    content_type = str(response.headers.get("content-type") or "").lower()
+                    if not content:
+                        raise RuntimeError("upstream image download returned empty body")
+                    if not _is_image_bytes(content):
+                        body = ""
+                        try:
+                            body = content[:4096].decode(response.encoding or "utf-8", "ignore")
+                        except Exception:
+                            body = content[:4096].decode("utf-8", "ignore")
+                        if _looks_like_cloudflare_error(body) or "html" in content_type or "text/" in content_type:
+                            raise RuntimeError("upstream image download returned Cloudflare/html error page")
+                        raise RuntimeError(f"upstream image download returned non-image content-type={content_type or 'unknown'}")
+                    images.append(content)
                     last_error = None
                     break
                 except Exception as exc:
                     last_error = exc
-                    lower = str(exc).lower()
-                    retryable = (
-                        "curl: (28)" in lower
-                        or "operation timed out" in lower
-                        or "timed out after" in lower
-                        or "timeout" in lower
-                    )
+                    retryable = _is_retryable_image_download_error(exc)
                     logger.warning({
                         "event": "image_download_failed",
                         "attempt": attempt,
+                        "max_attempts": IMAGE_DOWNLOAD_RETRY_ATTEMPTS,
                         "retryable": retryable,
                         "error": repr(exc),
                     })
-                    if not retryable or attempt >= 2:
+                    if not retryable or attempt >= IMAGE_DOWNLOAD_RETRY_ATTEMPTS:
                         break
-                    time.sleep(1.5 * attempt)
+                    time.sleep(min(8.0, 1.5 * attempt))
             if last_error is not None:
-                lower = str(last_error).lower()
-                if "curl: (28)" in lower or "operation timed out" in lower or "timed out after" in lower or "timeout" in lower:
-                    raise RuntimeError("上游图片下载超时，请稍后重试；如连续出现请减少同时生成数量或切换账号/节点") from last_error
-                raise last_error
+                raise RuntimeError(_friendly_image_download_error(last_error)) from last_error
         return images
 
     def stream_conversation(

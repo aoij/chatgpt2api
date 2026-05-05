@@ -135,6 +135,9 @@ request.interceptors.response.use(
             payload?.message ||
             error.message ||
             `请求失败 (${status || 500})`;
+        if (/cloudflare|origin web server|invalid or incomplete response|proxy read timeout|error 52[024]/i.test(message)) {
+            return Promise.reject(new Error("上游图片服务临时返回 Cloudflare 错误，可能是节点/账号或上游服务拥堵，请稍后重试；如连续出现请切换账号/节点"));
+        }
         if (!status && /network error|failed to fetch|connection|abort|timeout/i.test(message)) {
             return Promise.reject(new Error("网络请求失败：可能是移动网络不稳定、服务刚重启，或一次上传图片过大，请稍后重试"));
         }

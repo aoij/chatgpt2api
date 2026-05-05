@@ -124,6 +124,9 @@ function friendlyImageError(error: unknown) {
   if (!message || message === "Network Error") {
     return "网络请求失败：可能是移动网络不稳定、服务刚重启，或一次上传图片过大，请稍后重试";
   }
+  if (/cloudflare|origin web server|invalid or incomplete response|proxy read timeout|error 52[024]/i.test(message)) {
+    return "上游图片服务临时返回 Cloudflare 错误，可能是节点/账号或上游服务拥堵，请稍后重试；如连续出现请切换账号/节点";
+  }
   if (/network|failed to fetch|connection|reset|abort|timeout/i.test(message)) {
     return `网络请求失败：${message}`;
   }
@@ -132,7 +135,7 @@ function friendlyImageError(error: unknown) {
 
 function isRetryableTaskError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error || "");
-  return /network|failed to fetch|connection|reset|abort|timeout/i.test(message);
+  return /network|failed to fetch|connection|reset|abort|timeout|cloudflare|origin web server|invalid or incomplete response|proxy read timeout|error 52[024]/i.test(message);
 }
 
 async function imageElementFromObjectUrl(url: string) {
