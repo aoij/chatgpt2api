@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 
 import webConfig from "@/constants/common-env";
 import { fetchPublicConfig, type PublicConfig } from "@/lib/api";
-import { clearStoredAuthSession, getStoredAuthSession, type StoredAuthSession } from "@/store/auth";
+import { getValidatedAuthSession } from "@/lib/auth-session";
 import { cn } from "@/lib/utils";
 import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
@@ -84,6 +84,7 @@ export function TopNav() {
   const navItems = session.role === "admin" && session.scope !== "image" ? adminNavItems : userNavItems;
   const roleLabel = session.role === "admin" ? "管理员" : "普通用户";
   const isImageOnlySession = session.scope === "image" && navItems.length === 1;
+  const displayName = session.name.trim() || roleLabel;
 
   return (
     <header className="sticky top-1 z-40 rounded-2xl border border-white/70 bg-white/80 shadow-sm backdrop-blur-xl sm:top-2 sm:rounded-none sm:border-x-0 sm:border-t-0 sm:bg-transparent sm:shadow-none sm:backdrop-blur-none">
@@ -105,7 +106,7 @@ export function TopNav() {
             className="ml-auto shrink-0 py-1 text-xs text-stone-400 transition hover:text-stone-700 sm:hidden"
             onClick={() => void handleLogout()}
           >
-            {"退出"}
+            退出
           </button>
         </div>
         <nav
@@ -145,7 +146,7 @@ export function TopNav() {
             className="py-1 text-xs text-stone-400 transition hover:text-stone-700 sm:text-sm"
             onClick={() => void handleLogout()}
           >
-            {"退出"}
+            退出
           </button>
         </div>
       </div>

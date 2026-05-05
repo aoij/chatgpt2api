@@ -14,7 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { fetchSystemLogs, getManagedImagePathFromUrl, type SystemLog } from "@/lib/api";
+import { deleteSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LogType = {
@@ -64,15 +64,7 @@ function LogsContent() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
   const detailUrls = getUrls(detailLog);
-  const detailImages = detailUrls.map((url, index) => {
-    const downloadPath = getManagedImagePathFromUrl(url);
-    return {
-      id: `${index}`,
-      src: url,
-      downloadPath: downloadPath || undefined,
-      filename: downloadPath ? `${downloadPath.split("/").pop()?.replace(/\.[^.]+$/, "") || `image-${index + 1}`}.jpg` : undefined,
-    };
-  });
+  const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
   const pageSize = 10;
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
@@ -148,19 +140,19 @@ function LogsContent() {
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Logs</div>
           <h1 className="text-2xl font-semibold tracking-tight">日志管理</h1>
         </div>
-        <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
+        <div className="flex flex-wrap gap-2">
           <Select value={type} onValueChange={setType}>
-            <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white sm:w-[150px]"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="h-10 w-[150px] rounded-xl border-stone-200 bg-white"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value={LogType.Call}>调用日志</SelectItem>
               <SelectItem value={LogType.Account}>账号管理日志</SelectItem>
             </SelectContent>
           </Select>
-          <div className="col-span-2 sm:col-span-1"><DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} /></div>
-          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700 sm:px-4">
+          <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
+          <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
           </Button>
-          <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800 sm:px-4">
+          <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
@@ -169,72 +161,35 @@ function LogsContent() {
 
       <Card className="overflow-hidden rounded-2xl border-white/80 bg-white/90 shadow-sm">
         <CardContent className="p-0">
-          <div className="flex items-center justify-between border-b border-stone-100 px-3 py-3 text-sm text-stone-600 sm:px-5 sm:py-4">
-            <span>共 {items.length} 条</span>
-            <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadLogs()} disabled={isLoading}>
-              <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
-              刷新
-            </Button>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
+            <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
+              <span>共 {items.length} 条</span>
+              <label className="flex items-center gap-2">
+                <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => toggleIds(currentRows.map((item) => item.id), Boolean(checked))} />
+                本页全选
+              </label>
+              <label className="flex items-center gap-2">
+                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(items.map((item) => item.id), Boolean(checked))} />
+                全选结果
+              </label>
+              {selectedIds.length > 0 ? <span>已选 {selectedIds.length} 条</span> : null}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadLogs()} disabled={isLoading}>
+                <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
+                刷新
+              </Button>
+              <button type="button" className="text-sm text-stone-500 hover:text-stone-900 disabled:text-stone-300" onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0 || isDeleting}>
+                取消选择
+              </button>
+              <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50" onClick={() => setDeletingItems(items.filter((item) => selectedSet.has(item.id)))} disabled={selectedIds.length === 0 || isDeleting}>
+                <Trash2 className="size-4" />
+                删除所选
+              </Button>
+            </div>
           </div>
-          <div className="divide-y divide-stone-100 md:hidden">
-            {currentRows.map((item, index) => {
-              const urls = getUrls(item);
-              return (
-                <div key={`${item.time}-${index}-mobile`} className="space-y-3 px-3 py-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0 space-y-1">
-                      <div className="truncate text-sm font-medium text-stone-800">{item.time}</div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge>
-                        {isCallLog ? (
-                          <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
-                            {getStatus(item)}
-                          </Badge>
-                        ) : null}
-                      </div>
-                    </div>
-                    <Button variant="ghost" className="h-8 shrink-0 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
-                      详情
-                    </Button>
-                  </div>
-                  {isCallLog ? (
-                    <div className="grid grid-cols-2 gap-2 text-xs text-stone-500">
-                      <div className="rounded-lg bg-stone-50 px-3 py-2">
-                        <div className="text-stone-400">令牌</div>
-                        <div className="mt-1 truncate font-medium text-stone-700">{getDetailText(item, "key_name")}</div>
-                      </div>
-                      <div className="rounded-lg bg-stone-50 px-3 py-2">
-                        <div className="text-stone-400">耗时</div>
-                        <div className="mt-1 font-medium text-stone-700">{formatDuration(item)}</div>
-                      </div>
-                    </div>
-                  ) : null}
-                  {isCallLog && urls.length ? (
-                    <div className="flex items-center gap-2 overflow-x-auto">
-                      {urls.slice(0, 5).map((url, imageIndex) => (
-                        <button
-                          key={`${url}-${imageIndex}-mobile`}
-                          type="button"
-                          className="relative size-14 shrink-0 overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
-                          onClick={() => openLogImage(item, imageIndex)}
-                          title="预览图片"
-                        >
-                          <ImageThumbnail src={url} thumbnailSrc={getImageThumbnailUrl(url)} className="h-full w-full" />
-                        </button>
-                      ))}
-                      {urls.length > 5 ? <span className="shrink-0 text-xs text-stone-400">+{urls.length - 5}</span> : null}
-                    </div>
-                  ) : null}
-                  <div className="line-clamp-2 text-sm leading-6 text-stone-500">{item.summary || "-"}</div>
-                </div>
-              );
-            })}
-            {!isLoading && currentRows.length === 0 ? (
-              <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div>
-            ) : null}
-          </div>
-          <div className="hidden overflow-x-auto md:block">
-            <Table className="min-w-[820px]">
+          <div className="overflow-x-auto">
+            <Table className="min-w-[900px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
@@ -309,7 +264,7 @@ function LogsContent() {
               </TableBody>
             </Table>
           </div>
-          <div className="flex items-center justify-between gap-2 border-t border-stone-100 px-3 py-3 text-sm text-stone-500 sm:justify-end sm:px-4">
+          <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
             <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
@@ -318,31 +273,48 @@ function LogsContent() {
               <ChevronRight className="size-4" />
             </Button>
           </div>
-          {!isLoading && items.length === 0 ? <div className="hidden px-6 py-14 text-center text-sm text-stone-500 md:block">没有找到日志</div> : null}
+          {!isLoading && items.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
         </CardContent>
       </Card>
       <Dialog open={detailOpen} onOpenChange={setDetailOpen}>
-        <DialogContent className="w-[min(calc(100vw-1rem),920px)] rounded-2xl p-4 sm:w-[min(92vw,920px)] sm:p-6">
-          <DialogHeader>
+        <DialogContent className="flex h-[min(88vh,860px)] w-[min(92vw,920px)] flex-col overflow-hidden rounded-2xl p-0">
+          <DialogHeader className="shrink-0 border-b border-stone-100 px-6 py-5">
             <DialogTitle>日志详情</DialogTitle>
           </DialogHeader>
-          <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-3 text-sm text-stone-600 md:grid-cols-2 md:p-4">
-            {Object.entries(detailLog?.detail || {})
-              .filter(([key, value]) => key !== "urls" && typeof value !== "object")
-              .map(([key, value]) => (
-                <div key={key} className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-                  <span className="text-stone-400">{key}</span>
-                  <span className="break-all font-medium text-stone-700 sm:text-right">{String(value)}</span>
+          <div className="flex-1 overflow-y-auto px-6 py-5">
+            <div className="space-y-4">
+              <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
+                {Object.entries(detailLog?.detail || {})
+                  .filter(([key, value]) => key !== "urls" && typeof value !== "object")
+                  .map(([key, value]) => (
+                    <div key={key} className="flex items-start justify-between gap-4">
+                      <span className="text-stone-400">{key}</span>
+                      <span className="text-right font-medium break-all text-stone-700">{String(value)}</span>
+                    </div>
+                  ))}
+              </div>
+              {detailUrls.length ? (
+                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                  {detailUrls.map((url, index) => (
+                    <button
+                      key={url}
+                      type="button"
+                      className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
+                      onClick={() => {
+                        setLightboxIndex(index);
+                        setLightboxOpen(true);
+                      }}
+                    >
+                      <img src={url} alt="" className="h-full w-full object-cover" />
+                    </button>
+                  ))}
                 </div>
               ) : null}
               <pre className="max-h-[72vh] overflow-auto rounded-xl border border-stone-200 bg-stone-50 p-4 text-xs leading-6 text-stone-700">
                 {JSON.stringify(detailLog?.detail || {}, null, 2)}
               </pre>
             </div>
-          ) : null}
-          <pre className="max-h-[55dvh] overflow-auto rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs leading-6 text-stone-700 sm:max-h-[72vh] sm:p-4">
-            {JSON.stringify(detailLog?.detail || {}, null, 2)}
-          </pre>
+          </div>
         </DialogContent>
       </Dialog>
       <ImageLightbox

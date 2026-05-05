@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Clock3, LoaderCircle, RotateCcw, Sparkles, Trash2 } from "lucide-react";
+import { Clock3, LoaderCircle, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -21,11 +21,6 @@ type ImageResultsProps = {
   selectedConversation: ImageConversation | null;
   onOpenLightbox: (images: ImageLightboxItem[], index: number) => void;
   onContinueEdit: (conversationId: string, image: StoredImage | StoredReferenceImage) => void;
-  onDeletePrompt: (conversationId: string, turnId: string) => void;
-  onDeleteResults: (conversationId: string, turnId: string) => void;
-  onReuseTurnConfig: (conversationId: string, turnId: string) => void | Promise<void>;
-  onRegenerateTurn: (conversationId: string, turnId: string) => void | Promise<void>;
-  onRetryImage: (conversationId: string, turnId: string, imageId: string) => void | Promise<void>;
   formatConversationTime: (value: string) => string;
   publicConfig?: PublicConfig | null;
 };
@@ -52,11 +47,6 @@ export function ImageResults({
   selectedConversation,
   onOpenLightbox,
   onContinueEdit,
-  onDeletePrompt,
-  onDeleteResults,
-  onReuseTurnConfig,
-  onRegenerateTurn,
-  onRetryImage,
   formatConversationTime,
   publicConfig,
 }: ImageResultsProps) {
@@ -285,7 +275,7 @@ export function ImageResults({
                   ) : null}
                 </div>
               </div>
-            ) : null}
+            </div>
           </div>
         );
       })}

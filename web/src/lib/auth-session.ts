@@ -16,6 +16,9 @@ export async function getValidatedAuthSession(): Promise<StoredAuthSession | nul
       role: data.role,
       subjectId: data.subject_id,
       name: data.name,
+      quota: data.quota,
+      scope: data.scope || storedSession.scope || "full",
+      authMode: data.auth_mode || storedSession.authMode,
     };
     await setStoredAuthSession(nextSession);
     return nextSession;
