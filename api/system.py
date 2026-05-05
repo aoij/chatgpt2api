@@ -14,9 +14,11 @@ from api.support import (
     require_identity,
     resolve_image_base_url,
 )
+from services.backup_service import BackupError, backup_service
 from services.auth_service import auth_service
 from services.config import config
 from services.image_service import add_log_image_thumbnails, build_image_download, build_images_zip, delete_images, list_images
+from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
 
