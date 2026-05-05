@@ -23,6 +23,7 @@ MAX_IMAGES_PER_TURN = 20
 MAX_REFERENCE_IMAGES_PER_TURN = 8
 MAX_REFERENCE_DATA_URL_CHARS = 180_000
 DB_QUERY_LIMIT_PER_OWNER = MAX_CONVERSATIONS_PER_OWNER * 2
+DELETED_CONVERSATION_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 def _now_iso() -> str:
@@ -268,14 +269,17 @@ def _create_database_engine(database_url: str):
 class ImageConversationService:
     def __init__(self, path: Path, *, database_url: str | None = None, enable_database: bool = True):
         self.path = path
+        self.deleted_path = DATA_DIR / "image_conversation_deletions.json"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         self._data: dict[str, list[dict[str, Any]]] = {}
+        self._deleted: dict[str, dict[str, float]] = {}
         self._cache: dict[str, list[dict[str, Any]]] = {}
         self._dirty = False
         self._db_available = False
         self._engine = None
         self._Session = None
+        self._deleted = self._load_deleted_from_disk()
         self.database_url = database_url if database_url is not None else _database_url()
 
         if enable_database:
@@ -342,6 +346,64 @@ class ImageConversationService:
             result[_clean(owner, "anonymous")] = _sort_conversations(normalized)[:MAX_CONVERSATIONS_PER_OWNER]
         return result
 
+    def _load_deleted_from_disk(self) -> dict[str, dict[str, float]]:
+        if not self.deleted_path.exists():
+            return {}
+        try:
+            data = json.loads(self.deleted_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        owners = data.get("owners") if isinstance(data, dict) else data
+        if not isinstance(owners, dict):
+            return {}
+        now = time.time()
+        result: dict[str, dict[str, float]] = {}
+        for owner, items in owners.items():
+            if not isinstance(items, dict):
+                continue
+            owner_key = _clean(owner, "anonymous")
+            kept: dict[str, float] = {}
+            for conversation_id, deleted_at in items.items():
+                conversation_id = _clean(conversation_id)
+                try:
+                    timestamp = float(deleted_at)
+                except (TypeError, ValueError):
+                    continue
+                if conversation_id and now - timestamp < DELETED_CONVERSATION_TTL_SECONDS:
+                    kept[conversation_id] = timestamp
+            if kept:
+                result[owner_key] = kept
+        return result
+
+    def _save_deleted_locked(self) -> None:
+        self.deleted_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = self.deleted_path.with_suffix(self.deleted_path.suffix + ".tmp")
+        tmp_path.write_text(
+            json.dumps({"owners": self._deleted}, ensure_ascii=False, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        tmp_path.replace(self.deleted_path)
+
+    def _mark_deleted_locked(self, owner: str, conversation_ids: list[str]) -> None:
+        ids = [_clean(conversation_id) for conversation_id in conversation_ids if _clean(conversation_id)]
+        if not ids:
+            return
+        owner_deleted = self._deleted.setdefault(owner, {})
+        now = time.time()
+        for conversation_id in ids:
+            owner_deleted[conversation_id] = now
+        self._cache.pop(owner, None)
+        self._save_deleted_locked()
+
+    def _filter_deleted_locked(self, owner: str, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        deleted = self._deleted.get(owner) or {}
+        if not deleted:
+            return items
+        return [item for item in items if item.get("id") not in deleted]
+
+    def _is_deleted_locked(self, owner: str, conversation_id: str) -> bool:
+        return conversation_id in (self._deleted.get(owner) or {})
+
     def _save_locked(self) -> None:
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp_path.write_text(
@@ -373,7 +435,7 @@ class ImageConversationService:
                 .all()
             )
             items = [item for item in (self._row_to_conversation(row) for row in rows) if item is not None]
-            items = _sort_conversations(items)[:MAX_CONVERSATIONS_PER_OWNER]
+            items = self._filter_deleted_locked(owner, _sort_conversations(items))[:MAX_CONVERSATIONS_PER_OWNER]
             self._cache[owner] = items
             return items
         finally:
@@ -383,6 +445,7 @@ class ImageConversationService:
         if self._Session is None:
             return []
         normalized_items = _sort_conversations(items)[:MAX_CONVERSATIONS_PER_OWNER]
+        normalized_items = self._filter_deleted_locked(owner, normalized_items)[:MAX_CONVERSATIONS_PER_OWNER]
         session = self._Session()
         try:
             session.query(ImageConversationModel).filter(ImageConversationModel.owner_id == owner).delete()
@@ -491,7 +554,7 @@ class ImageConversationService:
                     return list(self._load_owner_from_db_locked(owner))
                 except Exception as exc:
                     self._handle_db_error_locked("list", exc)
-            return list(self._data.get(owner, []))
+            return list(self._filter_deleted_locked(owner, self._data.get(owner, [])))
 
     def save(self, identity: dict[str, object], conversation: dict[str, Any]) -> list[dict[str, Any]]:
         normalized = _normalize_conversation(conversation)
@@ -499,6 +562,8 @@ class ImageConversationService:
             return self.list(identity)
         owner = _owner_key(identity)
         with self._lock:
+            if self._is_deleted_locked(owner, normalized["id"]):
+                return self.list(identity)
             if self._db_available:
                 try:
                     items = self._load_owner_from_db_locked(owner)
@@ -510,7 +575,7 @@ class ImageConversationService:
             items = self._data.get(owner, [])
             by_id = {item["id"]: item for item in items}
             by_id[normalized["id"]] = _merge_conversation(by_id.get(normalized["id"]), normalized)
-            self._data[owner] = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
+            self._data[owner] = self._filter_deleted_locked(owner, _sort_conversations(list(by_id.values())))[:MAX_CONVERSATIONS_PER_OWNER]
             self._dirty = True
             self._save_locked()
             return list(self._data[owner])
@@ -523,6 +588,13 @@ class ImageConversationService:
             if item is not None
         ]
         with self._lock:
+            normalized_items = [
+                item
+                for item in normalized_items
+                if not self._is_deleted_locked(owner, item["id"])
+            ]
+            if not normalized_items:
+                return self.list(identity)
             if self._db_available:
                 try:
                     current_items = self._load_owner_from_db_locked(owner)
@@ -545,7 +617,7 @@ class ImageConversationService:
             by_id = {item["id"]: item for item in self._data.get(owner, [])}
             for conversation in normalized_items:
                 by_id[conversation["id"]] = _merge_conversation(by_id.get(conversation["id"]), conversation)
-            self._data[owner] = _sort_conversations(list(by_id.values()))[:MAX_CONVERSATIONS_PER_OWNER]
+            self._data[owner] = self._filter_deleted_locked(owner, _sort_conversations(list(by_id.values())))[:MAX_CONVERSATIONS_PER_OWNER]
             self._dirty = True
             self._save_locked()
             return list(self._data[owner])
@@ -554,6 +626,7 @@ class ImageConversationService:
         owner = _owner_key(identity)
         normalized_id = _clean(conversation_id)
         with self._lock:
+            self._mark_deleted_locked(owner, [normalized_id])
             if self._db_available:
                 try:
                     items = [item for item in self._load_owner_from_db_locked(owner) if item.get("id") != normalized_id]
@@ -568,6 +641,8 @@ class ImageConversationService:
     def clear(self, identity: dict[str, object]) -> list[dict[str, Any]]:
         owner = _owner_key(identity)
         with self._lock:
+            current_items = self._load_owner_from_db_locked(owner) if self._db_available else self._data.get(owner, [])
+            self._mark_deleted_locked(owner, [str(item.get("id") or "") for item in current_items if isinstance(item, dict)])
             if self._db_available:
                 try:
                     self._replace_owner_rows_locked(owner, [])

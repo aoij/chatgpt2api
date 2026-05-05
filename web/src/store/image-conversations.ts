@@ -61,9 +61,11 @@ const imageConversationStorage = localforage.createInstance({
 export const IMAGE_CONVERSATIONS_SYNC_EVENT = "chatgpt2api:image-conversations-sync";
 
 const IMAGE_CONVERSATIONS_KEY = "items";
+const DELETED_IMAGE_CONVERSATIONS_KEY = "deleted_items";
 const REMOTE_CACHE_TTL_MS = 60_000;
 const REMOTE_SAVE_DEBOUNCE_MS = 800;
 const MAX_REFERENCE_DATA_URL_CHARS = 180_000;
+const DELETED_TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 let imageConversationWriteQueue: Promise<void> = Promise.resolve();
 let remoteConversationCache:
   | {
@@ -93,6 +95,10 @@ async function getScopedStorageKey() {
 
 async function getScopedSubjectKey() {
   return getScopedStorageKey();
+}
+
+async function getScopedDeletedStorageKey() {
+  return `${DELETED_IMAGE_CONVERSATIONS_KEY}:${await getScopedStorageKey()}`;
 }
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
@@ -236,6 +242,53 @@ function pickLatestConversation(current: ImageConversation, next: ImageConversat
   return getTimestamp(next.updatedAt) >= getTimestamp(current.updatedAt) ? next : current;
 }
 
+function pruneDeletedConversationMap(value: unknown): Record<string, number> {
+  const now = Date.now();
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  const result: Record<string, number> = {};
+  Object.entries(value as Record<string, unknown>).forEach(([id, deletedAt]) => {
+    const timestamp = Number(deletedAt);
+    if (id && Number.isFinite(timestamp) && now - timestamp < DELETED_TOMBSTONE_TTL_MS) {
+      result[id] = timestamp;
+    }
+  });
+  return result;
+}
+
+async function readDeletedConversationMap(): Promise<Record<string, number>> {
+  const key = await getScopedDeletedStorageKey();
+  const deleted = pruneDeletedConversationMap(await imageConversationStorage.getItem(key));
+  void imageConversationStorage.setItem(key, deleted).catch(() => undefined);
+  return deleted;
+}
+
+async function writeDeletedConversationMap(deleted: Record<string, number>) {
+  await imageConversationStorage.setItem(await getScopedDeletedStorageKey(), pruneDeletedConversationMap(deleted));
+}
+
+async function markDeletedImageConversations(ids: string[]) {
+  const normalizedIds = ids.map((id) => String(id || "").trim()).filter(Boolean);
+  if (normalizedIds.length === 0) {
+    return;
+  }
+  const deleted = await readDeletedConversationMap();
+  const now = Date.now();
+  normalizedIds.forEach((id) => {
+    deleted[id] = now;
+    pendingRemoteConversationSaves.delete(id);
+  });
+  await writeDeletedConversationMap(deleted);
+}
+
+function filterDeletedConversations(items: ImageConversation[], deleted: Record<string, number>) {
+  if (Object.keys(deleted).length === 0) {
+    return items;
+  }
+  return items.filter((item) => !deleted[item.id]);
+}
+
 function queueImageConversationWrite<T>(operation: () => Promise<T>): Promise<T> {
   const result = imageConversationWriteQueue.then(operation);
   imageConversationWriteQueue = result.then(
@@ -248,8 +301,15 @@ function queueImageConversationWrite<T>(operation: () => Promise<T>): Promise<T>
 async function readStoredImageConversations(): Promise<ImageConversation[]> {
   const scopedKey = await getScopedStorageKey();
   if (localConversationCache?.subjectKey === scopedKey) {
-    return localConversationCache.items;
+    const deleted = await readDeletedConversationMap();
+    const filtered = filterDeletedConversations(localConversationCache.items, deleted);
+    if (filtered.length !== localConversationCache.items.length) {
+      localConversationCache = { subjectKey: scopedKey, items: filtered };
+      void imageConversationStorage.setItem(scopedKey, filtered).catch(() => undefined);
+    }
+    return filtered;
   }
+  const deleted = await readDeletedConversationMap();
   let items =
     (await imageConversationStorage.getItem<Array<ImageConversation & Record<string, unknown>>>(scopedKey)) || [];
 
@@ -259,12 +319,13 @@ async function readStoredImageConversations(): Promise<ImageConversation[]> {
         IMAGE_CONVERSATIONS_KEY,
       )) || [];
     if (legacyItems.length > 0) {
-      items = legacyItems;
-      await imageConversationStorage.setItem(scopedKey, legacyItems);
+      items = filterDeletedConversations(sortImageConversations(legacyItems.map(normalizeConversation)), deleted);
+      await imageConversationStorage.setItem(scopedKey, items);
+      await imageConversationStorage.removeItem(IMAGE_CONVERSATIONS_KEY).catch(() => undefined);
     }
   }
 
-  const normalizedItems = sortImageConversations(items.map(normalizeConversation));
+  const normalizedItems = filterDeletedConversations(sortImageConversations(items.map(normalizeConversation)), deleted);
   localConversationCache = {
     subjectKey: scopedKey,
     items: normalizedItems,
@@ -275,12 +336,16 @@ async function readStoredImageConversations(): Promise<ImageConversation[]> {
 
 async function writeStoredImageConversations(conversations: ImageConversation[]): Promise<void> {
   const scopedKey = await getScopedStorageKey();
-  const items = sortImageConversations(conversations.map(normalizeConversation));
+  const deleted = await readDeletedConversationMap();
+  const items = filterDeletedConversations(sortImageConversations(conversations.map(normalizeConversation)), deleted);
   localConversationCache = {
     subjectKey: scopedKey,
     items,
   };
   await imageConversationStorage.setItem(scopedKey, items);
+  if (scopedKey !== IMAGE_CONVERSATIONS_KEY) {
+    await imageConversationStorage.removeItem(IMAGE_CONVERSATIONS_KEY).catch(() => undefined);
+  }
 }
 
 function mergeConversationLists(current: ImageConversation[], incoming: ImageConversation[]) {
@@ -299,14 +364,20 @@ async function fetchRemoteImageConversations(): Promise<ImageConversation[] | nu
     remoteConversationCache.subjectKey === subjectKey &&
     Date.now() - remoteConversationCache.fetchedAt < REMOTE_CACHE_TTL_MS
   ) {
-    return remoteConversationCache.items;
+    const deleted = await readDeletedConversationMap();
+    const items = filterDeletedConversations(remoteConversationCache.items, deleted);
+    if (items.length !== remoteConversationCache.items.length) {
+      remoteConversationCache = { ...remoteConversationCache, items };
+    }
+    return items;
   }
   try {
     const data = await httpRequest<{ items: Array<ImageConversation & Record<string, unknown>> }>(
       "/api/image-conversations",
       { redirectOnUnauthorized: false },
     );
-    const items = sortImageConversations((data.items || []).map(normalizeConversation));
+    const deleted = await readDeletedConversationMap();
+    const items = filterDeletedConversations(sortImageConversations((data.items || []).map(normalizeConversation)), deleted);
     remoteConversationCache = {
       subjectKey,
       fetchedAt: Date.now(),
@@ -330,26 +401,33 @@ async function syncRemoteImageConversations(localItems: ImageConversation[]) {
   if (remoteItems === null) {
     return;
   }
-  const mergedItems = mergeConversationLists(remoteItems, localItems);
+  const deleted = await readDeletedConversationMap();
+  const mergedItems = filterDeletedConversations(mergeConversationLists(remoteItems, localItems), deleted);
   await writeStoredImageConversations(mergedItems);
   emitImageConversationsSynced(mergedItems);
 }
 
 async function saveRemoteImageConversations(conversations: ImageConversation[]): Promise<void> {
   try {
+    const deleted = await readDeletedConversationMap();
+    const outgoingItems = filterDeletedConversations(conversations.map(normalizeConversation), deleted);
+    if (outgoingItems.length === 0) {
+      return;
+    }
     const data = await httpRequest<{ items: ImageConversation[] }>("/api/image-conversations", {
       method: "PUT",
-      body: { items: conversations.map(normalizeConversation) },
+      body: { items: outgoingItems },
       redirectOnUnauthorized: false,
     });
-    const remoteItems = sortImageConversations((data.items || conversations).map(normalizeConversation));
+    const nextDeleted = await readDeletedConversationMap();
+    const remoteItems = filterDeletedConversations(sortImageConversations((data.items || outgoingItems).map(normalizeConversation)), nextDeleted);
     remoteConversationCache = {
       subjectKey: await getScopedSubjectKey(),
       fetchedAt: Date.now(),
       items: remoteItems,
     };
     const localItems = await readStoredImageConversations();
-    const mergedItems = mergeConversationLists(localItems, remoteItems);
+    const mergedItems = filterDeletedConversations(mergeConversationLists(localItems, remoteItems), nextDeleted);
     await writeStoredImageConversations(mergedItems);
     emitImageConversationsSynced(mergedItems);
   } catch {
@@ -359,20 +437,25 @@ async function saveRemoteImageConversations(conversations: ImageConversation[]):
 
 async function saveRemoteImageConversation(conversation: ImageConversation): Promise<void> {
   const normalized = normalizeConversation(conversation);
+  const deleted = await readDeletedConversationMap();
+  if (deleted[normalized.id]) {
+    return;
+  }
   try {
     const data = await httpRequest<{ items: ImageConversation[] }>(`/api/image-conversations/${encodeURIComponent(normalized.id)}`, {
       method: "PUT",
       body: { conversation: normalized },
       redirectOnUnauthorized: false,
     });
-    const remoteItems = sortImageConversations((data.items || []).map(normalizeConversation));
+    const deleted = await readDeletedConversationMap();
+    const remoteItems = filterDeletedConversations(sortImageConversations((data.items || []).map(normalizeConversation)), deleted);
     remoteConversationCache = {
       subjectKey: await getScopedSubjectKey(),
       fetchedAt: Date.now(),
       items: remoteItems,
     };
     const localItems = await readStoredImageConversations();
-    const mergedItems = mergeConversationLists(localItems, remoteItems);
+    const mergedItems = filterDeletedConversations(mergeConversationLists(localItems, remoteItems), deleted);
     await writeStoredImageConversations(mergedItems);
     emitImageConversationsSynced(mergedItems);
   } catch {
@@ -388,7 +471,11 @@ function scheduleRemoteConversationSaves(conversations: ImageConversation[]) {
     remoteSaveQueue = remoteSaveQueue
       .catch(() => undefined)
       .then(async () => {
-        const items = Array.from(pendingRemoteConversationSaves.values());
+        const deleted = await readDeletedConversationMap();
+        const items = filterDeletedConversations(Array.from(pendingRemoteConversationSaves.values()), deleted);
+        for (const id of Object.keys(deleted)) {
+          pendingRemoteConversationSaves.delete(id);
+        }
         pendingRemoteConversationSaves.clear();
         if (items.length > 0) {
           await saveRemoteImageConversations(items);
@@ -401,14 +488,19 @@ function scheduleRemoteConversationSaves(conversations: ImageConversation[]) {
   }
   remoteSaveTimer = window.setTimeout(() => {
     remoteSaveTimer = null;
-    const items = Array.from(pendingRemoteConversationSaves.values());
-    pendingRemoteConversationSaves.clear();
-    if (items.length === 0) {
-      return;
-    }
     remoteSaveQueue = remoteSaveQueue
       .catch(() => undefined)
-      .then(() => saveRemoteImageConversations(items));
+      .then(async () => {
+        const deleted = await readDeletedConversationMap();
+        const items = filterDeletedConversations(Array.from(pendingRemoteConversationSaves.values()), deleted);
+        for (const id of Object.keys(deleted)) {
+          pendingRemoteConversationSaves.delete(id);
+        }
+        pendingRemoteConversationSaves.clear();
+        if (items.length > 0) {
+          await saveRemoteImageConversations(items);
+        }
+      });
   }, REMOTE_SAVE_DEBOUNCE_MS);
 }
 
@@ -424,7 +516,8 @@ export async function listImageConversations(): Promise<ImageConversation[]> {
     return sortImageConversations(localItems);
   }
 
-  const mergedItems = mergeConversationLists(remoteItems, localItems);
+  const deleted = await readDeletedConversationMap();
+  const mergedItems = filterDeletedConversations(mergeConversationLists(remoteItems, localItems), deleted);
   await writeStoredImageConversations(mergedItems);
   return mergedItems;
 }
@@ -432,17 +525,24 @@ export async function listImageConversations(): Promise<ImageConversation[]> {
 export async function saveImageConversations(conversations: ImageConversation[]): Promise<void> {
   await queueImageConversationWrite(async () => {
     const items = await readStoredImageConversations();
-    const nextItems = mergeConversationLists(items, conversations);
+    const deleted = await readDeletedConversationMap();
+    const incoming = filterDeletedConversations(conversations.map(normalizeConversation), deleted);
+    const nextItems = filterDeletedConversations(mergeConversationLists(items, incoming), deleted);
     await writeStoredImageConversations(nextItems);
-    const changedItems = conversations.map(normalizeConversation);
+    const changedItems = incoming;
     scheduleRemoteConversationSaves(changedItems);
   });
 }
 
 export async function saveImageConversation(conversation: ImageConversation): Promise<void> {
   await queueImageConversationWrite(async () => {
+    const deleted = await readDeletedConversationMap();
     const items = await readStoredImageConversations();
     const nextConversation = normalizeConversation(conversation);
+    if (deleted[nextConversation.id]) {
+      await writeStoredImageConversations(items);
+      return;
+    }
     const current = items.find((item) => item.id === nextConversation.id);
     const persistedConversation = current ? pickLatestConversation(current, nextConversation) : nextConversation;
     const nextItems = sortImageConversations([
@@ -456,6 +556,7 @@ export async function saveImageConversation(conversation: ImageConversation): Pr
 
 export async function deleteImageConversation(id: string): Promise<void> {
   await queueImageConversationWrite(async () => {
+    await markDeletedImageConversations([id]);
     pendingRemoteConversationSaves.delete(id);
     const items = await readStoredImageConversations();
     await writeStoredImageConversations(items.filter((item) => item.id !== id));
@@ -467,7 +568,10 @@ export async function deleteImageConversation(id: string): Promise<void> {
       remoteConversationCache = {
         subjectKey: await getScopedSubjectKey(),
         fetchedAt: Date.now(),
-        items: sortImageConversations((data.items || []).map(normalizeConversation)),
+        items: filterDeletedConversations(
+          sortImageConversations((data.items || []).map(normalizeConversation)),
+          await readDeletedConversationMap(),
+        ),
       };
     } catch {
       // 本地缓存兜底。
@@ -477,8 +581,11 @@ export async function deleteImageConversation(id: string): Promise<void> {
 
 export async function clearImageConversations(): Promise<void> {
   await queueImageConversationWrite(async () => {
+    const items = await readStoredImageConversations();
+    await markDeletedImageConversations(items.map((item) => item.id));
     pendingRemoteConversationSaves.clear();
     await imageConversationStorage.removeItem(await getScopedStorageKey());
+    await imageConversationStorage.removeItem(IMAGE_CONVERSATIONS_KEY).catch(() => undefined);
     localConversationCache = null;
     try {
       const data = await httpRequest<{ items: ImageConversation[] }>("/api/image-conversations", {
@@ -488,7 +595,10 @@ export async function clearImageConversations(): Promise<void> {
       remoteConversationCache = {
         subjectKey: await getScopedSubjectKey(),
         fetchedAt: Date.now(),
-        items: sortImageConversations((data.items || []).map(normalizeConversation)),
+        items: filterDeletedConversations(
+          sortImageConversations((data.items || []).map(normalizeConversation)),
+          await readDeletedConversationMap(),
+        ),
       };
     } catch {
       // 本地缓存兜底。
