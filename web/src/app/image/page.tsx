@@ -60,6 +60,7 @@ function clampImageCount(value: string) {
   return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
 }
 const activeConversationQueueIds = new Set<string>();
+const AUTO_SCROLL_BOTTOM_THRESHOLD = 80;
 
 function buildConversationTitle(prompt: string) {
   const trimmed = prompt.trim();
@@ -539,6 +540,9 @@ function ImagePageContent({
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const forceAutoScrollRef = useRef(false);
+  const previousSelectedConversationIdRef = useRef<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -692,14 +696,50 @@ function ImagePageContent({
   }, [isAdmin, loadQuota]);
 
   useEffect(() => {
+    const viewport = resultsViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const updateStickiness = () => {
+      const distanceToBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+      shouldStickToBottomRef.current = distanceToBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD;
+    };
+
+    updateStickiness();
+    viewport.addEventListener("scroll", updateStickiness, { passive: true });
+    return () => {
+      viewport.removeEventListener("scroll", updateStickiness);
+    };
+  }, [selectedConversationId]);
+
+  useEffect(() => {
+    if (previousSelectedConversationIdRef.current !== selectedConversationId) {
+      previousSelectedConversationIdRef.current = selectedConversationId;
+      forceAutoScrollRef.current = true;
+      shouldStickToBottomRef.current = true;
+    }
+  }, [selectedConversationId]);
+
+  useEffect(() => {
     if (!selectedConversation) {
       return;
     }
 
-    resultsViewportRef.current?.scrollTo({
+    const viewport = resultsViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    if (!forceAutoScrollRef.current && !shouldStickToBottomRef.current) {
+      return;
+    }
+
+    viewport.scrollTo({
       top: resultsViewportRef.current.scrollHeight,
-      behavior: "smooth",
+      behavior: forceAutoScrollRef.current ? "auto" : "smooth",
     });
+    shouldStickToBottomRef.current = true;
+    forceAutoScrollRef.current = false;
   }, [selectedConversation?.updatedAt, selectedConversation?.turns.length, selectedConversation]);
 
   useEffect(() => {
