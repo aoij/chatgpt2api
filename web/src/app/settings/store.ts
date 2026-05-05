@@ -5,18 +5,25 @@ import { toast } from "sonner";
 
 import {
   createCPAPool,
+  deleteBackup,
   deleteCPAPool,
   fetchCPAPoolFiles,
   fetchCPAPools,
+  fetchBackups,
   fetchRegisterConfig,
   resetRegister as resetRegisterApi,
   fetchSettingsConfig,
+  runBackupNow,
   startRegister,
   startCPAImport,
   stopRegister,
+  testBackupConnection,
   updateCPAPool,
   updateRegisterConfig,
   updateSettingsConfig,
+  type BackupItem,
+  type BackupSettings,
+  type BackupState,
   type CPAPool,
   type CPARemoteFile,
   type RegisterConfig,
@@ -28,10 +35,38 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
+  const backup = typeof config.backup === "object" && config.backup
+    ? config.backup as BackupSettings
+    : {
+      enabled: false,
+      provider: "cloudflare_r2",
+      account_id: "",
+      access_key_id: "",
+      secret_access_key: "",
+      bucket: "",
+      prefix: "backups",
+      interval_minutes: 360,
+      rotation_keep: 10,
+      encrypt: false,
+      passphrase: "",
+      include: {
+        config: true,
+        register: true,
+        cpa: true,
+        sub2api: true,
+        logs: true,
+        image_tasks: true,
+        accounts_snapshot: true,
+        auth_keys_snapshot: true,
+        images: false,
+      },
+    };
   return {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
     image_retention_days: Number(config.image_retention_days || 30),
+    image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
+    image_account_concurrency: Number(config.image_account_concurrency || 3),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
@@ -65,6 +100,12 @@ type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
   isSavingConfig: boolean;
+  backups: BackupItem[];
+  backupState: BackupState | null;
+  isLoadingBackups: boolean;
+  isRunningBackup: boolean;
+  deletingBackupKey: string | null;
+  isTestingBackup: boolean;
 
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
@@ -94,9 +135,15 @@ type SettingsStore = {
 
   initialize: () => Promise<void>;
   loadConfig: () => Promise<void>;
-  saveConfig: () => Promise<void>;
+  saveConfig: () => Promise<boolean>;
+  loadBackups: (silent?: boolean) => Promise<void>;
+  runBackup: () => Promise<void>;
+  removeBackup: (key: string) => Promise<void>;
+  testBackup: () => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
+  setImagePollTimeoutSecs: (value: string) => void;
+  setImageAccountConcurrency: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
@@ -149,6 +196,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   config: null,
   isLoadingConfig: true,
   isSavingConfig: false,
+  backups: [],
+  backupState: null,
+  isLoadingBackups: true,
+  isRunningBackup: false,
+  deletingBackupKey: null,
+  isTestingBackup: false,
 
   registerConfig: null,
   isLoadingRegister: true,
@@ -178,14 +231,27 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   initialize: async () => {
     await Promise.allSettled([get().loadConfig(), get().loadPools()]);
+    const backup = get().config?.backup;
+    const isConfigured = Boolean(
+      String(backup?.account_id || "").trim()
+      && String(backup?.access_key_id || "").trim()
+      && String(backup?.secret_access_key || "").trim()
+      && String(backup?.bucket || "").trim(),
+    );
+    if (isConfigured) {
+      await get().loadBackups();
+    } else {
+      set({ backups: [], isLoadingBackups: false });
+    }
   },
 
   loadConfig: async () => {
     set({ isLoadingConfig: true });
     try {
       const data = await fetchSettingsConfig();
+      const normalized = normalizeConfig(data.config);
       set({
-        config: normalizeConfig(data.config),
+        config: normalized,
       });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载系统配置失败");
@@ -197,7 +263,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   saveConfig: async () => {
     const { config } = get();
     if (!config) {
-      return;
+      return false;
     }
 
     set({ isSavingConfig: true });
@@ -206,6 +272,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         ...config,
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
+        image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
+        image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         proxy: config.proxy.trim(),
@@ -219,8 +287,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         config: normalizeConfig(data.config),
       });
       toast.success("配置已保存");
+      return true;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存系统配置失败");
+      return false;
     } finally {
       set({ isSavingConfig: false });
     }
@@ -242,6 +312,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageRetentionDays: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_retention_days: value } } : {});
+  },
+
+  setImagePollTimeoutSecs: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_poll_timeout_secs: value } } : {});
+  },
+
+  setImageAccountConcurrency: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value } } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

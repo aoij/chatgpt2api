@@ -1,6 +1,6 @@
 import { httpBlobRequest, httpRequest } from "@/lib/request";
 
-export type AccountType = "Free" | "Plus" | "ProLite" | "Pro" | "Team";
+export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "gpt-image-2" | "codex-gpt-image-2";
 export type AuthRole = "admin" | "user";
@@ -12,7 +12,7 @@ export type Account = {
   type: AccountType;
   status: AccountStatus;
   quota: number;
-  imageQuotaUnknown?: boolean;
+  image_quota_unknown?: boolean;
   email?: string | null;
   user_id?: string | null;
   limits_progress?: Array<{
@@ -21,10 +21,10 @@ export type Account = {
     reset_after?: string;
   }>;
   default_model_slug?: string | null;
-  restoreAt?: string | null;
+  restore_at?: string | null;
   success: number;
   fail: number;
-  lastUsedAt: string | null;
+  last_used_at?: string | null;
 };
 
 type AccountListResponse = {
@@ -75,13 +75,83 @@ export type SettingsConfig = {
   image_page_subtitle?: string;
   refresh_account_interval_minute?: number | string;
   image_retention_days?: number | string;
+  image_poll_timeout_secs?: number | string;
+  image_account_concurrency?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
+  backup?: BackupSettings;
+  backup_state?: BackupState;
   [key: string]: unknown;
 };
 
+export type BackupInclude = {
+  config: boolean;
+  register: boolean;
+  cpa: boolean;
+  sub2api: boolean;
+  logs: boolean;
+  image_tasks: boolean;
+  accounts_snapshot: boolean;
+  auth_keys_snapshot: boolean;
+  images: boolean;
+};
+
+export type BackupSettings = {
+  enabled: boolean;
+  provider: "cloudflare_r2" | string;
+  account_id: string;
+  access_key_id: string;
+  secret_access_key: string;
+  bucket: string;
+  prefix: string;
+  interval_minutes: number | string;
+  rotation_keep: number | string;
+  encrypt: boolean;
+  passphrase: string;
+  include: BackupInclude;
+};
+
+export type BackupState = {
+  running: boolean;
+  last_started_at?: string | null;
+  last_finished_at?: string | null;
+  last_status?: string;
+  last_error?: string | null;
+  last_object_key?: string | null;
+};
+
+export type BackupItem = {
+  key: string;
+  name: string;
+  size: number;
+  updated_at?: string | null;
+  encrypted: boolean;
+};
+
+export type BackupDetail = {
+  key: string;
+  name: string;
+  encrypted: boolean;
+  created_at?: string | null;
+  trigger?: string | null;
+  app_version?: string | null;
+  storage_backend?: Record<string, unknown> | null;
+  files: Array<{
+    name: string;
+    exists: boolean;
+    content_type?: string;
+    size: number;
+    sha256?: string;
+  }>;
+  snapshots: Array<{
+    name: string;
+    count: number;
+  }>;
+};
+
 export type ManagedImage = {
+  rel: string;
   path?: string;
   name: string;
   date: string;
@@ -106,6 +176,7 @@ export type ManagedImageUploader = {
 };
 
 export type SystemLog = {
+  id: string;
   time: string;
   type: "call" | "account" | string;
   summary?: string;
@@ -519,6 +590,13 @@ export async function fetchSystemLogs(filters: { type?: string; start_date?: str
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
   return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export async function deleteSystemLogs(ids: string[]) {
+  return httpRequest<{ removed: number }>("/api/logs/delete", {
+    method: "POST",
+    body: { ids },
+  });
 }
 
 export async function fetchUserKeys() {

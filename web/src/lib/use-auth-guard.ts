@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
+import { getValidatedAuthSession } from "@/lib/auth-session";
 import {
   getDefaultRouteForSession,
   getStoredAuthSession,

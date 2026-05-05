@@ -8,6 +8,7 @@ import webConfig from "@/constants/common-env";
 import { fetchPublicConfig, type PublicConfig } from "@/lib/api";
 import { clearStoredAuthSession, getStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 import { cn } from "@/lib/utils";
+import { clearStoredAuthSession, type StoredAuthSession } from "@/store/auth";
 
 const adminNavItems = [
   { href: "/image", label: "画图" },
@@ -58,7 +59,7 @@ export function TopNav() {
         return;
       }
 
-      const storedSession = await getStoredAuthSession();
+      const storedSession = await getValidatedAuthSession();
       if (!active) {
         return;
       }
@@ -134,7 +135,7 @@ export function TopNav() {
         </nav>
         <div className="hidden items-center justify-end gap-2 sm:flex sm:gap-3">
           <span className="hidden rounded-md bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-500 sm:inline-block sm:text-[11px]">
-            {roleLabel}
+            {roleLabel} · {displayName}
           </span>
           <span className="hidden rounded-md bg-stone-100 px-2 py-1 text-[10px] font-medium text-stone-500 sm:inline-block sm:text-[11px]">
             v{webConfig.appVersion}

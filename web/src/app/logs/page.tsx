@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -10,7 +10,8 @@ import { ImageThumbnail, getImageThumbnailUrl } from "@/components/image-thumbna
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { fetchSystemLogs, getManagedImagePathFromUrl, type SystemLog } from "@/lib/api";
@@ -59,6 +60,9 @@ function LogsContent() {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => {
     const downloadPath = getManagedImagePathFromUrl(url);
@@ -74,17 +78,21 @@ function LogsContent() {
   const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
   const safePage = Math.min(page, pageCount);
   const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
+  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(item.id));
 
   const loadLogs = async () => {
     setIsLoading(true);
     try {
       const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate });
       setItems(data.items);
+      setSelectedIds((current) => current.filter((id) => data.items.some((item) => item.id === id)));
       setPage(1);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载日志失败");
     } finally {
-    setIsLoading(false);
+      setIsLoading(false);
     }
   };
 
@@ -102,6 +110,31 @@ function LogsContent() {
     setDetailLog(item);
     setLightboxIndex(index);
     setLightboxOpen(true);
+  };
+
+  const toggleIds = (ids: string[], checked: boolean) => {
+    setSelectedIds((current) => checked ? Array.from(new Set([...current, ...ids])) : current.filter((id) => !ids.includes(id)));
+  };
+
+  const confirmDelete = async () => {
+    const ids = deletingItems.map((item) => item.id);
+    if (ids.length === 0) return;
+    setIsDeleting(true);
+    try {
+      const data = await deleteSystemLogs(ids);
+      toast.success(`已删除 ${data.removed} 条日志`);
+      setDeletingItems([]);
+      setSelectedIds((current) => current.filter((id) => !ids.includes(id)));
+      if (detailLog && ids.includes(detailLog.id)) {
+        setDetailOpen(false);
+        setDetailLog(null);
+      }
+      await loadLogs();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除日志失败");
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   useEffect(() => {
@@ -204,6 +237,7 @@ function LogsContent() {
             <Table className="min-w-[820px]">
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-12"></TableHead>
                   <TableHead>时间</TableHead>
                   <TableHead>类型</TableHead>
                   {isCallLog ? <TableHead>令牌名称</TableHead> : null}
@@ -211,14 +245,17 @@ function LogsContent() {
                   {isCallLog ? <TableHead>状态</TableHead> : null}
                   {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
                   <TableHead>简述</TableHead>
-                  <TableHead className="w-28">详情</TableHead>
+                  <TableHead className="w-40">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {currentRows.map((item, index) => {
+                {currentRows.map((item) => {
                   const urls = getUrls(item);
                   return (
-                    <TableRow key={`${item.time}-${index}`} className="text-stone-600">
+                    <TableRow key={item.id} className="text-stone-600">
+                      <TableCell>
+                        <Checkbox checked={selectedSet.has(item.id)} onCheckedChange={(checked) => toggleIds([item.id], Boolean(checked))} />
+                      </TableCell>
                       <TableCell className="whitespace-nowrap">{item.time}</TableCell>
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
@@ -257,9 +294,14 @@ function LogsContent() {
                       ) : null}
                       <TableCell className="max-w-[420px] truncate text-stone-500">{item.summary || "-"}</TableCell>
                       <TableCell>
-                        <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
-                          查看详情
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
+                            查看详情
+                          </Button>
+                          <Button variant="ghost" className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeletingItems([item])}>
+                            删除
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   );
@@ -292,23 +334,10 @@ function LogsContent() {
                   <span className="text-stone-400">{key}</span>
                   <span className="break-all font-medium text-stone-700 sm:text-right">{String(value)}</span>
                 </div>
-              ))}
-          </div>
-          {detailUrls.length ? (
-            <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-              {detailUrls.map((url, index) => (
-                <button
-                  key={url}
-                  type="button"
-                  className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
-                  onClick={() => {
-                    setLightboxIndex(index);
-                    setLightboxOpen(true);
-                  }}
-                >
-                  <ImageThumbnail src={url} thumbnailSrc={getImageThumbnailUrl(url)} className="h-full w-full" />
-                </button>
-              ))}
+              ) : null}
+              <pre className="max-h-[72vh] overflow-auto rounded-xl border border-stone-200 bg-stone-50 p-4 text-xs leading-6 text-stone-700">
+                {JSON.stringify(detailLog?.detail || {}, null, 2)}
+              </pre>
             </div>
           ) : null}
           <pre className="max-h-[55dvh] overflow-auto rounded-xl border border-stone-200 bg-stone-50 p-3 text-xs leading-6 text-stone-700 sm:max-h-[72vh] sm:p-4">
@@ -323,6 +352,25 @@ function LogsContent() {
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
       />
+      <Dialog open={deletingItems.length > 0} onOpenChange={(open) => (!open ? setDeletingItems([]) : null)}>
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>{deletingItems.length === 1 ? "删除日志" : "删除所选日志"}</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              确认删除 {deletingItems.length} 条日志吗？删除后无法恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-xl" onClick={() => setDeletingItems([])} disabled={isDeleting}>
+              取消
+            </Button>
+            <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmDelete()} disabled={isDeleting || deletingItems.length === 0}>
+              {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              确认删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

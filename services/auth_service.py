@@ -62,7 +62,7 @@ class AuthService:
         if not key_hash:
             return None
         item_id = self._clean(raw.get("id")) or uuid.uuid4().hex[:12]
-        name = self._clean(raw.get("name")) or ("管理员密钥" if role == "admin" else "普通用户")
+        name = self._clean(raw.get("name")) or self._default_name(role)
         created_at = self._clean(raw.get("created_at")) or _now_iso()
         last_used_at = self._clean(raw.get("last_used_at")) or None
         quota = self._normalize_quota(raw.get("quota"), default=None)
@@ -96,6 +96,9 @@ class AuthService:
     def _save(self) -> None:
         self.storage.save_auth_keys(self._items)
 
+    def _reload_locked(self) -> None:
+        self._items = self._load()
+
     @staticmethod
     def _public_item(item: dict[str, object]) -> dict[str, object]:
         return {
@@ -112,6 +115,7 @@ class AuthService:
 
     def list_keys(self, role: AuthRole | None = None) -> list[dict[str, object]]:
         with self._lock:
+            self._reload_locked()
             items = [item for item in self._items if role is None or item.get("role") == role]
             return [self._public_item(item) for item in items]
 
@@ -169,14 +173,20 @@ class AuthService:
         if not normalized_id:
             return None
         with self._lock:
+            self._reload_locked()
             for index, item in enumerate(self._items):
                 if item.get("id") != normalized_id:
                     continue
                 if role is not None and item.get("role") != role:
                     return None
                 next_item = dict(item)
+                next_role = "admin" if str(next_item.get("role") or "").strip().lower() == "admin" else "user"
                 if "name" in updates and updates.get("name") is not None:
-                    next_item["name"] = self._clean(updates.get("name")) or next_item.get("name") or "普通用户"
+                    next_item["name"] = self._build_name_locked(
+                        str(updates.get("name") or ""),
+                        role=next_role,
+                        exclude_id=normalized_id,
+                    )
                 if "enabled" in updates and updates.get("enabled") is not None:
                     next_item["enabled"] = bool(updates.get("enabled"))
                 if "quota" in updates and updates.get("quota") is not None:
@@ -191,6 +201,7 @@ class AuthService:
         if not normalized_id:
             return False
         with self._lock:
+            self._reload_locked()
             before = len(self._items)
             self._items = [
                 item

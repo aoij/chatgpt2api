@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
+import { BackupSettingsCard } from "./components/backup-settings-card";
 import { ConfigCard } from "./components/config-card";
 import { CPAPoolDialog } from "./components/cpa-pool-dialog";
 import { CPAPoolsCard } from "./components/cpa-pools-card";
@@ -20,7 +21,9 @@ function SettingsDataController() {
   const didLoadRef = useRef(false);
   const initialize = useSettingsStore((state) => state.initialize);
   const loadPools = useSettingsStore((state) => state.loadPools);
+  const loadBackups = useSettingsStore((state) => state.loadBackups);
   const pools = useSettingsStore((state) => state.pools);
+  const backupState = useSettingsStore((state) => state.backupState);
 
   useEffect(() => {
     if (didLoadRef.current) {
@@ -44,6 +47,16 @@ function SettingsDataController() {
     }, 1500);
     return () => window.clearInterval(timer);
   }, [loadPools, pools]);
+
+  useEffect(() => {
+    if (!backupState?.running) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void loadBackups(true);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [backupState?.running, loadBackups]);
 
   return null;
 }

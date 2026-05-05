@@ -73,6 +73,16 @@ def _task_key(owner_id: str, task_id: str) -> str:
     return f"{owner_id}:{task_id}"
 
 
+def _collect_image_urls(data: list[Any]) -> list[str]:
+    urls: list[str] = []
+    for item in data:
+        if isinstance(item, dict):
+            url = item.get("url")
+            if isinstance(url, str) and url:
+                urls.append(url)
+    return urls
+
+
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     item = {
         "id": task.get("id"),

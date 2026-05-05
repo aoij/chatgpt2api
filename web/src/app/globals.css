@@ -122,6 +122,7 @@
   * {
     @apply border-border outline-ring/50;
   }
+  html,
   body {
     @apply bg-background text-foreground;
     -webkit-tap-highlight-color: transparent;
@@ -143,4 +144,9 @@
   .hide-scrollbar::-webkit-scrollbar {
     display: none;
   }
+}
+
+@keyframes grow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
 }

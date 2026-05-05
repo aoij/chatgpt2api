@@ -20,7 +20,7 @@ import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
-import { ImageThumbnail } from "@/components/image-thumbnail";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -33,12 +33,14 @@ import type { StoredAuthSession } from "@/store/auth";
 
 type GroupMode = "none" | "uploader";
 
+const LONG_PRESS_MS = 800;
+
 function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
 }
 
 function imageKey(item: ManagedImage) {
-  return item.path || item.url;
+  return item.rel || item.url;
 }
 
 function imageDimensions(item: ManagedImage) {
@@ -74,6 +76,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
+  const [deleteTarget, setDeleteTarget] = useState<ManagedImage | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
@@ -139,6 +142,100 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
       setIsLoading(false);
     }
   };
+
+  const closeDialog = useCallback(() => {
+    setDialogVisible(false);
+    setTimeout(() => setDeleteTarget(null), 200);
+  }, []);
+
+  const openDeleteDialog = useCallback((item: ManagedImage) => {
+    deleteTargetRef.current = item;
+    setDeleteTarget(item);
+    setDialogVisible(true);
+  }, []);
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setIsDeleting(true);
+    try {
+      await deleteManagedImages({ paths: [deleteTarget.rel] });
+      setItems((prev) => prev.filter((item) => item.rel !== deleteTarget.rel));
+      setSelectedPaths((prev) => prev.filter((p) => p !== imageKey(deleteTarget)));
+      toast.success("图片已删除");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除失败");
+    } finally {
+      setIsDeleting(false);
+      closeDialog();
+    }
+  };
+
+  const handleSetTags = async (item: ManagedImage, tags: string[]) => {
+    try {
+      const result = await setImageTags(item.rel, tags);
+      setItems((prev) => prev.map((i) => i.rel === item.rel ? { ...i, tags: result.tags } : i));
+      const tagsData = await fetchImageTags();
+      setAllTags(tagsData.tags);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "设置标签失败");
+    }
+  };
+
+  const handleAddTag = (item: ManagedImage) => {
+    const tag = tagInput.trim();
+    if (!tag) return;
+    const current = item.tags ?? [];
+    if (current.includes(tag)) {
+      toast.error("标签已存在");
+      return;
+    }
+    void handleSetTags(item, [...current, tag]);
+    setTagInput("");
+  };
+
+  const handleRemoveTag = (item: ManagedImage, tag: string) => {
+    void handleSetTags(item, (item.tags ?? []).filter((t) => t !== tag));
+  };
+
+  const toggleFilterTag = (tag: string) => {
+    setSelectedTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
+    setPage(1);
+  };
+
+  const [pressingTag, setPressingTag] = useState<string | null>(null);
+  const pressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [tagDeleteTarget, setTagDeleteTarget] = useState<string | null>(null);
+
+  const handleDeleteTag = async (tag: string) => {
+    try {
+      const result = await deleteImageTag(tag);
+      setAllTags((prev) => prev.filter((t) => t !== tag));
+      setSelectedTags((prev) => prev.filter((t) => t !== tag));
+      setItems((prev) => prev.map((item) => ({
+        ...item,
+        tags: (item.tags ?? []).filter((t) => t !== tag),
+      })));
+      toast.success(`标签"${tag}"已删除，影响 ${result.removed_from} 张图片`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "删除标签失败");
+    }
+  };
+
+  const startTagPress = useCallback((tag: string) => {
+    setPressingTag(tag);
+    pressTimerRef.current = setTimeout(() => {
+      setPressingTag(null);
+      setTagDeleteTarget(tag);
+    }, LONG_PRESS_MS);
+  }, []);
+
+  const stopTagPress = useCallback(() => {
+    setPressingTag(null);
+    if (pressTimerRef.current) {
+      clearTimeout(pressTimerRef.current);
+      pressTimerRef.current = null;
+    }
+  }, []);
 
   const clearFilters = () => {
     setStartDate("");
@@ -544,12 +641,40 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
               {deleteDialogDescription}
             </DialogDescription>
           </DialogHeader>
+          <p className="text-sm text-stone-600">
+            确认删除 {selectedCount} 张图片吗？删除后无法恢复。
+          </p>
           <DialogFooter>
             <Button variant="outline" className="rounded-xl" onClick={() => setDeleteMode(null)} disabled={isDeleting}>
               取消
             </Button>
             <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmDelete()} disabled={isDeleting || selectedCount === 0}>
               {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              确认删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={Boolean(tagDeleteTarget)} onOpenChange={(open) => { if (!open) setTagDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>删除标签</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-stone-600">
+            确定要删除标签 <span className="font-semibold">"{tagDeleteTarget}"</span> 吗？将从所有图片中移除该标签。
+          </p>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-xl" onClick={() => setTagDeleteTarget(null)}>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              className="rounded-xl"
+              onClick={() => {
+                if (tagDeleteTarget) void handleDeleteTag(tagDeleteTarget);
+                setTagDeleteTarget(null);
+              }}
+            >
               确认删除
             </Button>
           </DialogFooter>

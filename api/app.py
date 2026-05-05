@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api import accounts, ai, image_tasks, recharge, register, system
 from api.support import resolve_web_asset, start_limited_account_watcher
+from services.backup_service import backup_service
 from services.config import config
 from services.image_service import cleanup_expired_images
 from services.recharge_service import start_recharge_order_watcher
