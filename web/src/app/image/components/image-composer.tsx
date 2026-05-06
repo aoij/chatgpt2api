@@ -16,6 +16,14 @@ type ImageComposerProps = {
   availableQuota: string;
   tokenName: string;
   activeTaskCount: number;
+  batchLimit: number;
+  systemProcessingCount: number;
+  systemQueuedCount: number;
+  systemRunningCount: number;
+  systemEstimatedWaitText: string;
+  systemAverageDurationText: string;
+  recentQuotaUsageText?: string;
+  expandSignal?: number;
   referenceImages: Array<{ name: string; dataUrl: string }>;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   fileInputRef: RefObject<HTMLInputElement | null>;
@@ -44,6 +52,14 @@ export function ImageComposer({
   availableQuota,
   tokenName,
   activeTaskCount,
+  batchLimit,
+  systemProcessingCount,
+  systemQueuedCount,
+  systemRunningCount,
+  systemEstimatedWaitText,
+  systemAverageDurationText,
+  recentQuotaUsageText = "",
+  expandSignal = 0,
   referenceImages,
   textareaRef,
   fileInputRef,
@@ -59,7 +75,9 @@ export function ImageComposer({
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [isSizeMenuOpen, setIsSizeMenuOpen] = useState(false);
   const [isMobilePanelExpanded, setIsMobilePanelExpanded] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState(false);
   const sizeMenuRef = useRef<HTMLDivElement>(null);
+  const composerBodyRef = useRef<HTMLDivElement>(null);
   const lightboxImages = useMemo(
     () => referenceImages.map((image, index) => ({ id: `${image.name}-${index}`, src: image.dataUrl })),
     [referenceImages],
@@ -67,10 +85,25 @@ export function ImageComposer({
   const imageSizeLabel = imageSizeOptions.find((option) => option.value === imageSize)?.label || "未指定";
   const submitLabel = referenceImages.length > 0 ? "开始编辑" : "开始生图";
   const hasPrompt = Boolean(prompt.trim());
+  const isMobileExpandedSheet = isMobileViewport && isMobilePanelExpanded;
+
+  const focusPromptTextarea = (scrollToTop = false) => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.setTimeout(() => {
+      if (scrollToTop) {
+        composerBodyRef.current?.scrollTo({ top: 0 });
+      }
+      textareaRef.current?.focus();
+      textareaRef.current?.scrollIntoView({ block: "nearest" });
+    }, 24);
+  };
 
   const expandMobilePanel = () => {
     setIsMobilePanelExpanded(true);
-    window.setTimeout(() => textareaRef.current?.focus(), 0);
+    focusPromptTextarea(true);
   };
 
   const submitAndCollapseMobilePanel = async () => {
@@ -83,10 +116,49 @@ export function ImageComposer({
   };
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(max-width: 639px)");
+    const updateViewportState = () => setIsMobileViewport(mediaQuery.matches);
+    updateViewportState();
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", updateViewportState);
+      return () => {
+        mediaQuery.removeEventListener("change", updateViewportState);
+      };
+    }
+
+    mediaQuery.addListener(updateViewportState);
+    return () => {
+      mediaQuery.removeListener(updateViewportState);
+    };
+  }, []);
+
+  useEffect(() => {
     if (referenceImages.length > 0) {
       setIsMobilePanelExpanded(true);
+      focusPromptTextarea(true);
     }
   }, [referenceImages.length]);
+
+  useEffect(() => {
+    if (!isMobileExpandedSheet) {
+      return;
+    }
+    focusPromptTextarea(true);
+  }, [isMobileExpandedSheet]);
+
+  useEffect(() => {
+    if (!expandSignal) {
+      return;
+    }
+    setIsMobilePanelExpanded(true);
+    setIsSizeMenuOpen(false);
+    focusPromptTextarea(true);
+  }, [expandSignal]);
 
   useEffect(() => {
     if (!isSizeMenuOpen) {
@@ -114,8 +186,19 @@ export function ImageComposer({
   };
 
   return (
-    <div className="flex shrink-0 justify-center px-0.5 pb-[env(safe-area-inset-bottom)] sm:px-0 sm:pb-0">
-      <div className="w-full max-w-[980px]">
+    <div
+      className={cn(
+        "flex shrink-0 justify-center px-0.5 pb-[env(safe-area-inset-bottom)] sm:px-0 sm:pb-0",
+        isMobileExpandedSheet && "fixed inset-x-0 bottom-0 z-40 px-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)]",
+      )}
+    >
+      <div
+        className={cn(
+          "w-full max-w-[980px]",
+          isMobileExpandedSheet &&
+            "flex max-h-[88dvh] flex-col overflow-hidden rounded-[28px] border border-stone-200 bg-white shadow-[0_28px_120px_-44px_rgba(15,23,42,0.45)]",
+        )}
+      >
         <input
           ref={fileInputRef}
           type="file"
@@ -128,11 +211,11 @@ export function ImageComposer({
         />
 
         {referenceImages.length > 0 ? (
-          <div className="mb-2 sm:mb-3">
-            <div className="mb-2 px-1 text-xs font-medium text-stone-500 sm:hidden">
+          <div className={cn("mb-2 sm:mb-3", isMobileExpandedSheet && "mb-0 shrink-0 border-b border-stone-100 px-3 pt-3 pb-2")}>
+            <div className={cn("mb-2 px-1 text-xs font-medium text-stone-500 sm:hidden", isMobileExpandedSheet && "px-0")}>
               已添加参考图 {referenceImages.length} 张
             </div>
-            <div className="hide-scrollbar flex gap-2 overflow-x-auto px-1 pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0">
+            <div className={cn("hide-scrollbar flex gap-2 overflow-x-auto px-1 pb-1 sm:flex-wrap sm:overflow-visible sm:pb-0", isMobileExpandedSheet && "px-0 pb-0")}>
               {referenceImages.map((image, index) => (
                 <div key={`${image.name}-${index}`} className="relative size-16 shrink-0 sm:size-16">
                   <button
@@ -179,7 +262,7 @@ export function ImageComposer({
                   {prompt.trim() || (referenceImages.length > 0 ? `已添加 ${referenceImages.length} 张参考图` : "输入提示词 / 上传图片")}
                 </div>
                 <div className="mt-0.5 text-[11px] text-stone-500">
-                  额度 {availableQuota} · 图片保存 10 天
+                  额度 {availableQuota} · 单次最多 {batchLimit} 张 · 图片保存 10 天
                 </div>
               </div>
               <span className="shrink-0 rounded-full bg-white px-3 py-1 text-xs font-medium text-stone-600 shadow-sm">
@@ -215,6 +298,7 @@ export function ImageComposer({
         <div className={cn(
           "rounded-[24px] border border-stone-200 bg-white/95 shadow-[0_18px_65px_-42px_rgba(15,23,42,0.45)] sm:rounded-[32px] sm:shadow-none",
           !isMobilePanelExpanded && "hidden sm:block",
+          isMobileExpandedSheet && "flex min-h-0 flex-1 flex-col overflow-hidden rounded-none border-0 bg-transparent shadow-none",
         )}>
           <div className="flex items-center justify-between gap-2 border-b border-stone-100 px-3 py-2 sm:hidden">
             <div className="min-w-0">
@@ -234,7 +318,8 @@ export function ImageComposer({
             </button>
           </div>
           <div
-            className="relative cursor-text"
+            ref={composerBodyRef}
+            className={cn("relative cursor-text", isMobileExpandedSheet && "min-h-0 flex-1 overflow-y-auto")}
             onClick={() => {
               textareaRef.current?.focus();
             }}
@@ -262,16 +347,25 @@ export function ImageComposer({
                   void submitAndCollapseMobilePanel();
                 }
               }}
-              className="min-h-[78px] resize-none rounded-[24px] border-0 bg-transparent px-4 pt-4 pb-3 text-[16px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[148px] sm:rounded-[32px] sm:px-6 sm:pt-6 sm:pb-20 sm:text-[15px] sm:leading-7"
+              className={cn(
+                "min-h-[78px] resize-none rounded-[24px] border-0 bg-transparent px-4 pt-4 pb-3 text-[16px] leading-6 text-stone-900 shadow-none placeholder:text-stone-400 focus-visible:ring-0 sm:min-h-[148px] sm:rounded-[32px] sm:px-6 sm:pt-6 sm:pb-6 sm:text-[15px] sm:leading-7",
+                isMobileExpandedSheet && "min-h-[180px] rounded-none px-4 pt-4 pb-4",
+              )}
             />
 
             <div
-              className="border-t border-stone-100 bg-white px-3 pb-3 pt-3 sm:absolute sm:inset-x-0 sm:bottom-0 sm:border-t-0 sm:bg-gradient-to-t sm:from-white sm:via-white/95 sm:to-transparent sm:px-6 sm:pb-4 sm:pt-6"
+              className={cn(
+                "border-t border-stone-100 bg-white px-3 pb-3 pt-3 sm:px-6 sm:pb-4 sm:pt-4",
+                isMobileExpandedSheet && "sticky bottom-0 mt-3 border-t border-stone-100 bg-white/98 backdrop-blur supports-[backdrop-filter]:bg-white/90",
+              )}
               onClick={(event) => event.stopPropagation()}
             >
               <div className="flex flex-wrap gap-2 sm:hidden">
                 <div className="rounded-full bg-stone-100/90 px-3 py-1.5 text-xs text-stone-500">
                   剩余额度 <span className="font-semibold text-stone-900">{availableQuota}</span>
+                </div>
+                <div className="rounded-full bg-stone-100/90 px-3 py-1.5 text-xs text-stone-500">
+                  单次最多 <span className="font-semibold text-stone-900">{batchLimit}</span> 张
                 </div>
                 <div className="max-w-full rounded-full bg-stone-100/90 px-3 py-1.5 text-xs text-stone-500">
                   当前令牌 <span className="font-semibold text-stone-900">{tokenName || "-"}</span>
@@ -279,6 +373,16 @@ export function ImageComposer({
                 <div className="rounded-full bg-amber-50 px-3 py-1.5 text-xs text-amber-700">
                   图片保存 10 天
                 </div>
+                <div className="rounded-2xl bg-sky-50 px-3 py-1.5 text-xs leading-5 text-sky-700">
+                  系统处理中 {systemProcessingCount} 个（运行 {systemRunningCount} / 排队 {systemQueuedCount}）
+                  {systemEstimatedWaitText ? ` · 预计等待 ${systemEstimatedWaitText}` : ""}
+                  {systemAverageDurationText ? ` · 平均每张 ${systemAverageDurationText}` : ""}
+                </div>
+                {recentQuotaUsageText ? (
+                  <div className="rounded-2xl bg-emerald-50 px-3 py-1.5 text-xs leading-5 text-emerald-700">
+                    {recentQuotaUsageText}
+                  </div>
+                ) : null}
                 {activeTaskCount > 0 ? (
                   <div className="flex items-center gap-2 rounded-full bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700">
                     <LoaderCircle className="size-3.5 animate-spin" />
@@ -302,6 +406,9 @@ export function ImageComposer({
                   <div className="hidden shrink-0 rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600 sm:block">
                     剩余额度 {availableQuota}
                   </div>
+                  <div className="hidden shrink-0 rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600 sm:block">
+                    单次最多 {batchLimit} 张
+                  </div>
                   <div className="hidden max-w-[260px] shrink-0 items-center rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600 sm:flex">
                     <span className="mr-1">当前令牌</span>
                     <span className="truncate">{tokenName || "-"}</span>
@@ -309,6 +416,16 @@ export function ImageComposer({
                   <div className="hidden shrink-0 rounded-full bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 sm:block">
                     图片保存 10 天
                   </div>
+                  <div className="hidden max-w-full shrink-0 rounded-full bg-sky-50 px-3 py-2 text-xs font-medium text-sky-700 sm:block">
+                    系统处理中 {systemProcessingCount} 个（运行 {systemRunningCount} / 排队 {systemQueuedCount}）
+                    {systemEstimatedWaitText ? ` · 预计等待 ${systemEstimatedWaitText}` : ""}
+                    {systemAverageDurationText ? ` · 平均每张 ${systemAverageDurationText}` : ""}
+                  </div>
+                  {recentQuotaUsageText ? (
+                    <div className="hidden max-w-full shrink-0 rounded-full bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 sm:block">
+                      {recentQuotaUsageText}
+                    </div>
+                  ) : null}
                   {activeTaskCount > 0 ? (
                     <div className="hidden shrink-0 items-center gap-1.5 rounded-full bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 sm:flex">
                       <LoaderCircle className="size-3 animate-spin" />
@@ -323,7 +440,7 @@ export function ImageComposer({
                         type="number"
                         inputMode="numeric"
                         min="1"
-                        max="100"
+                        max={String(Math.max(1, batchLimit))}
                         step="1"
                         value={imageCount}
                         onChange={(event) => onImageCountChange(event.target.value)}

@@ -5,6 +5,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.support import raise_image_quota_error, require_admin, require_identity, resolve_image_base_url
+from services.content_filter import check_request, request_text
 from services.auth_service import ImageQuotaExceeded, auth_service
 from services.log_service import LoggedCall
 from services.protocol import (
@@ -15,6 +16,27 @@ from services.protocol import (
     openai_v1_models,
     openai_v1_response,
 )
+
+
+def _count_image_results(result: object) -> int:
+    if not isinstance(result, dict):
+        return 0
+    data = result.get("data")
+    if not isinstance(data, list):
+        return 0
+    count = 0
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if item.get("url") or item.get("b64_json"):
+            count += 1
+    return count
+
+
+def _refund_unused_quota(identity: dict[str, object], reserved_quota: int, success_count: int) -> None:
+    refund = max(0, int(reserved_quota or 0) - max(0, int(success_count or 0)))
+    if refund > 0:
+        auth_service.refund_image_quota(identity, refund)
 
 
 class ImageGenerationRequest(BaseModel):
@@ -52,6 +74,14 @@ class AnthropicMessageRequest(BaseModel):
     messages: list[dict[str, object]] | None = None
     system: object | None = None
     stream: bool | None = None
+
+
+async def filter_or_log(call: LoggedCall, text: str) -> None:
+    try:
+        await run_in_threadpool(check_request, text)
+    except HTTPException as exc:
+        call.log("调用失败", status="failed", error=str(exc.detail))
+        raise
 
 
 def _uploader_from_identity(identity: dict[str, object]) -> dict[str, object]:
@@ -93,6 +123,8 @@ def create_router() -> APIRouter:
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图")
         try:
             result = await call.run(openai_v1_image_generations.handle, payload)
+            if isinstance(result, dict):
+                _refund_unused_quota(identity, reserved_quota, _count_image_results(result))
             if reserved_quota and int(getattr(result, "status_code", 200) or 200) >= 400:
                 auth_service.refund_image_quota(identity, reserved_quota)
             return result
@@ -147,6 +179,8 @@ def create_router() -> APIRouter:
         call = LoggedCall(identity, "/v1/images/edits", model, "图生图")
         try:
             result = await call.run(openai_v1_image_edit.handle, payload)
+            if isinstance(result, dict):
+                _refund_unused_quota(identity, reserved_quota, _count_image_results(result))
             if reserved_quota and int(getattr(result, "status_code", 200) or 200) >= 400:
                 auth_service.refund_image_quota(identity, reserved_quota)
             return result
