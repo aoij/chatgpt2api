@@ -242,13 +242,14 @@ export function ImageResults({
                             <div className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
                               <div className="min-w-0 text-xs text-stone-500">
                                 <span>结果 {index + 1}</span>
-                                {imageMeta ? <span className="ml-2 text-stone-400">{imageMeta}</span> : null}
+                                {imageMeta ? <span className="block text-stone-400 sm:ml-2 sm:inline">{imageMeta}</span> : null}
                               </div>
                               <Button
                                 variant="outline"
                                 size="sm"
                                 className="h-9 w-full rounded-full border-stone-200 bg-white text-stone-700 hover:bg-stone-50 sm:w-auto"
                                 onClick={() => onContinueEdit(selectedConversation.id, image)}
+                                aria-label="加入编辑"
                               >
                                 <Sparkles className="size-4" />
                                 加入编辑

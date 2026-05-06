@@ -400,6 +400,7 @@ export function ImageComposer({
                     variant="outline"
                     className="h-11 justify-start rounded-2xl border-stone-200 bg-white px-4 text-sm font-medium text-stone-700 shadow-none sm:h-10 sm:w-auto sm:justify-center sm:rounded-full sm:px-4 sm:text-sm"
                     onClick={onPickReferenceImage}
+                    aria-label={referenceImages.length > 0 ? "添加参考图" : "上传"}
                   >
                     <ImagePlus className="size-4" />
                     <span>{referenceImages.length > 0 ? "添加参考图" : "上传图片"}</span>
@@ -437,7 +438,7 @@ export function ImageComposer({
 
                   <div className="grid grid-cols-[108px_minmax(0,1fr)] gap-2 sm:flex sm:min-w-0 sm:items-center sm:gap-3">
                     <div className="flex h-11 items-center justify-between rounded-2xl border border-stone-200 bg-white px-3 sm:h-10 sm:min-w-[112px] sm:rounded-full">
-                      <span className="text-xs font-medium text-stone-500">张数</span>
+                      <span className="hidden text-xs font-medium text-stone-500 sm:inline">张数</span>
                       <Input
                         type="number"
                         inputMode="numeric"
@@ -458,7 +459,8 @@ export function ImageComposer({
                         onClick={() => {
                           if (!isSizeMenuOpen && sizeMenuBtnRef.current) {
                             const rect = sizeMenuBtnRef.current.getBoundingClientRect();
-                            const left = Math.max(16, Math.min(rect.left, window.innerWidth - 226));
+                            const menuWidth = Math.min(210, window.innerWidth - 32);
+                            const left = Math.max(16, Math.min(rect.left, window.innerWidth - menuWidth - 16));
                             setSizeMenuPos({ top: rect.top - 8, left });
                           }
                           setIsSizeMenuOpen((open) => !open);
