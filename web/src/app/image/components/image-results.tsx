@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { Clock3, LoaderCircle, Sparkles } from "lucide-react";
+import { Clock3, Download, LoaderCircle, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import { ImageThumbnail, getImageThumbnailUrl } from "@/components/image-thumbnail";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { getManagedImagePathFromUrl, type PublicConfig } from "@/lib/api";
+import { downloadManagedImage, getManagedImagePathFromUrl, type PublicConfig } from "@/lib/api";
+import { defaultImageDownloadName, saveBlobAsFile } from "@/lib/download";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
 
 export type ImageLightboxItem = {
@@ -25,9 +26,9 @@ type ImageResultsProps = {
   onContinueEdit: (conversationId: string, image: StoredImage | StoredReferenceImage) => void;
   onDeletePrompt?: (conversationId: string, turnId: string) => void;
   onDeleteResults?: (conversationId: string, turnId: string) => void;
-  onReuseTurnConfig?: (conversationId: string, turnId: string) => void;
-  onRegenerateTurn?: (conversationId: string, turnId: string) => void;
-  onRetryImage?: (conversationId: string, turnId: string, imageId: string) => void;
+  onReuseTurnConfig?: (conversationId: string, turnId: string) => void | Promise<void>;
+  onRegenerateTurn?: (conversationId: string, turnId: string) => void | Promise<void>;
+  onRetryImage?: (conversationId: string, turnId: string, imageId: string) => void | Promise<void>;
   formatConversationTime: (value: string) => string;
   publicConfig?: PublicConfig | null;
 };
@@ -60,11 +61,41 @@ function friendlyDisplayError(error?: string) {
   return message;
 }
 
+async function downloadStoredImage(image: StoredImage, index: number) {
+  if (image.url) {
+    const managedPath = getManagedImagePathFromUrl(image.url);
+    if (managedPath) {
+      const data = await downloadManagedImage(managedPath);
+      saveBlobAsFile(data.blob, data.filename || `${image.id}.jpg`);
+      return;
+    }
+
+    const response = await fetch(image.url);
+    const blob = await response.blob();
+    saveBlobAsFile(blob, defaultImageDownloadName(image.id || `image-${index + 1}`, "jpg"));
+    return;
+  }
+
+  if (image.b64_json) {
+    const binary = atob(image.b64_json);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    saveBlobAsFile(new Blob([bytes], { type: "image/png" }), defaultImageDownloadName(image.id || `image-${index + 1}`, "png"));
+  }
+}
+
 export function ImageResults({
   selectedConversation,
   isLoadingConversationDetail = false,
   onOpenLightbox,
   onContinueEdit,
+  onDeletePrompt,
+  onDeleteResults,
+  onReuseTurnConfig,
+  onRegenerateTurn,
+  onRetryImage,
   formatConversationTime,
   publicConfig,
 }: ImageResultsProps) {
@@ -116,7 +147,7 @@ export function ImageResults({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-[980px] flex-col gap-4 sm:gap-8">
+    <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5 sm:gap-8">
       {selectedConversation.turns.map((turn, turnIndex) => {
         const referenceLightboxImages = turn.referenceImages.map((image, index) => ({
           id: `${turn.id}-reference-${index}`,
@@ -139,46 +170,67 @@ export function ImageResults({
         });
 
         return (
-          <div key={turn.id} className="rounded-[28px] border border-white/80 bg-white/75 p-3 shadow-sm sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none">
-            <div className="flex flex-col gap-3 sm:gap-4">
+          <div key={turn.id} className="flex flex-col gap-3 sm:gap-4">
+            {!turn.promptDeleted ? (
               <div className="flex justify-end">
-                <div className="w-full max-w-full rounded-[24px] bg-stone-50/90 px-4 py-3 text-[14px] leading-6 text-stone-900 shadow-sm sm:max-w-[82%] sm:rounded-none sm:bg-transparent sm:px-1 sm:py-1 sm:text-[15px] sm:leading-7 sm:shadow-none">
-                  <div className="mb-2 flex flex-wrap justify-end gap-2 text-[11px] text-stone-400 sm:mb-2">
+                <div className="max-w-[90%] px-1 py-1 text-[14px] leading-6 text-stone-900 sm:max-w-[82%] sm:text-[15px] sm:leading-7">
+                  <div className="mb-1.5 flex flex-wrap justify-end gap-2 text-[11px] text-stone-400 sm:mb-2">
                     <span>第 {turnIndex + 1} 轮</span>
                     <span>{turn.mode === "edit" ? "编辑图" : "文生图"}</span>
                     <span>{getTurnStatusLabel(turn.status)}</span>
                     <span>{formatConversationTime(turn.createdAt)}</span>
                   </div>
                   <div className="text-right">{turn.prompt}</div>
+                  <div className="mt-2 flex flex-wrap justify-end gap-1.5">
+                    {onReuseTurnConfig ? (
+                      <button
+                        type="button"
+                        onClick={() => void onReuseTurnConfig(selectedConversation.id, turn.id)}
+                        className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600 transition hover:bg-stone-200 hover:text-stone-900"
+                      >
+                        复用配置
+                      </button>
+                    ) : null}
+                    {onDeletePrompt ? (
+                      <button
+                        type="button"
+                        onClick={() => onDeletePrompt(selectedConversation.id, turn.id)}
+                        className="inline-flex size-6 items-center justify-center rounded-full text-stone-300 transition hover:bg-rose-50 hover:text-rose-500"
+                        aria-label="删除提示词记录"
+                      >
+                        <Trash2 className="size-3" />
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               </div>
+            ) : null}
 
+            {!turn.resultsDeleted ? (
               <div className="flex justify-start">
-                <div className="w-full">
+                <div className="w-full p-1">
                   {turn.referenceImages.length > 0 ? (
-                    <div className="mb-4 rounded-[24px] border border-stone-200/70 bg-stone-50/70 p-3 sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0">
+                    <div className="mb-4 flex flex-col items-end">
                       <div className="mb-3 text-xs font-medium text-stone-500">本轮参考图</div>
-                      <div className="grid grid-cols-2 gap-3 sm:flex sm:flex-wrap sm:justify-end">
+                      <div className="flex flex-wrap justify-end gap-3">
                         {turn.referenceImages.map((image, index) => (
-                          <div key={`${turn.id}-${image.name}-${index}`} className="flex flex-col gap-2">
+                          <div key={`${turn.id}-${image.name}-${index}`} className="flex flex-col items-end gap-2">
                             <button
                               type="button"
                               onClick={() => onOpenLightbox(referenceLightboxImages, index)}
-                              className="group relative aspect-square w-full overflow-hidden rounded-2xl border border-stone-200/80 bg-stone-100/60 text-left transition hover:border-stone-300 sm:h-24 sm:w-24 sm:rounded-none"
+                              className="group relative h-24 w-24 overflow-hidden border border-stone-200/80 bg-stone-100/60 text-left transition hover:border-stone-300"
                               aria-label={`预览参考图 ${image.name || index + 1}`}
                             >
                               <img
                                 src={image.dataUrl}
                                 alt={image.name || `参考图 ${index + 1}`}
                                 className="absolute inset-0 h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]"
-                                loading="lazy"
-                                decoding="async"
                               />
                             </button>
                             <Button
                               variant="outline"
                               size="sm"
-                              className="h-9 w-full rounded-full border-stone-200 bg-white text-stone-700 hover:bg-stone-50 sm:w-auto"
+                              className="rounded-full border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
                               onClick={() => onContinueEdit(selectedConversation.id, image)}
                             >
                               <Sparkles className="size-4" />
@@ -198,7 +250,7 @@ export function ImageResults({
                     ) : null}
                   </div>
 
-                  <div className="columns-1 gap-3 space-y-3 sm:columns-2 sm:gap-4 sm:space-y-4 xl:columns-3">
+                  <div className="grid grid-cols-3 gap-2 sm:block sm:columns-2 sm:gap-4 sm:space-y-4 xl:columns-3">
                     {turn.images.map((image, index) => {
                       const imageSrc = image.status === "success" ? getStoredImageSrc(image) : "";
                       const imagePreviewSrc = image.status === "success" ? getStoredImagePreviewSrc(image) : "";
@@ -211,49 +263,59 @@ export function ImageResults({
                         return (
                           <div
                             key={image.id}
-                            className="break-inside-avoid overflow-hidden rounded-[26px] border border-stone-200/70 bg-white shadow-sm sm:rounded-none sm:border-0 sm:bg-transparent sm:shadow-none"
+                            className="break-inside-avoid"
                           >
                             <button
                               type="button"
                               onClick={() => onOpenLightbox(successfulTurnImages, currentIndex)}
-                              className="group block w-full cursor-zoom-in"
+                              className="group block aspect-square w-full cursor-zoom-in overflow-hidden rounded-xl sm:aspect-auto"
                             >
                               <ImageThumbnail
                                 src={imageSrc}
                                 thumbnailSrc={image.url ? imagePreviewSrc : undefined}
                                 alt={`Generated result ${index + 1}`}
-                                className="block w-full bg-stone-50"
-                                imageClassName="block h-auto w-full object-contain transition duration-200 group-hover:brightness-90"
+                                className="block h-full w-full bg-stone-50 sm:h-auto"
+                                imageClassName="block h-full w-full object-cover transition duration-200 group-hover:brightness-90 sm:h-auto sm:object-contain"
                                 imgProps={{
                                   loading: "lazy",
                                   decoding: "async",
-                                  onLoad: image.b64_json
-                                    ? (event) => {
-                                        updateImageDimensions(
-                                          image.id,
-                                          event.currentTarget.naturalWidth,
-                                          event.currentTarget.naturalHeight,
-                                        );
-                                      }
-                                    : undefined,
+                                  onLoad: (event) => {
+                                    updateImageDimensions(
+                                      image.id,
+                                      event.currentTarget.naturalWidth,
+                                      event.currentTarget.naturalHeight,
+                                    );
+                                  },
                                 }}
                               />
                             </button>
-                            <div className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-                              <div className="min-w-0 text-xs text-stone-500">
+                            <div className="flex flex-col gap-1 px-0.5 py-1 text-[10px] sm:flex-row sm:items-center sm:justify-between sm:gap-2 sm:px-3 sm:py-3 sm:text-xs">
+                              <div className="min-w-0 text-stone-500">
                                 <span>结果 {index + 1}</span>
                                 {imageMeta ? <span className="block text-stone-400 sm:ml-2 sm:inline">{imageMeta}</span> : null}
                               </div>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="h-9 w-full rounded-full border-stone-200 bg-white text-stone-700 hover:bg-stone-50 sm:w-auto"
-                                onClick={() => onContinueEdit(selectedConversation.id, image)}
-                                aria-label="加入编辑"
-                              >
-                                <Sparkles className="size-4" />
-                                加入编辑
-                              </Button>
+                              <div className="flex items-center gap-1.5">
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 w-7 rounded-full border-stone-200 bg-white px-0 text-[10px] text-stone-700 hover:bg-stone-50 sm:h-8 sm:w-fit sm:px-3 sm:text-xs"
+                                  onClick={() => onContinueEdit(selectedConversation.id, image)}
+                                  aria-label="加入编辑"
+                                >
+                                  <Sparkles className="size-3 sm:size-4" />
+                                  <span className="hidden sm:inline">加入编辑</span>
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 w-7 rounded-full border-stone-200 bg-white px-0 text-[10px] text-stone-700 hover:bg-stone-50 sm:h-8 sm:w-fit sm:px-3 sm:text-xs"
+                                  onClick={() => void downloadStoredImage(image, index)}
+                                  aria-label="下载"
+                                >
+                                  <Download className="size-3 sm:size-4" />
+                                  <span className="hidden sm:inline">下载</span>
+                                </Button>
+                              </div>
                             </div>
                           </div>
                         );
@@ -264,7 +326,8 @@ export function ImageResults({
                           <div
                             key={image.id}
                             className={cn(
-                              "break-inside-avoid overflow-hidden rounded-[26px] border border-rose-200 bg-rose-50",
+                              "break-inside-avoid overflow-hidden rounded-xl border border-rose-200 bg-rose-50 sm:rounded-none",
+                              "aspect-square",
                               turn.size === "1:1" && "sm:aspect-square",
                               turn.size === "16:9" && "sm:aspect-video",
                               turn.size === "9:16" && "sm:aspect-[9/16]",
@@ -273,8 +336,17 @@ export function ImageResults({
                               !["1:1", "16:9", "9:16", "4:3", "3:4"].includes(turn.size) && "sm:aspect-square",
                             )}
                           >
-                            <div className="flex h-full min-h-24 items-center justify-center px-4 py-5 text-center text-sm leading-6 text-rose-600 sm:min-h-16 sm:px-6 sm:py-8">
-                              {friendlyDisplayError(image.error || "生成失败")}
+                            <div className="flex h-full min-h-16 flex-col items-center justify-center gap-1.5 px-2 py-2 text-center text-[11px] leading-4 text-rose-600 sm:gap-3 sm:px-6 sm:py-8 sm:text-sm sm:leading-6">
+                              <span className="line-clamp-2 sm:line-clamp-none">{friendlyDisplayError(image.error || "生成失败")}</span>
+                              {onRetryImage ? (
+                                <button
+                                  type="button"
+                                  onClick={() => void onRetryImage(selectedConversation.id, turn.id, image.id)}
+                                  className="rounded-full bg-white px-2 py-1 text-[10px] font-medium text-rose-600 shadow-sm transition hover:bg-rose-100 sm:px-3 sm:text-xs"
+                                >
+                                  重新生成这一张
+                                </button>
+                              ) : null}
                             </div>
                           </div>
                         );
@@ -284,7 +356,7 @@ export function ImageResults({
                         <div
                           key={image.id}
                           className={cn(
-                            "break-inside-avoid overflow-hidden rounded-[26px] border border-stone-200/80 bg-stone-100/80",
+                            "break-inside-avoid overflow-hidden rounded-xl border border-stone-200/80 bg-stone-100/80 sm:rounded-none",
                             turn.size === "1:1" && "aspect-square",
                             turn.size === "16:9" && "aspect-video",
                             turn.size === "9:16" && "aspect-[9/16]",
@@ -293,15 +365,15 @@ export function ImageResults({
                             !["1:1", "16:9", "9:16", "4:3", "3:4"].includes(turn.size) && "aspect-square",
                           )}
                         >
-                          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-8 text-center text-stone-500">
-                            <div className="rounded-full bg-white p-3 shadow-sm">
+                          <div className="flex h-full flex-col items-center justify-center gap-1.5 px-2 py-3 text-center text-stone-500 sm:gap-3 sm:px-6 sm:py-8">
+                            <div className="rounded-full bg-white p-2 shadow-sm sm:p-3">
                               {turn.status === "queued" ? (
-                                <Clock3 className="size-5" />
+                                <Clock3 className="size-4 sm:size-5" />
                               ) : (
-                                <LoaderCircle className="size-5 animate-spin" />
+                                <LoaderCircle className="size-4 animate-spin sm:size-5" />
                               )}
                             </div>
-                            <p className="text-sm">{turn.status === "queued" ? "已加入当前对话队列..." : "正在处理图片..."}</p>
+                            <p className="text-[10px] leading-4 sm:text-sm">{turn.status === "queued" ? "排队中" : "处理中"}</p>
                           </div>
                         </div>
                       );
@@ -309,13 +381,38 @@ export function ImageResults({
                   </div>
 
                   {turn.status === "error" && turn.error ? (
-                    <div className="mt-4 rounded-2xl border-l-4 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700">
+                    <div className="mt-4 border-l-2 border-amber-300 bg-amber-50/70 px-4 py-3 text-sm leading-6 text-amber-700">
                       {friendlyDisplayError(turn.error)}
+                    </div>
+                  ) : null}
+
+                  {onRegenerateTurn || onDeleteResults ? (
+                    <div className="mt-3 flex items-center gap-1.5 text-[11px] sm:mt-4">
+                      {onRegenerateTurn ? (
+                        <button
+                          type="button"
+                          onClick={() => void onRegenerateTurn(selectedConversation.id, turn.id)}
+                          className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 font-medium text-stone-500 transition hover:bg-stone-200 hover:text-stone-900"
+                        >
+                          <RotateCcw className="size-3" />
+                          全部重新生成
+                        </button>
+                      ) : null}
+                      {onDeleteResults ? (
+                        <button
+                          type="button"
+                          onClick={() => onDeleteResults(selectedConversation.id, turn.id)}
+                          className="inline-flex size-6 items-center justify-center rounded-full text-stone-300 transition hover:bg-rose-50 hover:text-rose-500"
+                          aria-label="删除生成结果"
+                        >
+                          <Trash2 className="size-3" />
+                        </button>
+                      ) : null}
                     </div>
                   ) : null}
                 </div>
               </div>
-            </div>
+            ) : null}
           </div>
         );
       })}

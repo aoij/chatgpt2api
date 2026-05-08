@@ -103,19 +103,17 @@ export function ImageSidebar({
                 <div
                   key={conversation.id}
                   className={cn(
-                    "group relative w-full text-left transition",
-                    hideActionButtons ? "rounded-2xl border border-stone-200/70 bg-white/90 px-4 py-3.5 shadow-sm" : "border-l-2 px-3 py-2 sm:py-3",
+                    "group relative w-full border-l-2 text-left transition",
+                    hideActionButtons ? "px-4 py-3.5" : "px-3 py-2 sm:py-3",
                     active
                       ? "border-stone-900 bg-black/[0.035] text-stone-950"
-                      : hideActionButtons
-                        ? "border-transparent text-stone-700 hover:border-stone-300 hover:bg-white"
-                        : "border-transparent text-stone-700 hover:border-stone-300 hover:bg-white/40",
+                      : "border-transparent text-stone-700 hover:border-stone-300 hover:bg-white/40",
                   )}
                 >
                   <button
                     type="button"
                     onClick={() => onSelectConversation(conversation.id)}
-                    className={cn("block w-full text-left", hideActionButtons ? "pr-20" : "pr-16")}
+                    className="block w-full pr-8 text-left"
                   >
                     <div className={cn("truncate font-semibold", hideActionButtons ? "text-base" : "text-sm")}>
                       {editingId === conversation.id ? (
@@ -149,21 +147,11 @@ export function ImageSidebar({
                       </div>
                     ) : null}
                   </button>
-                  <div
-                    className={cn(
-                      "absolute flex items-center gap-0.5 transition",
-                      hideActionButtons
-                        ? "top-1/2 right-3 -translate-y-1/2 opacity-100"
-                        : "top-2.5 right-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100",
-                    )}
-                  >
+                  <div className="absolute top-2.5 right-1.5 flex items-center gap-0.5 opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">
                     <button
                       type="button"
                       onClick={(event) => startRename(conversation, event)}
-                      className={cn(
-                        "inline-flex items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-stone-600 focus:bg-stone-100 focus:text-stone-600 focus:outline-none",
-                        hideActionButtons ? "size-9 rounded-xl bg-white/80 shadow-sm active:bg-stone-50" : "size-7",
-                      )}
+                      className="inline-flex size-7 items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-stone-600 focus:bg-stone-100 focus:text-stone-600 focus:outline-none"
                       aria-label="重命名会话"
                       title="重命名会话"
                     >
@@ -175,10 +163,7 @@ export function ImageSidebar({
                         event.stopPropagation();
                         void onDeleteConversation(conversation.id);
                       }}
-                      className={cn(
-                        "inline-flex items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-rose-500 focus:bg-stone-100 focus:text-rose-500 focus:outline-none",
-                        hideActionButtons ? "size-9 rounded-xl bg-white/80 shadow-sm active:bg-rose-50 active:text-rose-500" : "size-7",
-                      )}
+                      className="inline-flex size-7 items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-rose-500 focus:bg-stone-100 focus:text-rose-500 focus:outline-none"
                       aria-label="删除会话"
                       title="删除会话"
                     >

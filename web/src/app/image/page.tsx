@@ -921,9 +921,8 @@ function ImagePageContent({
     const loadHistory = async () => {
       try {
         const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
-        const storedCount = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_COUNT_STORAGE_KEY) : null;
         setImageSize(storedSize || "");
-        setImageCount(storedCount ? clampImageCount(storedCount) : "1");
+        setImageCount("1");
 
         const items = await listImageConversations();
         await applyHistorySummaries(items);
