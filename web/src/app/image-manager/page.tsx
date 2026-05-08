@@ -24,7 +24,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { fetchManagedImages, deleteManagedImages, downloadManagedImage, type ManagedImage, type ManagedImageUploader } from "@/lib/api";
+import {
+  fetchManagedImages,
+  deleteManagedImages,
+  downloadManagedImage,
+  downloadManagedImages,
+  type ManagedImage,
+  type ManagedImageUploader,
+} from "@/lib/api";
 import { defaultImageDownloadName, saveBlobAsFile } from "@/lib/download";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -199,22 +206,11 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     if (selectedPaths.length === 0) return;
     setIsDownloading(true);
     try {
-      const selectedMap = new Map(items.map((item) => [imageKey(item), item]));
-      for (let index = 0; index < selectedPaths.length; index += 1) {
-        const path = selectedPaths[index];
-        const selected = selectedMap.get(path);
-        const data = await downloadManagedImage(path);
-        saveBlobAsFile(
-          data.blob,
-          data.filename || (selected?.name ? `${selected.name.replace(/\.[^.]+$/, "")}.jpg` : defaultImageDownloadName(path, "jpg")),
-        );
-        if (index < selectedPaths.length - 1) {
-          await new Promise((resolve) => window.setTimeout(resolve, 180));
-        }
-      }
-      toast.success(`已开始逐张下载 ${selectedPaths.length} 张图片`);
+      const data = await downloadManagedImages(selectedPaths);
+      saveBlobAsFile(data.blob, data.filename || `images-${Date.now()}.zip`);
+      toast.success(`已下载 ZIP（共 ${selectedPaths.length} 张）`);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "下载图片失败");
+      toast.error(error instanceof Error ? error.message : "下载 ZIP 失败");
     } finally {
       setIsDownloading(false);
     }
@@ -334,8 +330,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
           </h1>
           <p className="text-sm leading-6 text-stone-500">
             {isSelfMode
-              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；支持直接下载到手机更友好的 JPG，图片仅保存 10 天，请及时保存。"
-              : "支持按日期和上传人筛选图片，分组查看、批量选择、逐张直接下载并执行删除；下载会自动转成 JPG，图片仅保存 10 天。"}
+              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；支持单张 JPG 下载与批量 ZIP 下载，图片仅保存 10 天，请及时保存。"
+              : "支持按日期和上传人筛选图片，分组查看、批量选择、批量 ZIP 下载并执行删除；单张下载会自动转成 JPG，图片仅保存 10 天。"}
           </p>
         </div>
 
@@ -445,7 +441,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
                 disabled={selectedPaths.length === 0 || isDownloading}
               >
                 {isDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-                下载所选
+                下载所选 ZIP
               </Button>
               <Button
                 variant="outline"
