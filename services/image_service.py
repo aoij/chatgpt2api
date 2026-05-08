@@ -272,6 +272,58 @@ def record_image_metadata(rel: str, uploader: object = None, **extra: object) ->
     _invalidate_list_cache()
 
 
+def ensure_thumbnail_for_rel(rel: str) -> bool:
+    image_rel, path = _safe_image_path(rel)
+    if not image_rel or path is None:
+        return False
+    thumb_path, _ = _ensure_thumbnail(path, image_rel)
+    if not thumb_path or not thumb_path.exists():
+        return False
+    _invalidate_list_cache()
+    return True
+
+
+def resolve_thumbnail_file(rel: str) -> Optional[Path]:
+    image_rel = str(rel or "").strip().lstrip("/")
+    if not image_rel:
+        return None
+    source_root = config.images_dir.resolve()
+    thumb_root = _thumb_root().resolve()
+
+    rel_path = Path(image_rel)
+    candidates: list[str] = []
+    try:
+        normalized_webp = rel_path.with_suffix(".webp").as_posix()
+        candidates.append(normalized_webp)
+    except Exception:
+        pass
+    candidates.append(image_rel)
+
+    for candidate in candidates:
+        candidate_path = (thumb_root / Path(candidate)).resolve()
+        if _is_relative_to(candidate_path, thumb_root) and candidate_path.is_file():
+            return candidate_path
+
+    source_candidates: list[Path] = []
+    if rel_path.suffix:
+        source_candidates.append((source_root / rel_path).resolve())
+    else:
+        for suffix in _IMAGE_SUFFIXES:
+            source_candidates.append((source_root / rel_path).with_suffix(suffix).resolve())
+
+    for source_path in source_candidates:
+        if not _is_relative_to(source_path, source_root) or not source_path.is_file():
+            continue
+        try:
+            source_rel = source_path.relative_to(source_root).as_posix()
+        except Exception:
+            continue
+        thumb_path, _ = _ensure_thumbnail(source_path, source_rel)
+        if thumb_path and thumb_path.exists():
+            return thumb_path
+    return None
+
+
 def _remove_image_metadata(rel_paths: list[str]) -> None:
     normalized = {str(rel or "").strip().lstrip("/") for rel in rel_paths if str(rel or "").strip()}
     if not normalized:
@@ -568,30 +620,17 @@ def list_images(
             day = _image_day(path, rel)
             meta = _image_metadata(rel, stored_metadata, log_index)
             stat = path.stat()
-            thumb_path, dimensions = _ensure_thumbnail(path, rel)
-            thumbnail_path = ""
-            thumbnail_size = None
-            if thumb_path and thumb_path.exists():
-                thumbnail_path = thumb_path.relative_to(thumb_root).as_posix()
-                thumbnail_size = thumb_path.stat().st_size
-
             item = {
                 "path": rel,
                 "name": path.name,
                 "date": day,
                 "size": stat.st_size,
-                "thumbnail_path": thumbnail_path,
-                "thumbnail_size": thumbnail_size,
                 "created_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 "uploader_key": _uploader_key(meta),
                 "uploader_id": _clean(meta.get("uploader_id")),
                 "uploader_name": _uploader_name(meta),
                 "uploader_role": _clean(meta.get("uploader_role")),
             }
-            if dimensions:
-                item["dimensions"] = f"{dimensions[0]} x {dimensions[1]}"
-                item["width"] = dimensions[0]
-                item["height"] = dimensions[1]
             all_items.append(item)
 
         all_items.sort(key=lambda item: str(item["created_at"]), reverse=True)
@@ -620,10 +659,28 @@ def list_images(
     safe_offset = max(0, int(offset or 0))
     safe_limit = max(1, min(int(limit or 200), 500)) if limit is not None else total
     page_items = items[safe_offset:safe_offset + safe_limit]
+    enriched_page_items: list[dict[str, object]] = []
+    for item in page_items:
+        public_item = dict(item)
+        rel = str(public_item.get("path") or "")
+        public_item["url"] = f"{normalized_base_url}/images/{rel}"
+        image_rel, path = _safe_image_path(rel)
+        thumbnail_url: str | None = None
+        if image_rel and path is not None:
+            thumb_path, dimensions = _ensure_thumbnail(path, image_rel)
+            if thumb_path and thumb_path.exists():
+                thumbnail_rel = thumb_path.relative_to(_thumb_root()).as_posix()
+                thumbnail_url = f"{normalized_base_url}/image-thumbs/{thumbnail_rel}"
+            if dimensions:
+                public_item["dimensions"] = f"{dimensions[0]} x {dimensions[1]}"
+                public_item["width"] = dimensions[0]
+                public_item["height"] = dimensions[1]
+        public_item["thumbnail_url"] = thumbnail_url
+        enriched_page_items.append(public_item)
 
     date_groups: dict[str, list[dict[str, object]]] = {}
     uploader_groups: dict[str, dict[str, object]] = {}
-    for item in page_items:
+    for item in enriched_page_items:
         date_groups.setdefault(str(item["date"]), []).append(item)
         uploader_key = str(item.get("uploader_key") or "unknown")
         group = uploader_groups.setdefault(uploader_key, {
@@ -637,7 +694,7 @@ def list_images(
             group_items.append(item)
     uploaders = _build_uploader_summary(items)
     return {
-        "items": page_items,
+        "items": enriched_page_items,
         "total": total,
         "limit": safe_limit,
         "offset": safe_offset,

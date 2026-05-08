@@ -384,6 +384,55 @@ class AccountService:
                 return [dict(item) for item in self._public_compact_cache]
             return self._public_items(self._accounts)
 
+    def list_accounts_page(
+            self,
+            *,
+            compact: bool = True,
+            query: str = "",
+            account_type: str = "",
+            status: str = "",
+            page: int = 1,
+            page_size: int = 10,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if compact:
+                if self._public_compact_cache is None:
+                    self._public_compact_cache = self._public_items_compact(self._accounts)
+                items = [dict(item) for item in self._public_compact_cache]
+            else:
+                items = self._public_items(self._accounts)
+
+        normalized_query = self._clean_token(query).lower()
+        normalized_type = self._clean_token(account_type)
+        normalized_status = self._clean_token(status)
+
+        filtered: list[dict] = []
+        for item in items:
+            email = self._clean_token(item.get("email")).lower()
+            current_type = self._clean_token(item.get("type"))
+            current_status = self._clean_token(item.get("status"))
+            if normalized_query and normalized_query not in email:
+                continue
+            if normalized_type and normalized_type != "all" and current_type != normalized_type:
+                continue
+            if normalized_status and normalized_status != "all" and current_status != normalized_status:
+                continue
+            filtered.append(item)
+
+        safe_page_size = max(1, min(int(page_size or 10), 200))
+        safe_page = max(1, int(page or 1))
+        total = len(filtered)
+        start = (safe_page - 1) * safe_page_size
+        end = start + safe_page_size
+        page_items = filtered[start:end]
+
+        return {
+            "items": page_items,
+            "total": total,
+            "page": safe_page,
+            "page_size": safe_page_size,
+        }
+
     def account_summary(self) -> dict[str, Any]:
         with self._lock:
             total = len(self._accounts)

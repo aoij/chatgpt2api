@@ -101,16 +101,18 @@ def save_image_bytes(image_data: bytes, base_url: str | None = None, uploader: d
     file_hash = hashlib.md5(stored_image_data).hexdigest()
     filename = f"{int(time.time())}_{file_hash}.{suffix}"
     relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
+    relative_path = f"{relative_dir.as_posix()}/{filename}"
     file_path = config.images_dir / relative_dir / filename
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(stored_image_data)
     try:
-        from services.image_service import record_image_metadata
+        from services.image_service import ensure_thumbnail_for_rel, record_image_metadata
 
-        record_image_metadata(f"{relative_dir.as_posix()}/{filename}", uploader)
+        record_image_metadata(relative_path, uploader)
+        ensure_thumbnail_for_rel(relative_path)
     except Exception as exc:
         logger.warning({"event": "image_metadata_record_failed", "path": str(file_path), "error": str(exc)})
-    return f"{(base_url or config.base_url)}/images/{relative_dir.as_posix()}/{filename}"
+    return f"{(base_url or config.base_url)}/images/{relative_path}"
 
 
 def message_text(content: Any) -> str:
@@ -229,19 +231,29 @@ def format_image_result(
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     for item in items:
+        raw_bytes = item.get("_bytes")
+        if isinstance(raw_bytes, bytearray):
+            raw_bytes = bytes(raw_bytes)
+        if not isinstance(raw_bytes, bytes):
+            raw_bytes = None
         b64_json = str(item.get("b64_json") or "").strip()
-        if not b64_json:
+        if raw_bytes is None and not b64_json:
             continue
+        if raw_bytes is None:
+            raw_bytes = base64.b64decode(b64_json)
+        elif response_format == "b64_json" and not b64_json:
+            b64_json = base64.b64encode(raw_bytes).decode("ascii")
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        saved_url = save_image_bytes(raw_bytes, base_url, uploader)
         if response_format == "b64_json":
             data.append({
                 "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url, uploader),
+                "url": saved_url,
                 "revised_prompt": revised_prompt,
             })
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url, uploader),
+                "url": saved_url,
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
@@ -262,6 +274,7 @@ class ConversationRequest:
     base_url: str | None = None
     uploader: dict[str, Any] | None = None
     message_as_error: bool = False
+    defer_local_save: bool = False
 
 
 @dataclass
@@ -285,6 +298,7 @@ class ImageOutput:
     text: str = ""
     upstream_event_type: str = ""
     data: list[dict[str, Any]] = field(default_factory=list)
+    metrics: dict[str, int] = field(default_factory=dict)
 
     def to_chunk(self) -> dict[str, Any]:
         chunk: dict[str, Any] = {
@@ -311,6 +325,8 @@ class ImageOutput:
             })
             chunk.pop("progress_text", None)
             chunk.pop("upstream_event_type", None)
+            if self.metrics:
+                chunk["metrics"] = dict(self.metrics)
         return chunk
 
 
@@ -557,6 +573,7 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+    stream_started_at = time.time()
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -586,6 +603,7 @@ def stream_image_outputs(
                 upstream_event_type=raw_type,
             )
 
+    upstream_stream_ms = int((time.time() - stream_started_at) * 1000)
     conversation_id = str(last.get("conversation_id") or "")
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
@@ -603,11 +621,54 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
 
+    resolve_started_at = time.time()
     image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    resolve_urls_ms = int((time.time() - resolve_started_at) * 1000)
     if image_urls:
+        if request.defer_local_save:
+            access_token = str(getattr(backend, "access_token", "") or "").strip()
+            account_id = hashlib.sha1(access_token.encode("utf-8")).hexdigest()[:16] if access_token else ""
+            data = []
+            for position, url in enumerate(image_urls, start=1):
+                if not isinstance(url, str) or not url.strip():
+                    continue
+                data.append(
+                    {
+                        "url": url,
+                        "revised_prompt": request.prompt,
+                        "_persist": {
+                            "id": f"{int(time.time() * 1000)}-{index}-{position}",
+                            "position": position,
+                            "source_url": url,
+                            "conversation_id": conversation_id,
+                            "file_ids": list(file_ids),
+                            "sediment_ids": list(sediment_ids),
+                            "account_id": account_id,
+                        },
+                    }
+                )
+            if data:
+                yield ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=data,
+                    metrics={
+                        "upstream_stream_ms": upstream_stream_ms,
+                        "resolve_urls_ms": resolve_urls_ms,
+                        "download_images_ms": 0,
+                        "save_images_ms": 0,
+                    },
+                )
+            return
+        download_started_at = time.time()
+        downloaded_images = backend.download_image_bytes(image_urls)
+        download_images_ms = int((time.time() - download_started_at) * 1000)
+        save_started_at = time.time()
         image_items = [
-            {"b64_json": base64.b64encode(image_data).decode("ascii")}
-            for image_data in backend.download_image_bytes(image_urls)
+            {"_bytes": image_data}
+            for image_data in downloaded_images
         ]
         data = format_image_result(
             image_items,
@@ -617,8 +678,21 @@ def stream_image_outputs(
             int(time.time()),
             uploader=request.uploader,
         )["data"]
+        save_images_ms = int((time.time() - save_started_at) * 1000)
         if data:
-            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
+            yield ImageOutput(
+                kind="result",
+                model=request.model,
+                index=index,
+                total=total,
+                data=data,
+                metrics={
+                    "upstream_stream_ms": upstream_stream_ms,
+                    "resolve_urls_ms": resolve_urls_ms,
+                    "download_images_ms": download_images_ms,
+                    "save_images_ms": save_images_ms,
+                },
+            )
         return
 
     if message:
@@ -689,6 +763,7 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     message = ""
     progress_parts: list[str] = []
+    metrics: dict[str, int] = {}
     for output in outputs:
         created = created or output.created
         if output.kind == "progress" and output.text:
@@ -697,10 +772,18 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
             message = output.text
         elif output.kind == "result":
             data.extend(output.data)
+            if output.metrics:
+                for key, value in output.metrics.items():
+                    try:
+                        metrics[key] = int(metrics.get(key, 0)) + max(0, int(value or 0))
+                    except (TypeError, ValueError):
+                        continue
 
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
     if not data:
         text = message or "".join(progress_parts).strip()
         if text:
             result["message"] = text
+    if metrics:
+        result["metrics"] = metrics
     return result

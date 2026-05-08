@@ -52,6 +52,26 @@ class AuthService:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _default_name(role: str) -> str:
+        return "管理员密钥" if str(role or "").strip().lower() == "admin" else "普通用户"
+
+    def _build_name_locked(self, value: str, *, role: str, exclude_id: str = "") -> str:
+        base_name = self._clean(value) or self._default_name(role)
+        used_names = {
+            self._clean(item.get("name")).lower()
+            for item in self._items
+            if self._clean(item.get("id")) != self._clean(exclude_id)
+        }
+        if base_name.lower() not in used_names:
+            return base_name
+        index = 2
+        while True:
+            candidate = f"{base_name} {index}"
+            if candidate.lower() not in used_names:
+                return candidate
+            index += 1
+
     def _normalize_item(self, raw: object) -> dict[str, object] | None:
         if not isinstance(raw, dict):
             return None
@@ -96,6 +116,12 @@ class AuthService:
     def _save(self) -> None:
         self.storage.save_auth_keys(self._items)
 
+    def _save_item(self, item: dict[str, object]) -> None:
+        self.storage.save_auth_key(item)
+
+    def _delete_item(self, key_id: str) -> None:
+        self.storage.delete_auth_key(key_id)
+
     def _reload_locked(self) -> None:
         self._items = self._load()
 
@@ -137,13 +163,13 @@ class AuthService:
         quota: int | None = None,
         recharge_out_trade_no: str = "",
     ) -> tuple[dict[str, object], str]:
-        normalized_name = self._clean(name) or ("管理员密钥" if role == "admin" else "普通用户")
         normalized_quota = self._normalize_quota(quota, default=0 if role == "user" else None)
         normalized_order_no = self._clean(recharge_out_trade_no) if role == "user" else ""
         raw_key = f"sk-{secrets.token_urlsafe(24)}"
+        item_id = uuid.uuid4().hex[:12]
         item = {
-            "id": uuid.uuid4().hex[:12],
-            "name": normalized_name,
+            "id": item_id,
+            "name": "",
             "role": role,
             "key_hash": _hash_key(raw_key),
             "enabled": True,
@@ -154,12 +180,14 @@ class AuthService:
             "last_used_at": None,
         }
         with self._lock:
+            self._reload_locked()
             if normalized_order_no:
                 for existing in self._items:
                     if existing.get("role") == "user" and self._clean(existing.get("recharge_out_trade_no")) == normalized_order_no:
                         return self._public_item(existing), ""
+            item["name"] = self._build_name_locked(name, role=role, exclude_id=item_id)
             self._items.append(item)
-            self._save()
+            self._save_item(item)
             return self._public_item(item), raw_key
 
     def update_key(
@@ -191,8 +219,13 @@ class AuthService:
                     next_item["enabled"] = bool(updates.get("enabled"))
                 if "quota" in updates and updates.get("quota") is not None:
                     next_item["quota"] = self._normalize_quota(updates.get("quota"), default=0)
+                if "key" in updates and updates.get("key") is not None:
+                    next_key = self._clean(updates.get("key"))
+                    if not next_key:
+                        raise ValueError("新的专用密钥不能为空")
+                    next_item["key_hash"] = _hash_key(next_key)
                 self._items[index] = next_item
-                self._save()
+                self._save_item(next_item)
                 return self._public_item(next_item)
         return None
 
@@ -210,7 +243,7 @@ class AuthService:
             ]
             if len(self._items) == before:
                 return False
-            self._save()
+            self._delete_item(normalized_id)
             return True
 
     def authenticate(self, raw_key: str) -> dict[str, object] | None:
@@ -236,7 +269,7 @@ class AuthService:
                 last_flush_at = self._last_used_flush_at.get(item_id)
                 if last_flush_at is None or (now - last_flush_at).total_seconds() >= 60:
                     try:
-                        self._save()
+                        self._save_item(next_item)
                         self._last_used_flush_at[item_id] = now
                     except Exception:
                         pass
@@ -281,7 +314,7 @@ class AuthService:
                 next_item = dict(item)
                 next_item["quota"] = remaining - normalized_amount
                 self._items[index] = next_item
-                self._save()
+                self._save_item(next_item)
                 return normalized_amount
         raise ImageQuotaExceeded("user image quota exhausted")
 
@@ -304,7 +337,7 @@ class AuthService:
                 next_item = dict(item)
                 next_item["quota"] = remaining + normalized_amount
                 self._items[index] = next_item
-                self._save()
+                self._save_item(next_item)
                 return normalized_amount
         return 0
 

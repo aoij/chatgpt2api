@@ -9,7 +9,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool, StaticPool
@@ -75,7 +75,11 @@ def _merge_images(current: list[dict[str, Any]], incoming: list[dict[str, Any]])
         existing = by_id.get(image_id)
         existing_has_result = bool(existing and existing.get("status") == "success" and (existing.get("url") or existing.get("b64_json")))
         incoming_has_result = bool(image.get("status") == "success" and (image.get("url") or image.get("b64_json")))
-        if existing_has_result and not incoming_has_result:
+        incoming_status = _clean(image.get("status"))
+        # 仅在“普通本地回写缺少结果”时保护旧成功图；
+        # 如果上游任务的权威状态已经明确为 error，就必须允许覆盖旧 success，
+        # 否则会出现“新任务失败/卡住，但页面仍显示上一张旧成功图”的串图问题。
+        if existing_has_result and not incoming_has_result and incoming_status != "error":
             continue
         by_id[image_id] = dict(image)
         if image_id not in ordered_ids:
@@ -139,6 +143,38 @@ def _merge_conversation(current: dict[str, Any] | None, incoming: dict[str, Any]
             key=_timestamp,
         )
     return merged
+
+
+def _conversation_runtime_counts(turns: list[dict[str, Any]]) -> tuple[int, int]:
+    queued = 0
+    running = 0
+    for turn in turns:
+        if not isinstance(turn, dict) or turn.get("resultsDeleted"):
+            continue
+        status = _clean(turn.get("status"))
+        if status == "queued":
+            queued += 1
+        elif status == "generating":
+            running += 1
+    return queued, running
+
+
+def _summarize_conversation(raw: object) -> dict[str, Any] | None:
+    conversation = _normalize_conversation(raw)
+    if conversation is None:
+        return None
+    turns = conversation.get("turns") if isinstance(conversation.get("turns"), list) else []
+    queued, running = _conversation_runtime_counts(turns)
+    return {
+        "id": conversation["id"],
+        "title": _clean(conversation.get("title"), "未命名对话"),
+        "createdAt": _clean(conversation.get("createdAt"), _now_iso()),
+        "updatedAt": _clean(conversation.get("updatedAt"), _clean(conversation.get("createdAt"), _now_iso())),
+        "turnCount": len(turns),
+        "queuedCount": queued,
+        "runningCount": running,
+        "hasDetail": False,
+    }
 
 
 def _normalize_image(raw: object) -> dict[str, Any] | None:
@@ -261,9 +297,20 @@ def _create_database_engine(database_url: str):
         Path(url.database).parent.mkdir(parents=True, exist_ok=True)
     kwargs: dict[str, Any] = {"pool_pre_ping": True, "pool_recycle": 3600}
     if url.drivername.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
         kwargs["poolclass"] = StaticPool if url.database == ":memory:" else NullPool
-    return create_engine(database_url, **kwargs)
+    engine = create_engine(database_url, **kwargs)
+    if url.drivername.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+            finally:
+                cursor.close()
+    return engine
 
 
 class ImageConversationService:
@@ -294,7 +341,7 @@ class ImageConversationService:
         try:
             self._engine = _create_database_engine(self.database_url)
             Base.metadata.create_all(self._engine, tables=[ImageConversationModel.__table__])
-            self._Session = sessionmaker(bind=self._engine)
+            self._Session = sessionmaker(bind=self._engine, expire_on_commit=False)
             self._db_available = True
             print(f"[image-conversations] using database storage: {self._mask_database_url(self.database_url)}")
         except Exception as exc:
@@ -555,6 +602,29 @@ class ImageConversationService:
                 except Exception as exc:
                     self._handle_db_error_locked("list", exc)
             return list(self._filter_deleted_locked(owner, self._data.get(owner, [])))
+
+    def list_summary(self, identity: dict[str, object]) -> list[dict[str, Any]]:
+        items = self.list(identity)
+        return self.summarize_items(items)
+
+    def summarize_items(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [summary for summary in (_summarize_conversation(item) for item in items) if summary is not None]
+
+    def get(self, identity: dict[str, object], conversation_id: str) -> dict[str, Any] | None:
+        owner = _owner_key(identity)
+        normalized_id = _clean(conversation_id)
+        if not normalized_id:
+            return None
+        with self._lock:
+            if self._is_deleted_locked(owner, normalized_id):
+                return None
+            if self._db_available:
+                try:
+                    items = self._load_owner_from_db_locked(owner)
+                    return next((dict(item) for item in items if item.get("id") == normalized_id), None)
+                except Exception as exc:
+                    self._handle_db_error_locked("get", exc)
+            return next((dict(item) for item in self._data.get(owner, []) if item.get("id") == normalized_id), None)
 
     def save(self, identity: dict[str, object], conversation: dict[str, Any]) -> list[dict[str, Any]]:
         normalized = _normalize_conversation(conversation)

@@ -29,6 +29,9 @@ export type Account = {
 
 type AccountListResponse = {
   items: Account[];
+  total?: number;
+  page?: number;
+  page_size?: number;
 };
 
 type AccountTokenListResponse = {
@@ -77,6 +80,7 @@ export type SettingsConfig = {
   image_retention_days?: number | string;
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
+  image_task_worker_count?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
@@ -199,6 +203,11 @@ export type ImageTask = {
   updated_at: string;
   data?: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
   error?: string;
+  persist_summary?: {
+    pending: number;
+    completed: number;
+    failed: number;
+  };
 };
 
 type ImageTaskListResponse = {
@@ -341,10 +350,36 @@ export type PublicConfig = {
   page_title: string;
   image_page_title: string;
   image_page_subtitle: string;
+  image_batch_limit?: number;
 };
 
 export async function fetchPublicConfig() {
   return httpRequest<PublicConfig>("/api/public/config", { redirectOnUnauthorized: false });
+}
+
+export type ImageTaskRuntime = {
+  transport: "rabbitmq" | "memory" | string;
+  workers: number;
+  upstream_concurrency: number;
+  active_upstream_slots: number;
+  queued: number;
+  running: number;
+  processing: number;
+  recent_avg_duration_ms: number;
+  estimated_wait_ms: number;
+  frontend_batch_limit?: number;
+  recent_avg_stage_ms?: {
+    slot_wait_ms?: number;
+    upstream_stream_ms?: number;
+    resolve_urls_ms?: number;
+    download_images_ms?: number;
+    save_images_ms?: number;
+    background_download_images_ms?: number;
+  };
+};
+
+export async function fetchImageTaskRuntime() {
+  return httpRequest<ImageTaskRuntime>("/api/image-tasks/runtime");
 }
 
 export async function fetchRechargeOptions() {
@@ -377,8 +412,21 @@ export async function fetchCurrentUser() {
   return httpRequest<{ id: string; name: string; role: AuthRole; enabled: boolean; quota?: number | null; auth_mode?: string; scope?: "full" | "image" }>("/api/auth/me");
 }
 
-export async function fetchAccounts() {
-  return httpRequest<AccountListResponse>("/api/accounts?compact=true");
+export async function fetchAccounts(filters: {
+  query?: string;
+  type?: string;
+  status?: string;
+  page?: number;
+  page_size?: number;
+} = {}) {
+  const params = new URLSearchParams();
+  params.set("compact", "true");
+  if (filters.query) params.set("query", filters.query);
+  if (filters.type && filters.type !== "all") params.set("account_type", filters.type);
+  if (filters.status && filters.status !== "all") params.set("status", filters.status);
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.page_size) params.set("page_size", String(filters.page_size));
+  return httpRequest<AccountListResponse>(`/api/accounts?${params.toString()}`);
 }
 
 export async function fetchAccountSummary() {
@@ -610,7 +658,7 @@ export async function createUserKey(name: string, quota: number) {
   });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; quota?: number }) {
+export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; quota?: number; key?: string }) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
     body: updates,

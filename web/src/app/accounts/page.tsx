@@ -43,10 +43,12 @@ import {
 import {
   deleteAccounts,
   fetchAccounts,
+  fetchAccountSummary,
   fetchAccountTokens,
   refreshAccounts,
   updateAccount,
   type Account,
+  type AccountType,
   type AccountStatus,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -173,27 +175,61 @@ function displayAccountType(account: Account) {
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [totalAccounts, setTotalAccounts] = useState(0);
+  const [summary, setSummary] = useState({
+    total: 0,
+    active: 0,
+    limited: 0,
+    abnormal: 0,
+    disabled: 0,
+    quota: "—",
+  });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState("10");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
+  const [editType, setEditType] = useState<AccountType>("Free");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+
+  const loadSummary = async () => {
+    try {
+      const data = await fetchAccountSummary();
+      setSummary({
+        total: Number(data.total || 0),
+        active: Number(data.active || 0),
+        limited: Number(data.limited || 0),
+        abnormal: Number(data.abnormal || 0),
+        disabled: Number(data.disabled || 0),
+        quota: data.available_unlimited ? "∞" : data.available_unknown ? "未知" : formatCompact(Number(data.available_quota || 0)),
+      });
+    } catch {
+      // ignore
+    }
+  };
 
   const loadAccounts = async (silent = false) => {
     if (!silent) {
       setIsLoading(true);
     }
     try {
-      const data = await fetchAccounts();
+      const data = await fetchAccounts({
+        query: debouncedQuery.trim(),
+        type: typeFilter,
+        status: statusFilter,
+        page,
+        page_size: Number(pageSize),
+      });
       setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setTotalAccounts(Number(data.total || 0));
+      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.id === id)));
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
       toast.error(message);
@@ -210,36 +246,32 @@ function AccountsPageContent() {
     }
     didLoadRef.current = true;
     void loadAccounts();
+    void loadSummary();
   }, []);
 
-  const filteredAccounts = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return accounts.filter((account) => {
-      const searchMatched =
-        normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
-      const typeMatched = typeFilter === "all" || displayAccountType(account) === typeFilter;
-      const statusMatched = statusFilter === "all" || account.status === statusFilter;
-      return searchMatched && typeMatched && statusMatched;
-    });
-  }, [accounts, query, statusFilter, typeFilter]);
+  useEffect(() => {
+    if (!didLoadRef.current) {
+      return;
+    }
+    void loadAccounts();
+  }, [debouncedQuery, page, pageSize, statusFilter, typeFilter]);
 
-  const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedQuery(query);
+    }, 250);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [query]);
+
+  const filteredAccounts = accounts;
+  const pageCount = Math.max(1, Math.ceil(totalAccounts / Number(pageSize)));
   const safePage = Math.min(page, pageCount);
   const startIndex = (safePage - 1) * Number(pageSize);
-  const currentRows = filteredAccounts.slice(startIndex, startIndex + Number(pageSize));
+  const currentRows = filteredAccounts;
   const allCurrentSelected =
-    currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.access_token));
-
-  const summary = useMemo(() => {
-    const total = accounts.length;
-    const active = accounts.filter((item) => item.status === "正常").length;
-    const limited = accounts.filter((item) => item.status === "限流").length;
-    const abnormal = accounts.filter((item) => item.status === "异常").length;
-    const disabled = accounts.filter((item) => item.status === "禁用").length;
-    const quota = formatQuotaSummary(accounts);
-
-    return { total, active, limited, abnormal, disabled, quota };
-  }, [accounts]);
+    currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.id));
 
   const accountTypeOptions = useMemo(
     () => [
@@ -281,8 +313,9 @@ function AccountsPageContent() {
     setIsDeleting(true);
     try {
       const data = await deleteAccounts(tokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setSelectedIds((prev) => prev.filter((id) => !tokens.includes(id)));
+      await loadAccounts(true);
+      await loadSummary();
       toast.success(`删除 ${data.removed ?? 0} 个账户`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除账户失败";
@@ -301,8 +334,8 @@ function AccountsPageContent() {
     setIsRefreshing(true);
     try {
       const data = await refreshAccounts(accessTokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      await loadAccounts(true);
+      await loadSummary();
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
         toast.error(
@@ -334,6 +367,7 @@ function AccountsPageContent() {
   const openEditDialog = (account: Account) => {
     setEditingAccount(account);
     setEditStatus(account.status);
+    setEditType(displayAccountType(account));
   };
 
   const handleUpdateAccount = async () => {
@@ -343,12 +377,12 @@ function AccountsPageContent() {
 
     setIsUpdating(true);
     try {
-      const data = await updateAccount(editingAccount.id, {
+      await updateAccount(editingAccount.id, {
         type: editType,
         status: editStatus,
       });
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      await loadAccounts(true);
+      await loadSummary();
       setEditingAccount(null);
       toast.success("账号信息已更新");
     } catch (error) {
@@ -361,10 +395,10 @@ function AccountsPageContent() {
 
   const toggleSelectAll = (checked: boolean) => {
     if (checked) {
-      setSelectedIds((prev) => Array.from(new Set([...prev, ...currentRows.map((item) => item.access_token)])));
+      setSelectedIds((prev) => Array.from(new Set([...prev, ...currentRows.map((item) => item.id)])));
       return;
     }
-    setSelectedIds((prev) => prev.filter((id) => !currentRows.some((row) => row.access_token === id)));
+    setSelectedIds((prev) => prev.filter((id) => !currentRows.some((row) => row.id === id)));
   };
 
   return (
@@ -398,8 +432,9 @@ function AccountsPageContent() {
           </Button>
           <AccountImportDialog
             disabled={isLoading || isRefreshing || isDeleting}
-            onImported={(items) => {
-              setAccounts(items);
+            onImported={() => {
+              void loadAccounts(true);
+              void loadSummary();
               setSelectedIds([]);
               setPage(1);
             }}
@@ -493,7 +528,7 @@ function AccountsPageContent() {
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold tracking-tight">账户列表</h2>
             <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
-              {filteredAccounts.length}
+              {totalAccounts}
             </Badge>
           </div>
 
@@ -503,12 +538,12 @@ function AccountsPageContent() {
               <Input
                 value={query}
                 onChange={(event) => {
-                  setQuery(event.target.value);
-                  setPage(1);
-                }}
-                placeholder="搜索邮箱"
-                className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10 text-base sm:text-sm"
-              />
+              setQuery(event.target.value);
+              setPage(1);
+            }}
+            placeholder="搜索邮箱"
+            className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10 text-base sm:text-sm"
+          />
             </div>
             <Select
               value={typeFilter}
@@ -742,17 +777,17 @@ function AccountsPageContent() {
 
                     return (
                       <tr
-                        key={account.access_token}
+                        key={account.id}
                         className="border-b border-stone-100/80 text-sm text-stone-600 transition-colors hover:bg-stone-50/70"
                       >
                         <td className="px-4 py-3">
                           <Checkbox
-                            checked={selectedIds.includes(account.access_token)}
+                            checked={selectedIds.includes(account.id)}
                             onCheckedChange={(checked) => {
                               setSelectedIds((prev) =>
                                 checked
-                                  ? Array.from(new Set([...prev, account.access_token]))
-                                  : prev.filter((item) => item !== account.access_token),
+                                  ? Array.from(new Set([...prev, account.id]))
+                                  : prev.filter((item) => item !== account.id),
                               );
                             }}
                           />
@@ -798,7 +833,7 @@ function AccountsPageContent() {
                         </td>
                         <td className="px-4 py-3 text-xs leading-5 text-stone-500">
                           {(() => {
-                            const restore = formatRestoreAt(account.restore_at);
+                            const restore = formatRestoreAt(account.restoreAt);
                             return (
                               <div className="space-y-0.5">
                                 {restore.relative ? <div className="font-medium text-stone-700">{restore.relative}</div> : null}
@@ -859,9 +894,9 @@ function AccountsPageContent() {
             <div className="border-t border-stone-100 px-3 py-3 sm:px-4 sm:py-4">
               <div className="hide-scrollbar flex items-center gap-2 overflow-x-auto whitespace-nowrap sm:justify-center sm:gap-3">
                 <div className="shrink-0 text-sm text-stone-500">
-                显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
-                {Math.min(startIndex + Number(pageSize), filteredAccounts.length)} 条，共{" "}
-                {filteredAccounts.length} 条
+                显示第 {totalAccounts === 0 ? 0 : startIndex + 1} -{" "}
+                {Math.min(startIndex + currentRows.length, totalAccounts)} 条，共{" "}
+                {totalAccounts} 条
                 </div>
 
                 <span className="shrink-0 text-sm leading-none text-stone-500">

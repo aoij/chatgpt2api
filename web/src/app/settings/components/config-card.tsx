@@ -24,6 +24,7 @@ export function ConfigCard() {
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
+  const setImageTaskWorkerCount = useSettingsStore((state) => state.setImageTaskWorkerCount);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
@@ -193,14 +194,24 @@ export function ConfigCard() {
             <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
           </div>
           <div className="space-y-2">
-            <label className="text-sm text-stone-700">单账号图片并发</label>
+            <label className="text-sm text-stone-700">前端单次批量张数</label>
             <Input
               value={String(config?.image_account_concurrency || "")}
               onChange={(event) => setImageAccountConcurrency(event.target.value)}
               placeholder="1"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">限制每个账号同时处理的图片请求数量，默认 3。</p>
+            <p className="text-xs text-stone-500">仅限制前端用户一次最多提交多少张图，不再限制后端实际生成并发。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">RabbitMQ 消费并发</label>
+            <Input
+              value={String(config?.image_task_worker_count || "")}
+              onChange={(event) => setImageTaskWorkerCount(event.target.value)}
+              placeholder="10"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">控制队列消费者数量，适合配合上游图片并发一起调整。</p>
           </div>
           <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
             <Checkbox

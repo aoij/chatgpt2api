@@ -4,10 +4,10 @@ import { LoaderCircle, MessageSquarePlus, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { getImageConversationStats, type ImageConversation } from "@/store/image-conversations";
+import { getImageConversationSummaryStats, type ImageConversationSummary } from "@/store/image-conversations";
 
 type ImageSidebarProps = {
-  conversations: ImageConversation[];
+  conversations: ImageConversationSummary[];
   isLoadingHistory: boolean;
   selectedConversationId: string | null;
   onCreateDraft: () => void;
@@ -65,7 +65,7 @@ export function ImageSidebar({
           ) : (
             conversations.map((conversation) => {
               const active = conversation.id === selectedConversationId;
-              const stats = getImageConversationStats(conversation);
+              const stats = getImageConversationSummaryStats(conversation);
               return (
                 <div
                   key={conversation.id}
@@ -88,7 +88,7 @@ export function ImageSidebar({
                       <span className="truncate">{conversation.title}</span>
                     </div>
                     <div className={cn("mt-1 text-xs", active ? "text-stone-500" : "text-stone-400")}>
-                      {conversation.turns.length} 轮 · {formatConversationTime(conversation.updatedAt)}
+                      {conversation.turnCount} 轮 · {formatConversationTime(conversation.updatedAt)}
                     </div>
                     {stats.running > 0 || stats.queued > 0 ? (
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">

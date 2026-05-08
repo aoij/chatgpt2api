@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { History, LoaderCircle, Plus, Trash2 } from "lucide-react";
@@ -33,14 +33,16 @@ import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
   clearImageConversations,
   deleteImageConversation,
+  fetchImageConversation,
   getImageConversationStats,
-  IMAGE_CONVERSATIONS_SYNC_EVENT,
   listImageConversations,
   saveImageConversation,
   saveImageConversations,
   subscribeImageConversationSync,
+  summarizeImageConversation,
   type ImageConversation,
   type ImageConversationMode,
+  type ImageConversationSummary,
   type ImageTurn,
   type ImageTurnStatus,
   type StoredImage,
@@ -52,8 +54,8 @@ const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_i
 const DRAFT_CONVERSATION_STORAGE_VALUE = "__draft__";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
-const EDIT_TASK_SUBMIT_CONCURRENCY = 1;
-const GENERATE_TASK_SUBMIT_CONCURRENCY = 3;
+const EDIT_TASK_SUBMIT_CONCURRENCY = 2;
+const GENERATE_TASK_SUBMIT_CONCURRENCY = 8;
 const TASK_SUBMIT_RETRY = 2;
 const TASK_POLL_RETRY = 4;
 const TASK_STATUS_REPAIR_LOOKBACK_MS = 24 * 60 * 60 * 1000;
@@ -365,6 +367,9 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
         error: "未返回图片数据",
       };
     } else {
+      const persistPending = Number(task.persist_summary?.pending || 0) > 0;
+      const persistFailed = Number(task.persist_summary?.failed || 0) > 0;
+      const transientError = persistFailed ? "图片已生成，转存本地失败，暂时使用远程链接展示" : undefined;
       nextImage = {
         ...image,
         taskId: task.id,
@@ -372,7 +377,8 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
         b64_json: first.url ? undefined : first.b64_json,
         url: first.url,
         revised_prompt: first.revised_prompt,
-        error: undefined,
+        error: persistPending ? "图片已生成，正在转存本地…" : transientError,
+        persistStatus: persistPending ? "pending" : persistFailed ? "error" : "done",
       };
     }
   } else if (task.status === "error") {
@@ -381,6 +387,7 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
       taskId: task.id,
       status: "error",
       error: friendlyImageError(task.error || "生成失败"),
+      persistStatus: undefined,
     };
   } else {
     nextImage = {
@@ -388,6 +395,7 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
       taskId: task.id,
       status: "loading",
       error: undefined,
+      persistStatus: undefined,
     };
   }
 
@@ -397,7 +405,8 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
     nextImage.b64_json === image.b64_json &&
     nextImage.url === image.url &&
     nextImage.revised_prompt === image.revised_prompt &&
-    nextImage.error === image.error
+    nextImage.error === image.error &&
+    nextImage.persistStatus === image.persistStatus
   ) {
     return image;
   }
@@ -549,7 +558,7 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
             image.taskId &&
             (image.status !== "success" ||
               (!image.url && !image.b64_json) ||
-              shouldRepairRecentSuccess)
+              (shouldRepairRecentSuccess && Boolean(image.url) && !String(image.url).includes("/images/")))
               ? [image.taskId]
               : [],
           ),
@@ -681,6 +690,7 @@ function ImagePageContent({
 }) {
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
+  const conversationSummariesRef = useRef<ImageConversationSummary[]>([]);
   const resultsViewportRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottomRef = useRef(true);
   const forceAutoScrollRef = useRef(false);
@@ -697,6 +707,8 @@ function ImagePageContent({
   const [referenceImageFiles, setReferenceImageFiles] = useState<File[]>([]);
   const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
+  const [conversationSummaries, setConversationSummaries] = useState<ImageConversationSummary[]>([]);
+  const [isLoadingConversationDetail, setIsLoadingConversationDetail] = useState(false);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [composerExpandSignal, setComposerExpandSignal] = useState(0);
   const [isLoadingHistory, setIsLoadingHistory] = useState(true);
@@ -733,6 +745,47 @@ function ImagePageContent({
         return sum + stats.queued + stats.running;
       }, 0),
     [conversations],
+  );
+
+  const syncConversationSummaries = useCallback((items: ImageConversation[]) => {
+    const summaries = items.map((item) => summarizeImageConversation(item));
+    conversationSummariesRef.current = summaries;
+    setConversationSummaries(summaries);
+  }, []);
+
+  const ensureConversationDetailLoaded = useCallback(
+    async (conversationId: string | null, options: { silent?: boolean } = {}) => {
+      const normalizedConversationId = conversationId ? String(conversationId).trim() || null : null;
+      if (!normalizedConversationId) {
+        return null;
+      }
+      const existing = conversationsRef.current.find((item) => item.id === normalizedConversationId) ?? null;
+      if (existing) {
+        return existing;
+      }
+      if (!options.silent) {
+        setIsLoadingConversationDetail(true);
+      }
+      try {
+        const item = await fetchImageConversation(normalizedConversationId);
+        if (!item) {
+          return null;
+        }
+        const nextConversations = sortImageConversations([
+          item,
+          ...conversationsRef.current.filter((conversation) => conversation.id !== item.id),
+        ]);
+        conversationsRef.current = nextConversations;
+        setConversations(nextConversations);
+        syncConversationSummaries(nextConversations);
+        return item;
+      } finally {
+        if (!options.silent) {
+          setIsLoadingConversationDetail(false);
+        }
+      }
+    },
+    [syncConversationSummaries],
   );
   const systemEstimatedWaitText = useMemo(
     () => formatRuntimeDuration(Number(runtimeStats?.estimated_wait_ms || 0)),
@@ -807,25 +860,51 @@ function ImagePageContent({
   }, [selectedConversationId]);
 
   useEffect(() => {
+    if (!selectedConversationId || draftModeRef.current) {
+      setIsLoadingConversationDetail(false);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const detail = await ensureConversationDetailLoaded(selectedConversationId);
+      if (!detail || cancelled) {
+        return;
+      }
+      const recovered = await recoverConversationHistory([detail]);
+      if (cancelled || recovered.length === 0) {
+        return;
+      }
+      const item = recovered[0];
+      const nextConversations = sortImageConversations([
+        item,
+        ...conversationsRef.current.filter((conversation) => conversation.id !== item.id),
+      ]);
+      conversationsRef.current = nextConversations;
+      setConversations(nextConversations);
+      syncConversationSummaries(nextConversations);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ensureConversationDetailLoaded, selectedConversationId, syncConversationSummaries]);
+
+  useEffect(() => {
     let cancelled = false;
 
-    const applyHistory = async (items: ImageConversation[], options: { background?: boolean } = {}) => {
-      const normalizedItems = await recoverConversationHistory(items);
+    const applyHistorySummaries = async (items: ImageConversationSummary[], options: { background?: boolean } = {}) => {
       if (cancelled) {
         return;
       }
-
-      conversationsRef.current = normalizedItems;
-      setConversations(normalizedItems);
-      const storedConversationId =
-        readPersistedActiveConversationSelection();
+      conversationSummariesRef.current = items;
+      setConversationSummaries(items);
+      const storedConversationId = readPersistedActiveConversationSelection();
       const storedDraftSelection = storedConversationId === DRAFT_CONVERSATION_STORAGE_VALUE;
       const nextSelectedConversationId =
-        (storedConversationId && normalizedItems.some((conversation) => conversation.id === storedConversationId)
+        (storedConversationId && items.some((conversation) => conversation.id === storedConversationId)
           ? storedConversationId
-          : null) ?? pickFallbackConversationId(normalizedItems);
+          : null) ?? items[0]?.id ?? null;
       const currentSelection = selectedConversationIdRef.current;
-      const currentSelectionStillExists = Boolean(currentSelection && normalizedItems.some((item) => item.id === currentSelection));
+      const currentSelectionStillExists = Boolean(currentSelection && items.some((item) => item.id === currentSelection));
       if (storedDraftSelection) {
         setConversationSelection(null, { draft: true });
         return;
@@ -846,7 +925,7 @@ function ImagePageContent({
         setImageCount(storedCount ? clampImageCount(storedCount) : "1");
 
         const items = await listImageConversations();
-        await applyHistory(items);
+        await applyHistorySummaries(items);
       } catch (error) {
         const message = error instanceof Error ? error.message : "读取会话记录失败";
         toast.error(message);
@@ -858,21 +937,23 @@ function ImagePageContent({
     };
 
     const unsubscribeSync = subscribeImageConversationSync((items) => {
-      void applyHistory(items, { background: true });
+      conversationsRef.current = items;
+      setConversations(items);
+      syncConversationSummaries(items);
     });
     void loadHistory();
     return () => {
       cancelled = true;
       unsubscribeSync();
     };
-  }, []);
+  }, [setConversationSelection, syncConversationSummaries]);
 
   const loadQuota = useCallback(async () => {
     try {
       if (!isAdmin) {
         const data = await fetchCurrentUser();
         setTokenName(data.name || initialTokenName || "-");
-        setAvailableQuota(data.quota == null ? "不限" : String(Math.max(0, Number(data.quota) || 0)));
+      setAvailableQuota(data.quota == null ? "不限" : String(Math.max(0, Number(data.quota) || 0)));
         return;
       }
       fetchCurrentUser()
@@ -986,7 +1067,7 @@ function ImagePageContent({
     }
 
     viewport.scrollTo({
-      top: resultsViewportRef.current.scrollHeight,
+      top: viewport.scrollHeight,
       behavior: forceAutoScrollRef.current ? "auto" : "smooth",
     });
     shouldStickToBottomRef.current = true;
@@ -1028,6 +1109,7 @@ function ImagePageContent({
     ]);
     conversationsRef.current = nextConversations;
     setConversations(nextConversations);
+    syncConversationSummaries(nextConversations);
     await saveImageConversation(conversation);
   };
 
@@ -1045,6 +1127,7 @@ function ImagePageContent({
       ]);
       conversationsRef.current = nextConversations;
       setConversations(nextConversations);
+      syncConversationSummaries(nextConversations);
       if (options.persist !== false) {
         await saveImageConversation(nextConversation);
       }
@@ -1076,6 +1159,7 @@ function ImagePageContent({
     const nextConversations = conversations.filter((item) => item.id !== id);
     conversationsRef.current = nextConversations;
     setConversations(nextConversations);
+    syncConversationSummaries(nextConversations);
     if (selectedConversationId === id) {
       setConversationSelection(pickFallbackConversationId(nextConversations));
       resetComposer();
@@ -1087,8 +1171,8 @@ function ImagePageContent({
       const message = error instanceof Error ? error.message : "删除会话失败";
       toast.error(message);
       const items = await listImageConversations();
-      conversationsRef.current = items;
-      setConversations(items);
+      conversationSummariesRef.current = items;
+      setConversationSummaries(items);
     }
   };
 
@@ -1136,6 +1220,8 @@ function ImagePageContent({
       await clearImageConversations();
       conversationsRef.current = [];
       setConversations([]);
+      conversationSummariesRef.current = [];
+      setConversationSummaries([]);
       setConversationSelection(null, { draft: true });
       resetComposer();
       toast.success("已清空历史记录");
@@ -1881,7 +1967,7 @@ function ImagePageContent({
       <section className={cn("mx-auto grid min-h-0 w-full max-w-[1380px] grid-cols-1 gap-2 px-0 pb-[calc(env(safe-area-inset-bottom)+0.35rem)] sm:h-[calc(100dvh-5rem)] sm:gap-3 sm:px-3 sm:pb-6 lg:grid-cols-[240px_minmax(0,1fr)]", isCompactUserView ? "h-[calc(100dvh-5rem)]" : "h-[calc(100dvh-6.75rem)]")}>
         <div className="hidden h-full min-h-0 border-r border-stone-200/70 pr-3 lg:block">
           <ImageSidebar
-            conversations={conversations}
+            conversations={conversationSummaries}
             isLoadingHistory={isLoadingHistory}
             selectedConversationId={selectedConversationId}
             onCreateDraft={handleCreateDraft}
@@ -1914,7 +2000,7 @@ function ImagePageContent({
                   variant="outline"
                   className="h-10 rounded-2xl border-stone-200 bg-white px-3 text-stone-600 shadow-sm"
                   onClick={openClearHistoryConfirm}
-                  disabled={conversations.length === 0}
+                  disabled={conversationSummaries.length === 0}
                 >
                   <Trash2 className="size-4" />
                 </Button>
@@ -1922,7 +2008,7 @@ function ImagePageContent({
             </DialogHeader>
             <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-8 sm:px-8">
               <ImageSidebar
-                conversations={conversations}
+                conversations={conversationSummaries}
                 isLoadingHistory={isLoadingHistory}
                 selectedConversationId={selectedConversationId}
                 onCreateDraft={() => {
@@ -1950,7 +2036,7 @@ function ImagePageContent({
               onClick={() => setIsHistoryOpen(true)}
             >
               <History className="mr-2 size-4" />
-              历史记录 ({conversations.length})
+              历史记录 ({conversationSummaries.length})
             </Button>
             <Button
               className="h-10 rounded-2xl bg-stone-950 text-white shadow-sm"
@@ -1963,7 +2049,7 @@ function ImagePageContent({
               variant="outline"
               className="h-10 rounded-2xl border-stone-200 bg-white/85 px-3 text-stone-600 shadow-sm"
               onClick={openClearHistoryConfirm}
-              disabled={conversations.length === 0}
+              disabled={conversationSummaries.length === 0}
             >
               <Trash2 className="size-4" />
             </Button>
@@ -1975,6 +2061,7 @@ function ImagePageContent({
           >
             <ImageResults
               selectedConversation={selectedConversation}
+              isLoadingConversationDetail={Boolean(selectedConversationId && !selectedConversation && isLoadingConversationDetail)}
               onOpenLightbox={openLightbox}
               onContinueEdit={handleContinueEdit}
               onDeletePrompt={openDeletePromptConfirm}

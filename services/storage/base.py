@@ -47,6 +47,39 @@ class StorageBackend(ABC):
         """保存所有鉴权密钥数据"""
         pass
 
+    def save_auth_key(self, auth_key: dict[str, Any]) -> None:
+        """保存单个鉴权密钥数据；后端可覆盖该方法来避免重写全量鉴权密钥。"""
+        key_id = str((auth_key or {}).get("id") or "").strip()
+        if not key_id:
+            return
+        items = self.load_auth_keys()
+        found = False
+        next_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("id") or "").strip() == key_id:
+                next_items.append(auth_key)
+                found = True
+            else:
+                next_items.append(item)
+        if not found:
+            next_items.append(auth_key)
+        self.save_auth_keys(next_items)
+
+    def delete_auth_key(self, key_id: str) -> None:
+        """删除单个鉴权密钥数据；后端可覆盖该方法来避免重写全量鉴权密钥。"""
+        normalized_id = str(key_id or "").strip()
+        if not normalized_id:
+            return
+        items = self.load_auth_keys()
+        next_items = [
+            item
+            for item in items
+            if isinstance(item, dict) and str(item.get("id") or "").strip() != normalized_id
+        ]
+        self.save_auth_keys(next_items)
+
     @abstractmethod
     def health_check(self) -> dict[str, Any]:
         """健康检查，返回存储后端状态"""

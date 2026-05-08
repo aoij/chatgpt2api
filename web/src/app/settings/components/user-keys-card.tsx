@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Ban, CheckCircle2, Copy, KeyRound, LoaderCircle, Plus, RefreshCw, Search, Trash2, UsersRound } from "lucide-react";
+import { Ban, CheckCircle2, Copy, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Search, Trash2, UsersRound } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -52,6 +52,9 @@ export function UserKeysCard({ standalone = false }: { standalone?: boolean } = 
   const [revealedKey, setRevealedKey] = useState("");
   const [revealedLinkToken, setRevealedLinkToken] = useState("");
   const [deletingItem, setDeletingItem] = useState<UserKey | null>(null);
+  const [editingItem, setEditingItem] = useState<UserKey | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editKey, setEditKey] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [pageSize, setPageSize] = useState<(typeof PAGE_SIZE_OPTIONS)[number]>(50);

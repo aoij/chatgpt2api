@@ -9,12 +9,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from api import accounts, ai, image_tasks, recharge, register, system
+from api import accounts, ai, image_tasks, register, system
 from api.support import resolve_web_asset, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
-from services.image_service import cleanup_expired_images
-from services.recharge_service import start_recharge_order_watcher
+from services.image_service import cleanup_expired_images, resolve_thumbnail_file
 
 
 def _inject_runtime_web_config(text: str) -> str:
@@ -37,14 +36,12 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI):
         stop_event = Event()
         account_watcher_thread = start_limited_account_watcher(stop_event)
-        recharge_watcher_thread = start_recharge_order_watcher(stop_event)
         cleanup_expired_images()
         try:
             yield
         finally:
             stop_event.set()
             account_watcher_thread.join(timeout=1)
-            recharge_watcher_thread.join(timeout=1)
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -58,16 +55,25 @@ def create_app() -> FastAPI:
     app.include_router(ai.create_router())
     app.include_router(accounts.create_router())
     app.include_router(image_tasks.create_router())
-    app.include_router(recharge.create_router())
     app.include_router(register.create_router())
     app.include_router(system.create_router(app_version))
     if config.images_dir.exists():
         app.mount("/images", StaticFiles(directory=str(config.images_dir)), name="images")
     image_thumbs_dir = config.images_dir.parent / "image_thumbs"
     image_thumbs_dir.mkdir(parents=True, exist_ok=True)
-    app.mount("/image-thumbs", StaticFiles(directory=str(image_thumbs_dir)), name="image_thumbs")
 
-    @app.get("/{full_path:path}", include_in_schema=False)
+    @app.get("/image-thumbs/{thumb_path:path}", include_in_schema=False)
+    async def serve_image_thumb(thumb_path: str):
+        resolved = resolve_thumbnail_file(thumb_path)
+        if resolved is None or not resolved.is_file():
+            raise HTTPException(status_code=404, detail="Not Found")
+        return FileResponse(
+            resolved,
+            media_type="image/webp",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def serve_web(full_path: str):
         asset = resolve_web_asset(full_path)
         if asset is not None:

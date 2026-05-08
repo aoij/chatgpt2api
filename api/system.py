@@ -18,6 +18,7 @@ from services.backup_service import BackupError, backup_service
 from services.auth_service import auth_service
 from services.config import config
 from services.image_service import add_log_image_thumbnails, build_image_download, build_images_zip, delete_images, list_images
+from services.image_task_service import image_task_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
 from services.proxy_service import test_proxy
@@ -129,6 +130,7 @@ def create_router(app_version: str) -> APIRouter:
             "page_title": config.page_title,
             "image_page_title": config.image_page_title,
             "image_page_subtitle": config.image_page_subtitle,
+            "image_batch_limit": config.image_account_concurrency,
         }
 
     @router.get("/version")
@@ -143,7 +145,9 @@ def create_router(app_version: str) -> APIRouter:
     @router.post("/api/settings")
     async def save_settings(body: SettingsUpdateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"config": config.update(body.model_dump(mode="python"))}
+        updated = config.update(body.model_dump(mode="python"))
+        image_task_service.reload_runtime_settings()
+        return {"config": updated}
 
     @router.get("/api/images")
     async def get_images(

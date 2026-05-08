@@ -12,7 +12,6 @@ import {
   Maximize2,
   RefreshCw,
   Search,
-  SquareCheckBig,
   Trash2,
   Users,
 } from "lucide-react";
@@ -20,12 +19,12 @@ import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
 import { ImageLightbox } from "@/components/image-lightbox";
-import { Badge } from "@/components/ui/badge";
+import { ImageThumbnail } from "@/components/image-thumbnail";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { fetchManagedImages, deleteManagedImages, downloadManagedImage, downloadManagedImages, type ManagedImage, type ManagedImageUploader } from "@/lib/api";
+import { fetchManagedImages, deleteManagedImages, downloadManagedImage, type ManagedImage, type ManagedImageUploader } from "@/lib/api";
 import { defaultImageDownloadName, saveBlobAsFile } from "@/lib/download";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -33,14 +32,12 @@ import type { StoredAuthSession } from "@/store/auth";
 
 type GroupMode = "none" | "uploader";
 
-const LONG_PRESS_MS = 800;
-
 function formatSize(size: number) {
   return size > 1024 * 1024 ? `${(size / 1024 / 1024).toFixed(2)} MB` : `${Math.ceil(size / 1024)} KB`;
 }
 
 function imageKey(item: ManagedImage) {
-  return item.rel || item.url;
+  return item.path || item.url;
 }
 
 function imageDimensions(item: ManagedImage) {
@@ -66,7 +63,6 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const isSelfMode = !isAdmin;
 
   const [items, setItems] = useState<ManagedImage[]>([]);
-  const [total, setTotal] = useState(0);
   const [uploaders, setUploaders] = useState<ManagedImageUploader[]>([]);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -75,8 +71,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
-  const [deleteTarget, setDeleteTarget] = useState<ManagedImage | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
@@ -126,116 +122,26 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
         end_date: endDate,
         ...(isAdmin && uploader ? { uploader } : {}),
         limit: pageSize,
-        offset: (page - 1) * pageSize,
+        offset: (safePage - 1) * pageSize,
       });
+      const nextPageCount = Math.max(1, Math.ceil(Number(data.total || 0) / pageSize));
+      if (safePage > nextPageCount) {
+        setPage(nextPageCount);
+        return;
+      }
       setItems(data.items);
-      setTotal(data.total ?? data.items.length);
+      setTotal(Number(data.total || 0));
       if (isAdmin) {
         setUploaders((current) => uploader ? mergeUploaders(current, data.uploaders || []) : data.uploaders || []);
       } else {
         setUploaders(data.uploaders || []);
       }
-      setSelectedPaths((current) => current.filter((path) => data.items.some((item) => imageKey(item) === path)));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载图片失败");
     } finally {
       setIsLoading(false);
     }
   };
-
-  const closeDialog = useCallback(() => {
-    setDialogVisible(false);
-    setTimeout(() => setDeleteTarget(null), 200);
-  }, []);
-
-  const openDeleteDialog = useCallback((item: ManagedImage) => {
-    deleteTargetRef.current = item;
-    setDeleteTarget(item);
-    setDialogVisible(true);
-  }, []);
-
-  const handleDelete = async () => {
-    if (!deleteTarget) return;
-    setIsDeleting(true);
-    try {
-      await deleteManagedImages({ paths: [deleteTarget.rel] });
-      setItems((prev) => prev.filter((item) => item.rel !== deleteTarget.rel));
-      setSelectedPaths((prev) => prev.filter((p) => p !== imageKey(deleteTarget)));
-      toast.success("图片已删除");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "删除失败");
-    } finally {
-      setIsDeleting(false);
-      closeDialog();
-    }
-  };
-
-  const handleSetTags = async (item: ManagedImage, tags: string[]) => {
-    try {
-      const result = await setImageTags(item.rel, tags);
-      setItems((prev) => prev.map((i) => i.rel === item.rel ? { ...i, tags: result.tags } : i));
-      const tagsData = await fetchImageTags();
-      setAllTags(tagsData.tags);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "设置标签失败");
-    }
-  };
-
-  const handleAddTag = (item: ManagedImage) => {
-    const tag = tagInput.trim();
-    if (!tag) return;
-    const current = item.tags ?? [];
-    if (current.includes(tag)) {
-      toast.error("标签已存在");
-      return;
-    }
-    void handleSetTags(item, [...current, tag]);
-    setTagInput("");
-  };
-
-  const handleRemoveTag = (item: ManagedImage, tag: string) => {
-    void handleSetTags(item, (item.tags ?? []).filter((t) => t !== tag));
-  };
-
-  const toggleFilterTag = (tag: string) => {
-    setSelectedTags((prev) => prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]);
-    setPage(1);
-  };
-
-  const [pressingTag, setPressingTag] = useState<string | null>(null);
-  const pressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [tagDeleteTarget, setTagDeleteTarget] = useState<string | null>(null);
-
-  const handleDeleteTag = async (tag: string) => {
-    try {
-      const result = await deleteImageTag(tag);
-      setAllTags((prev) => prev.filter((t) => t !== tag));
-      setSelectedTags((prev) => prev.filter((t) => t !== tag));
-      setItems((prev) => prev.map((item) => ({
-        ...item,
-        tags: (item.tags ?? []).filter((t) => t !== tag),
-      })));
-      toast.success(`标签"${tag}"已删除，影响 ${result.removed_from} 张图片`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "删除标签失败");
-    }
-  };
-
-  const startTagPress = useCallback((tag: string) => {
-    setPressingTag(tag);
-    pressTimerRef.current = setTimeout(() => {
-      setPressingTag(null);
-      setTagDeleteTarget(tag);
-    }, LONG_PRESS_MS);
-  }, []);
-
-  const stopTagPress = useCallback(() => {
-    setPressingTag(null);
-    if (pressTimerRef.current) {
-      clearTimeout(pressTimerRef.current);
-      pressTimerRef.current = null;
-    }
-  }, []);
 
   const clearFilters = () => {
     setStartDate("");
@@ -252,7 +158,6 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
 
   const confirmDelete = async () => {
     if (!deleteMode || selectedCount === 0) return;
-    const previousPage = page;
     setIsDeleting(true);
     try {
       const data = await deleteManagedImages(
@@ -268,12 +173,6 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
       toast.success(`已删除 ${data.removed} 张图片`);
       setDeleteMode(null);
       setSelectedPaths([]);
-      const nextTotal = Math.max(0, total - Number(data.removed || 0));
-      const nextPage = Math.max(1, Math.min(previousPage, Math.ceil(nextTotal / pageSize) || 1));
-      if (nextPage !== previousPage) {
-        setPage(nextPage);
-        return;
-      }
       await loadImages();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除图片失败");
@@ -300,16 +199,20 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     if (selectedPaths.length === 0) return;
     setIsDownloading(true);
     try {
-      if (selectedPaths.length === 1) {
-        const selected = items.find((item) => imageKey(item) === selectedPaths[0]);
-        const data = await downloadManagedImage(selectedPaths[0]);
-        saveBlobAsFile(data.blob, data.filename || (selected?.name ? `${selected.name.replace(/\.[^.]+$/, "")}.jpg` : defaultImageDownloadName(selectedPaths[0], "jpg")));
-        toast.success("已下载 JPG 图片");
-        return;
+      const selectedMap = new Map(items.map((item) => [imageKey(item), item]));
+      for (let index = 0; index < selectedPaths.length; index += 1) {
+        const path = selectedPaths[index];
+        const selected = selectedMap.get(path);
+        const data = await downloadManagedImage(path);
+        saveBlobAsFile(
+          data.blob,
+          data.filename || (selected?.name ? `${selected.name.replace(/\.[^.]+$/, "")}.jpg` : defaultImageDownloadName(path, "jpg")),
+        );
+        if (index < selectedPaths.length - 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 180));
+        }
       }
-      const data = await downloadManagedImages(selectedPaths);
-      saveBlobAsFile(data.blob, data.filename || "images.zip");
-      toast.success(`已打包下载 ${selectedPaths.length} 张图片`);
+      toast.success(`已开始逐张下载 ${selectedPaths.length} 张图片`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "下载图片失败");
     } finally {
@@ -323,7 +226,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
 
   useEffect(() => {
     void loadImages();
-  }, [startDate, endDate, uploader, isAdmin, page]);
+  }, [page, startDate, endDate, uploader, isAdmin]);
 
   const renderImageCard = (item: ManagedImage) => {
     const key = imageKey(item);
@@ -431,8 +334,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
           </h1>
           <p className="text-sm leading-6 text-stone-500">
             {isSelfMode
-              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；下载会自动转成手机更友好的 JPG，图片仅保存 10 天，请及时保存。"
-              : "支持按日期和上传人筛选图片，分组查看、批量选择、打包下载并执行删除；下载会自动转成 JPG，图片仅保存 10 天。"}
+              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；支持直接下载到手机更友好的 JPG，图片仅保存 10 天，请及时保存。"
+              : "支持按日期和上传人筛选图片，分组查看、批量选择、逐张直接下载并执行删除；下载会自动转成 JPG，图片仅保存 10 天。"}
           </p>
         </div>
 
@@ -520,7 +423,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
             <div className="flex flex-wrap items-center gap-2 text-sm text-stone-600">
               <ImageIcon className="size-4" />
               <span>第 {safePage} / {pageCount} 页</span>
-              {selectedPaths.length > 0 ? <span>已选 {selectedPaths.length} 张</span> : null}
+              {selectedPaths.length > 0 ? <span>已选 {selectedPaths.length} 张（可跨页累计）</span> : null}
             </div>
 
             <div className="mt-3 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
@@ -528,15 +431,6 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => togglePaths(currentRows.map(imageKey), Boolean(checked))} />
                 本页全选
               </label>
-              <Button
-                variant="outline"
-                className="h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700 sm:h-9"
-                onClick={() => setDeleteMode("filtered")}
-                disabled={filterDeleteDisabled}
-              >
-                <SquareCheckBig className="size-4" />
-                按筛选全删
-              </Button>
               <Button variant="ghost" className="h-10 rounded-xl px-3 text-stone-500 sm:h-9" onClick={() => void loadImages()} disabled={isLoading}>
                 <RefreshCw className={cn("size-4", isLoading && "animate-spin")} />
                 刷新
@@ -641,40 +535,12 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
               {deleteDialogDescription}
             </DialogDescription>
           </DialogHeader>
-          <p className="text-sm text-stone-600">
-            确认删除 {selectedCount} 张图片吗？删除后无法恢复。
-          </p>
           <DialogFooter>
             <Button variant="outline" className="rounded-xl" onClick={() => setDeleteMode(null)} disabled={isDeleting}>
               取消
             </Button>
             <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmDelete()} disabled={isDeleting || selectedCount === 0}>
               {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : null}
-              确认删除
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog open={Boolean(tagDeleteTarget)} onOpenChange={(open) => { if (!open) setTagDeleteTarget(null); }}>
-        <DialogContent className="max-w-sm rounded-2xl">
-          <DialogHeader>
-            <DialogTitle>删除标签</DialogTitle>
-          </DialogHeader>
-          <p className="text-sm text-stone-600">
-            确定要删除标签 <span className="font-semibold">"{tagDeleteTarget}"</span> 吗？将从所有图片中移除该标签。
-          </p>
-          <DialogFooter>
-            <Button variant="outline" className="rounded-xl" onClick={() => setTagDeleteTarget(null)}>
-              取消
-            </Button>
-            <Button
-              variant="destructive"
-              className="rounded-xl"
-              onClick={() => {
-                if (tagDeleteTarget) void handleDeleteTag(tagDeleteTarget);
-                setTagDeleteTarget(null);
-              }}
-            >
               确认删除
             </Button>
           </DialogFooter>

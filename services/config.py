@@ -218,6 +218,13 @@ class ConfigStore:
             return 3
 
     @property
+    def image_task_worker_count(self) -> int:
+        try:
+            return max(1, int(self.data.get("image_task_worker_count", 10)))
+        except (TypeError, ValueError):
+            return 10
+
+    @property
     def auto_remove_invalid_accounts(self) -> bool:
         return _bool_from_config(self.data, "auto_remove_invalid_accounts", False)
 
@@ -332,6 +339,7 @@ class ConfigStore:
         data["image_retention_days"] = self.image_retention_days
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_task_worker_count"] = self.image_task_worker_count
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["auto_sync_cpa"] = self.auto_sync_cpa

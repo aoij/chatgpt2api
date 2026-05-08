@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Clock3, LoaderCircle, Sparkles } from "lucide-react";
 
+import { ImageThumbnail, getImageThumbnailUrl } from "@/components/image-thumbnail";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { getManagedImagePathFromUrl, type PublicConfig } from "@/lib/api";
@@ -19,8 +20,14 @@ export type ImageLightboxItem = {
 
 type ImageResultsProps = {
   selectedConversation: ImageConversation | null;
+  isLoadingConversationDetail?: boolean;
   onOpenLightbox: (images: ImageLightboxItem[], index: number) => void;
   onContinueEdit: (conversationId: string, image: StoredImage | StoredReferenceImage) => void;
+  onDeletePrompt?: (conversationId: string, turnId: string) => void;
+  onDeleteResults?: (conversationId: string, turnId: string) => void;
+  onReuseTurnConfig?: (conversationId: string, turnId: string) => void;
+  onRegenerateTurn?: (conversationId: string, turnId: string) => void;
+  onRetryImage?: (conversationId: string, turnId: string, imageId: string) => void;
   formatConversationTime: (value: string) => string;
   publicConfig?: PublicConfig | null;
 };
@@ -30,6 +37,16 @@ function getStoredImageSrc(image: StoredImage) {
     return `data:image/png;base64,${image.b64_json}`;
   }
   return image.url || "";
+}
+
+function getStoredImagePreviewSrc(image: StoredImage) {
+  if (image.b64_json) {
+    return `data:image/png;base64,${image.b64_json}`;
+  }
+  if (image.url) {
+    return getImageThumbnailUrl(image.url);
+  }
+  return "";
 }
 
 function friendlyDisplayError(error?: string) {
@@ -45,6 +62,7 @@ function friendlyDisplayError(error?: string) {
 
 export function ImageResults({
   selectedConversation,
+  isLoadingConversationDetail = false,
   onOpenLightbox,
   onContinueEdit,
   formatConversationTime,
@@ -63,6 +81,16 @@ export function ImageResults({
   };
 
   if (!selectedConversation) {
+    if (isLoadingConversationDetail) {
+      return (
+        <div className="flex h-full min-h-[260px] items-center justify-center text-center sm:min-h-[420px]">
+          <div className="flex items-center gap-3 text-sm text-stone-500">
+            <LoaderCircle className="size-4 animate-spin" />
+            正在加载会话内容
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex h-full min-h-[260px] items-center justify-center text-center sm:min-h-[420px]">
         <div className="w-full max-w-4xl px-2">
@@ -143,6 +171,8 @@ export function ImageResults({
                                 src={image.dataUrl}
                                 alt={image.name || `参考图 ${index + 1}`}
                                 className="absolute inset-0 h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]"
+                                loading="lazy"
+                                decoding="async"
                               />
                             </button>
                             <Button
@@ -171,6 +201,7 @@ export function ImageResults({
                   <div className="columns-1 gap-3 space-y-3 sm:columns-2 sm:gap-4 sm:space-y-4 xl:columns-3">
                     {turn.images.map((image, index) => {
                       const imageSrc = image.status === "success" ? getStoredImageSrc(image) : "";
+                      const imagePreviewSrc = image.status === "success" ? getStoredImagePreviewSrc(image) : "";
                       if (image.status === "success" && imageSrc) {
                         const currentIndex = successfulTurnImages.findIndex((item) => item.id === image.id);
                         const sizeLabel = image.b64_json ? formatBase64ImageSize(image.b64_json) : "";
@@ -187,16 +218,24 @@ export function ImageResults({
                               onClick={() => onOpenLightbox(successfulTurnImages, currentIndex)}
                               className="group block w-full cursor-zoom-in"
                             >
-                              <img
+                              <ImageThumbnail
                                 src={imageSrc}
+                                thumbnailSrc={image.url ? imagePreviewSrc : undefined}
                                 alt={`Generated result ${index + 1}`}
-                                className="block h-auto w-full transition duration-200 group-hover:brightness-90"
-                                onLoad={(event) => {
-                                  updateImageDimensions(
-                                    image.id,
-                                    event.currentTarget.naturalWidth,
-                                    event.currentTarget.naturalHeight,
-                                  );
+                                className="block w-full bg-stone-50"
+                                imageClassName="block h-auto w-full object-contain transition duration-200 group-hover:brightness-90"
+                                imgProps={{
+                                  loading: "lazy",
+                                  decoding: "async",
+                                  onLoad: image.b64_json
+                                    ? (event) => {
+                                        updateImageDimensions(
+                                          image.id,
+                                          event.currentTarget.naturalWidth,
+                                          event.currentTarget.naturalHeight,
+                                        );
+                                      }
+                                    : undefined,
                                 }}
                               />
                             </button>

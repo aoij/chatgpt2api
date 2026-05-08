@@ -6,14 +6,17 @@ import os
 import queue
 import threading
 import time
+import hashlib
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from services.account_service import account_service
 from services.auth_service import ImageQuotaExceeded, auth_service
 from services.config import DATA_DIR, config
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from utils.log import logger
 try:
@@ -35,6 +38,8 @@ DEFAULT_RABBITMQ_PORT = 5672
 DEFAULT_RABBITMQ_QUEUE = "chatgpt2api.image_tasks"
 DEFAULT_RABBITMQ_RETRY_DELAY_SECONDS = 5
 DEFAULT_TASK_LIST_LIMIT = 24
+MAX_IMAGE_TASK_WORKERS = 24
+DEFAULT_PERSIST_WORKERS = 4
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -94,6 +99,11 @@ def _task_key(owner_id: str, task_id: str) -> str:
     return f"{owner_id}:{task_id}"
 
 
+def _hash_account_id(access_token: str) -> str:
+    token = _clean(access_token)
+    return hashlib.sha1(token.encode("utf-8")).hexdigest()[:16] if token else ""
+
+
 def _collect_image_urls(data: list[Any]) -> list[str]:
     urls: list[str] = []
     for item in data:
@@ -116,6 +126,14 @@ def _count_success_images(data: object) -> int:
     return count
 
 
+def _strip_task_item_runtime_fields(item: dict[str, Any]) -> dict[str, Any]:
+    cleaned = dict(item)
+    cleaned.pop("_persist", None)
+    cleaned.pop("_persist_status", None)
+    cleaned.pop("_persist_error", None)
+    return cleaned
+
+
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     item = {
         "id": task.get("id"),
@@ -134,6 +152,9 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         item["duration_ms"] = task.get("duration_ms")
     if isinstance(task.get("metrics"), dict):
         item["metrics"] = task.get("metrics")
+    persist_summary = task.get("persist_summary")
+    if isinstance(persist_summary, dict):
+        item["persist_summary"] = dict(persist_summary)
     return item
 
 
@@ -145,9 +166,12 @@ def _compact_image_data(data: object) -> object:
         if not isinstance(item, dict):
             result.append(item)
             continue
-        next_item = dict(item)
+        next_item = _strip_task_item_runtime_fields(item)
         if next_item.get("url"):
             next_item.pop("b64_json", None)
+        persist_status = _clean(item.get("_persist_status"))
+        if persist_status:
+            next_item["persist_status"] = persist_status
         result.append(next_item)
     return result
 
@@ -240,6 +264,14 @@ class ImageTaskService:
         self._upstream_condition = threading.Condition()
         self._active_upstream_slots = 0
         self._started_worker_count = 0
+        self._persist_queue: queue.Queue[tuple[str, dict[str, Any], dict[str, Any]]] = queue.Queue()
+        self._persist_worker_count = _env_int(
+            "CHATGPT2API_IMAGE_PERSIST_WORKERS",
+            DEFAULT_PERSIST_WORKERS,
+            minimum=1,
+            maximum=8,
+        )
+        self._persist_threads_started = 0
         self._dirty = False
         self._running_task_timeout_seconds = _env_int(
             "CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS",
@@ -285,14 +317,14 @@ class ImageTaskService:
         configured = getattr(config, "data", {}).get("image_task_worker_count")
         if configured is not None:
             try:
-                return min(max(int(configured), 1), 16)
+                return min(max(int(configured), 1), MAX_IMAGE_TASK_WORKERS)
             except (TypeError, ValueError):
                 pass
         return _env_int(
             "CHATGPT2API_IMAGE_TASK_WORKERS",
             getattr(config, "image_task_worker_count", DEFAULT_IMAGE_TASK_WORKERS),
             minimum=1,
-            maximum=16,
+            maximum=MAX_IMAGE_TASK_WORKERS,
         )
 
     def reload_runtime_settings(self) -> dict[str, int]:
@@ -339,8 +371,10 @@ class ImageTaskService:
             "n": 1,
             "size": size,
             "response_format": "url",
+            "defer_local_save": True,
             "base_url": base_url,
             "uploader": _uploader_from_identity(identity),
+            "selected_account_id": _clean(identity.get("selected_account_id")),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -362,8 +396,10 @@ class ImageTaskService:
             "n": 1,
             "size": size,
             "response_format": "url",
+            "defer_local_save": True,
             "base_url": base_url,
             "uploader": _uploader_from_identity(identity),
+            "selected_account_id": _clean(identity.get("selected_account_id")),
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 
@@ -439,6 +475,7 @@ class ImageTaskService:
                     "resolve_urls_ms": _avg_metric("resolve_urls_ms"),
                     "download_images_ms": _avg_metric("download_images_ms"),
                     "save_images_ms": _avg_metric("save_images_ms"),
+                    "background_download_images_ms": _avg_metric("background_download_images_ms"),
                 },
             }
 
@@ -512,6 +549,7 @@ class ImageTaskService:
 
     def _start_workers(self) -> None:
         self._ensure_worker_threads()
+        self._ensure_persist_threads()
 
     def _ensure_worker_threads(self) -> None:
         while self._started_worker_count < self._worker_count:
@@ -521,6 +559,18 @@ class ImageTaskService:
                 target=self._rabbitmq_worker if self._rabbitmq_enabled else self._worker,
                 args=(index,),
                 name=f"image-task-worker-{index}",
+                daemon=True,
+            )
+            thread.start()
+
+    def _ensure_persist_threads(self) -> None:
+        while self._persist_threads_started < self._persist_worker_count:
+            self._persist_threads_started += 1
+            index = self._persist_threads_started
+            thread = threading.Thread(
+                target=self._persist_worker,
+                args=(index,),
+                name=f"image-persist-worker-{index}",
                 daemon=True,
             )
             thread.start()
@@ -671,6 +721,26 @@ class ImageTaskService:
                     except Exception:
                         pass
 
+    def _persist_worker(self, worker_index: int) -> None:
+        while True:
+            try:
+                key, item, context = self._persist_queue.get(timeout=5)
+            except queue.Empty:
+                continue
+            try:
+                self._persist_task_image(key, item, context)
+            except Exception as exc:
+                logger.warning(
+                    {
+                        "event": "image_task_persist_worker_failed",
+                        "worker": worker_index,
+                        "key": key,
+                        "error": str(exc),
+                    }
+                )
+            finally:
+                self._persist_queue.task_done()
+
     def _log_task_call(self, key: str, *, started: float, status: str, result: object = None, error: str = "") -> None:
         task = self._tasks.get(key, {})
         endpoint = "/v1/images/edits" if task.get("mode") == "edit" else "/v1/images/generations"
@@ -700,6 +770,251 @@ class ImageTaskService:
         if status != "success":
             summary = "图生图调用失败" if endpoint.endswith("/edits") else "文生图调用失败"
         log_service.add(LOG_TYPE_CALL, summary, detail)
+
+    def _persist_summary(self, data: list[Any]) -> dict[str, int]:
+        pending = 0
+        completed = 0
+        failed = 0
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            status = _clean(item.get("_persist_status"))
+            if status == "done":
+                completed += 1
+            elif status == "error":
+                failed += 1
+            elif isinstance(item.get("_persist"), dict):
+                pending += 1
+        return {
+            "pending": pending,
+            "completed": completed,
+            "failed": failed,
+        }
+
+    def _prepare_persist_jobs(
+        self,
+        key: str,
+        payload: dict[str, Any],
+        data: list[Any],
+    ) -> tuple[dict[str, int], list[tuple[str, dict[str, Any], dict[str, Any]]]]:
+        context = {
+            "base_url": _clean(payload.get("base_url"), _clean(getattr(config, "base_url", ""))),
+            "uploader": payload.get("uploader") if isinstance(payload.get("uploader"), dict) else None,
+            "selected_account_id": _clean(payload.get("selected_account_id")),
+        }
+        jobs: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if not isinstance(item.get("_persist"), dict):
+                continue
+            item["_persist_status"] = "queued"
+            item.pop("_persist_error", None)
+            jobs.append((key, dict(item), dict(context)))
+        return self._persist_summary(data), jobs
+
+    def _enqueue_persist_jobs(self, jobs: list[tuple[str, dict[str, Any], dict[str, Any]]]) -> None:
+        for key, item, context in jobs:
+            try:
+                self._persist_queue.put_nowait((key, item, context))
+            except Exception:
+                self._update_persist_result(key, item, None, "persist queue unavailable", 0)
+
+    def _persist_task_image(self, key: str, queued_item: dict[str, Any], context: dict[str, Any]) -> None:
+        persist_meta = queued_item.get("_persist") if isinstance(queued_item.get("_persist"), dict) else {}
+        persist_id = _clean(persist_meta.get("id"))
+        source_url = _clean(persist_meta.get("source_url"))
+        conversation_id = _clean(persist_meta.get("conversation_id"))
+        file_ids = [
+            _clean(item) for item in (persist_meta.get("file_ids") if isinstance(persist_meta.get("file_ids"), list) else [])
+            if _clean(item)
+        ]
+        sediment_ids = [
+            _clean(item) for item in (persist_meta.get("sediment_ids") if isinstance(persist_meta.get("sediment_ids"), list) else [])
+            if _clean(item)
+        ]
+        position = max(1, int(persist_meta.get("position") or 1))
+        account_id = _clean(persist_meta.get("account_id")) or _clean(context.get("selected_account_id"))
+        if not persist_id and not source_url:
+            self._update_persist_result(key, queued_item, None, "missing source url")
+            return
+        started = time.time()
+        saved_url = ""
+        error = ""
+        try:
+            content = b""
+            last_download_error: Exception | None = None
+            for token in self._resolve_persist_access_tokens(account_id):
+                try:
+                    backend = OpenAIBackendAPI(access_token=token)
+                    content = self._download_persist_image_bytes(
+                        backend=backend,
+                        source_url=source_url,
+                        conversation_id=conversation_id,
+                        file_ids=file_ids,
+                        sediment_ids=sediment_ids,
+                        position=position,
+                    )
+                    if content:
+                        break
+                except Exception as exc:
+                    last_download_error = exc
+                    logger.warning(
+                        {
+                            "event": "image_task_persist_account_retry",
+                            "account_id": _hash_account_id(token),
+                            "conversation_id": conversation_id,
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+            if not content and last_download_error is not None:
+                raise last_download_error
+            if not content:
+                raise RuntimeError("upstream image download returned empty body")
+            from services.openai_backend_api import _is_image_bytes
+            if not _is_image_bytes(content):
+                raise RuntimeError("upstream image download returned non-image body")
+            from services.protocol.conversation import save_image_bytes
+            saved_url = save_image_bytes(
+                content,
+                _clean(context.get("base_url"), _clean(getattr(config, "base_url", ""))) or None,
+                context.get("uploader") if isinstance(context.get("uploader"), dict) else None,
+            )
+        except Exception as exc:
+            from services.openai_backend_api import _friendly_image_download_error
+            error = _friendly_image_download_error(exc)
+        finally:
+            elapsed_ms = max(0, int((time.time() - started) * 1000))
+            self._update_persist_result(key, queued_item, saved_url or None, error, elapsed_ms)
+
+    def _resolve_persist_access_tokens(self, preferred_account_id: str) -> list[str]:
+        preferred_id = _clean(preferred_account_id)
+        ordered_tokens: list[str] = []
+        seen_tokens: set[str] = set()
+
+        def _append_token(token_value: object) -> None:
+            token = _clean(token_value)
+            if not token or token in seen_tokens:
+                return
+            ordered_tokens.append(token)
+            seen_tokens.add(token)
+
+        if preferred_id:
+            for token in account_service.tokens_for_ids([preferred_id]):
+                _append_token(token)
+        for item in account_service.list_token_items():
+            _append_token(item.get("access_token"))
+        if ordered_tokens:
+            return ordered_tokens
+        raise RuntimeError("no available account for background image persist")
+
+    def _download_persist_image_bytes(
+        self,
+        *,
+        backend: OpenAIBackendAPI,
+        source_url: str,
+        conversation_id: str,
+        file_ids: list[str],
+        sediment_ids: list[str],
+        position: int,
+    ) -> bytes:
+        urls_to_try: list[str] = []
+        primary_url = _clean(source_url)
+        if primary_url:
+            urls_to_try.append(primary_url)
+        if conversation_id or file_ids or sediment_ids:
+            try:
+                refreshed_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids, poll=False)
+            except Exception as exc:
+                logger.warning(
+                    {
+                        "event": "image_task_persist_resolve_urls_failed",
+                        "conversation_id": conversation_id,
+                        "file_ids": file_ids,
+                        "sediment_ids": sediment_ids,
+                        "error": str(exc),
+                    }
+                )
+                refreshed_urls = []
+            for candidate in refreshed_urls:
+                candidate_url = _clean(candidate)
+                if candidate_url and candidate_url not in urls_to_try:
+                    urls_to_try.append(candidate_url)
+        if not urls_to_try:
+            raise RuntimeError("missing image download url")
+        preferred_index = max(0, position - 1)
+        if preferred_index < len(urls_to_try):
+            urls_to_try = [urls_to_try[preferred_index]] + [url for idx, url in enumerate(urls_to_try) if idx != preferred_index]
+        last_error: Exception | None = None
+        for candidate in urls_to_try:
+            try:
+                images = backend.download_image_bytes([candidate])
+                if images and isinstance(images[0], (bytes, bytearray)):
+                    return bytes(images[0])
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    {
+                        "event": "image_task_persist_download_failed",
+                        "conversation_id": conversation_id,
+                        "candidate_url": candidate,
+                        "error": str(exc),
+                    }
+                )
+                continue
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("upstream image download returned empty body")
+
+    def _update_persist_result(
+        self,
+        key: str,
+        queued_item: dict[str, Any],
+        saved_url: str | None,
+        error: str = "",
+        elapsed_ms: int = 0,
+    ) -> None:
+        persist_lookup = (queued_item.get("_persist") or {}) if isinstance(queued_item.get("_persist"), dict) else {}
+        persist_id = _clean(persist_lookup.get("id"))
+        source_url = _clean(persist_lookup.get("source_url"))
+        with self._lock:
+            task = self._tasks.get(key)
+            if task is None:
+                return
+            raw_data = task.get("data")
+            if not isinstance(raw_data, list):
+                return
+            changed = False
+            for item in raw_data:
+                if not isinstance(item, dict):
+                    continue
+                persist_meta = item.get("_persist") if isinstance(item.get("_persist"), dict) else {}
+                current_persist_id = _clean(persist_meta.get("id"))
+                current_source_url = _clean(persist_meta.get("source_url"))
+                if persist_id and current_persist_id != persist_id:
+                    continue
+                if not persist_id and source_url and current_source_url != source_url:
+                    continue
+                if saved_url:
+                    item["url"] = saved_url
+                    item["_persist_status"] = "done"
+                    item.pop("_persist_error", None)
+                else:
+                    item["_persist_status"] = "error"
+                    item["_persist_error"] = error or "persist failed"
+                changed = True
+                break
+            if not changed:
+                return
+            metrics = dict(task.get("metrics") or {})
+            if elapsed_ms > 0:
+                metrics["background_download_images_ms"] = int(metrics.get("background_download_images_ms") or 0) + elapsed_ms
+            task["metrics"] = metrics
+            task["persist_summary"] = self._persist_summary(raw_data)
+            task["updated_at"] = _now_iso()
+            self._dirty = True
+            self._save_locked()
 
     def _run_task(self, key: str, mode: str, payload: dict[str, Any]) -> None:
         slot_wait_started = time.time()
@@ -733,6 +1048,7 @@ class ImageTaskService:
             metrics = dict(result.get("metrics") or {})
             metrics["slot_wait_ms"] = slot_wait_ms
             success_count = _count_success_images(data)
+            persist_summary, persist_jobs = self._prepare_persist_jobs(key, payload, data)
             reserved_quota = 0
             owner_id = ""
             with self._lock:
@@ -746,12 +1062,15 @@ class ImageTaskService:
             self._update_task(
                 key,
                 status=TASK_STATUS_SUCCESS,
-                data=_compact_image_data(data),
+                data=data,
                 error="",
                 duration_ms=duration_ms,
                 reserved_quota=0,
                 metrics=metrics,
+                persist_summary=persist_summary,
             )
+            if persist_jobs:
+                self._enqueue_persist_jobs(persist_jobs)
             logger.info({
                 "event": "image_task_success",
                 "key": key,
@@ -838,6 +1157,13 @@ class ImageTaskService:
             metrics = item.get("metrics")
             if isinstance(metrics, dict):
                 task["metrics"] = metrics
+            persist_summary = item.get("persist_summary")
+            if isinstance(persist_summary, dict):
+                task["persist_summary"] = {
+                    "pending": int(persist_summary.get("pending") or 0),
+                    "completed": int(persist_summary.get("completed") or 0),
+                    "failed": int(persist_summary.get("failed") or 0),
+                }
             error = _clean(item.get("error"))
             if error:
                 task["error"] = error

@@ -30,6 +30,7 @@ export function TopNav() {
   const router = useRouter();
   const [session, setSession] = useState<StoredAuthSession | null | undefined>(undefined);
   const [publicConfig, setPublicConfig] = useState<PublicConfig | null>(null);
+  const [navigatingHref, setNavigatingHref] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -70,6 +71,10 @@ export function TopNav() {
     return () => {
       active = false;
     };
+  }, [pathname]);
+
+  useEffect(() => {
+    setNavigatingHref("");
   }, [pathname]);
 
   const handleLogout = async () => {
@@ -121,11 +126,21 @@ export function TopNav() {
               <Link
                 key={item.href}
                 href={item.href}
+                onClick={() => {
+                  if (pathname !== item.href) {
+                    setNavigatingHref(item.href);
+                  }
+                }}
+                onMouseEnter={() => {
+                  router.prefetch(item.href);
+                }}
                 className={cn(
                   "relative shrink-0 snap-start whitespace-nowrap rounded-full px-3 py-1.5 text-[13px] font-medium transition sm:rounded-none sm:px-0 sm:py-1 sm:text-[15px]",
                   active
                     ? "bg-stone-950 text-white sm:bg-transparent sm:font-semibold sm:text-stone-950"
-                    : "text-stone-500 hover:text-stone-900",
+                    : navigatingHref === item.href
+                      ? "bg-stone-100 text-stone-700 sm:bg-transparent sm:text-stone-700"
+                      : "text-stone-500 hover:text-stone-900",
                 )}
               >
                 {item.label}

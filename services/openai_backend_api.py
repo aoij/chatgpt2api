@@ -1,6 +1,7 @@
 import base64
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -39,6 +40,15 @@ DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 IMAGE_DOWNLOAD_RETRY_ATTEMPTS = 4
+IMAGE_SSE_IDLE_TIMEOUT_SECONDS = float(os.getenv("CHATGPT2API_IMAGE_SSE_IDLE_TIMEOUT_SECONDS", "75"))
+IMAGE_SSE_TOTAL_TIMEOUT_SECONDS = float(os.getenv("CHATGPT2API_IMAGE_SSE_TOTAL_TIMEOUT_SECONDS", "420"))
+IMAGE_UPLOAD_PREPARE_DELAY_SECONDS = float(os.getenv("CHATGPT2API_IMAGE_UPLOAD_PREPARE_DELAY_SECONDS", "0.15"))
+BOOTSTRAP_CACHE_TTL_SECONDS = float(os.getenv("CHATGPT2API_BOOTSTRAP_CACHE_TTL_SECONDS", "300"))
+IMAGE_POLL_MIN_INTERVAL_SECONDS = float(os.getenv("CHATGPT2API_IMAGE_POLL_MIN_INTERVAL_SECONDS", "1.5"))
+IMAGE_POLL_MAX_INTERVAL_SECONDS = float(os.getenv("CHATGPT2API_IMAGE_POLL_MAX_INTERVAL_SECONDS", "3.0"))
+
+_BOOTSTRAP_CACHE_LOCK = threading.Lock()
+_BOOTSTRAP_CACHE: dict[str, tuple[float, list[str], str]] = {}
 
 
 def _is_image_bytes(content: bytes) -> bool:
@@ -541,7 +551,8 @@ class OpenAIBackendAPI:
         )
         ensure_ok(response, path)
         upload_meta = response.json()
-        time.sleep(0.5)
+        if IMAGE_UPLOAD_PREPARE_DELAY_SECONDS > 0:
+            time.sleep(IMAGE_UPLOAD_PREPARE_DELAY_SECONDS)
         response = self.session.put(
             upload_meta["upload_url"],
             headers={
@@ -716,7 +727,9 @@ class OpenAIBackendAPI:
                 return [], sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
-            time.sleep(4)
+            elapsed = time.time() - start
+            poll_interval = IMAGE_POLL_MIN_INTERVAL_SECONDS if elapsed < 20 else IMAGE_POLL_MAX_INTERVAL_SECONDS
+            time.sleep(max(0.5, poll_interval))
         logger.info({"event": "image_poll_timeout", "conversation_id": conversation_id, "timeout_secs": timeout_secs})
         return [], []
 
@@ -921,14 +934,34 @@ class OpenAIBackendAPI:
         self._bootstrap()
         requirements = self._get_chat_requirements()
         conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+        logger.info({
+            "event": "image_stream_start",
+            "model": model,
+            "reference_count": len(references),
+            "idle_timeout_secs": IMAGE_SSE_IDLE_TIMEOUT_SECONDS,
+            "total_timeout_secs": IMAGE_SSE_TOTAL_TIMEOUT_SECONDS,
+        })
         response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
         try:
-            yield from iter_sse_payloads(response)
+            yield from iter_sse_payloads(
+                response,
+                idle_timeout_secs=IMAGE_SSE_IDLE_TIMEOUT_SECONDS,
+                total_timeout_secs=IMAGE_SSE_TOTAL_TIMEOUT_SECONDS,
+            )
         finally:
             response.close()
 
-    def _bootstrap(self) -> None:
+    def _bootstrap(self, force: bool = False) -> None:
         """预热首页，并提取 PoW 相关脚本引用。"""
+        cache_key = str(self.base_url or "").rstrip("/") or self.base_url
+        now = time.time()
+        if not force:
+            with _BOOTSTRAP_CACHE_LOCK:
+                cached = _BOOTSTRAP_CACHE.get(cache_key)
+            if cached and now - cached[0] < BOOTSTRAP_CACHE_TTL_SECONDS:
+                self.pow_script_sources = list(cached[1])
+                self.pow_data_build = cached[2]
+                return
         response = self.session.get(
             self.base_url + "/",
             headers=self._bootstrap_headers(),
@@ -938,24 +971,43 @@ class OpenAIBackendAPI:
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
         if not self.pow_script_sources:
             self.pow_script_sources = [DEFAULT_POW_SCRIPT]
+        with _BOOTSTRAP_CACHE_LOCK:
+            _BOOTSTRAP_CACHE[cache_key] = (
+                time.time(),
+                list(self.pow_script_sources),
+                self.pow_data_build,
+            )
 
     def _get_chat_requirements(self) -> ChatRequirements:
         """获取当前模式对话所需的 sentinel token。"""
         path = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
         context = "auth_chat_requirements" if self.access_token else "noauth_chat_requirements"
-        body = {"p": build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)}
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._headers(path, {"Content-Type": "application/json"}),
-            json=body,
-            timeout=30,
-        )
-        ensure_ok(response, context)
-        requirements = self._build_requirements(response.json(), "" if self.access_token else body["p"])
-        if not requirements.token:
-            message = "missing auth chat requirements token" if self.access_token else "missing chat requirements token"
-            raise RuntimeError(f"{message}: {requirements.raw_finalize}")
-        return requirements
+        last_error: Exception | None = None
+        for attempt in range(2):
+            if attempt == 0:
+                if not self.pow_script_sources:
+                    self._bootstrap()
+            else:
+                logger.info({"event": "chat_requirements_retry_after_bootstrap_refresh"})
+                self._bootstrap(force=True)
+            body = {"p": build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)}
+            try:
+                response = self.session.post(
+                    self.base_url + path,
+                    headers=self._headers(path, {"Content-Type": "application/json"}),
+                    json=body,
+                    timeout=30,
+                )
+                ensure_ok(response, context)
+                requirements = self._build_requirements(response.json(), "" if self.access_token else body["p"])
+                if not requirements.token:
+                    message = "missing auth chat requirements token" if self.access_token else "missing chat requirements token"
+                    raise RuntimeError(f"{message}: {requirements.raw_finalize}")
+                return requirements
+            except Exception as exc:
+                last_error = exc
+        assert last_error is not None
+        raise last_error
 
     def _chat_target(self) -> tuple[str, str]:
         if self.access_token:

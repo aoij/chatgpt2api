@@ -104,16 +104,69 @@ def anthropic_sse_stream(items) -> Iterator[str]:
         yield f"data: {json.dumps(error, ensure_ascii=False)}\n\n"
 
 
-def iter_sse_payloads(response: requests.Response) -> Iterator[str]:
-    for raw_line in response.iter_lines():
-        if not raw_line:
-            continue
-        line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
-        if not line.startswith("data:"):
-            continue
-        payload = line[5:].strip()
-        if payload:
-            yield payload
+def iter_sse_payloads(
+        response: requests.Response,
+        *,
+        idle_timeout_secs: float | None = None,
+        total_timeout_secs: float | None = None,
+) -> Iterator[str]:
+    chunks: queue.Queue[tuple[str, object]] = queue.Queue()
+    stop_event = threading.Event()
+
+    def producer() -> None:
+        try:
+            for raw_line in response.iter_lines():
+                if stop_event.is_set():
+                    break
+                chunks.put(("line", raw_line))
+        except Exception as exc:
+            chunks.put(("error", exc))
+        finally:
+            chunks.put(("done", None))
+
+    threading.Thread(target=producer, name="sse-payload-producer", daemon=True).start()
+    started_at = time.monotonic()
+    last_activity_at = started_at
+
+    try:
+        while True:
+            now = time.monotonic()
+            wait_candidates = [1.0]
+            if idle_timeout_secs and idle_timeout_secs > 0:
+                wait_candidates.append(max(0.05, idle_timeout_secs - (now - last_activity_at)))
+            if total_timeout_secs and total_timeout_secs > 0:
+                wait_candidates.append(max(0.05, total_timeout_secs - (now - started_at)))
+            try:
+                kind, payload = chunks.get(timeout=min(wait_candidates))
+            except queue.Empty:
+                now = time.monotonic()
+                if total_timeout_secs and total_timeout_secs > 0 and now - started_at >= total_timeout_secs:
+                    raise RuntimeError(f"SSE total timeout after {int(total_timeout_secs)}s")
+                if idle_timeout_secs and idle_timeout_secs > 0 and now - last_activity_at >= idle_timeout_secs:
+                    raise RuntimeError(f"SSE idle timeout after {int(idle_timeout_secs)}s")
+                continue
+
+            if kind == "error":
+                raise payload  # type: ignore[misc]
+            if kind == "done":
+                break
+
+            raw_line = payload
+            last_activity_at = time.monotonic()
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
+            if not line.startswith("data:"):
+                continue
+            payload_text = line[5:].strip()
+            if payload_text:
+                yield payload_text
+    finally:
+        stop_event.set()
+        try:
+            response.close()
+        except Exception:
+            pass
 
 
 def save_images_from_text(text: str, prefix: str) -> list[Path]:

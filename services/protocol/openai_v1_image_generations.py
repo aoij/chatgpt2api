@@ -16,6 +16,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     n = int(body.get("n") or 1)
     size = body.get("size")
     response_format = str(body.get("response_format") or "b64_json")
+    defer_local_save = bool(body.get("defer_local_save")) and response_format != "b64_json"
     base_url = str(body.get("base_url") or "") or None
     uploader = body.get("uploader") if isinstance(body.get("uploader"), dict) else None
     outputs = stream_image_outputs_with_pool(ConversationRequest(
@@ -27,6 +28,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         base_url=base_url,
         uploader=uploader,
         message_as_error=True,
+        defer_local_save=defer_local_save,
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

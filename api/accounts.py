@@ -34,6 +34,7 @@ class UserKeyUpdateRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
     quota: int | None = None
+    key: str | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -126,6 +127,7 @@ def create_router() -> APIRouter:
                 "name": body.name,
                 "enabled": body.enabled,
                 "quota": body.quota,
+                "key": body.key,
             }.items()
             if value is not None
         }
@@ -147,9 +149,24 @@ def create_router() -> APIRouter:
         return {"items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
-    async def get_accounts(compact: bool = Query(default=True), authorization: str | None = Header(default=None)):
+    async def get_accounts(
+            compact: bool = Query(default=True),
+            query: str = Query(default=""),
+            account_type: str = Query(default=""),
+            status: str = Query(default=""),
+            page: int = Query(default=1),
+            page_size: int = Query(default=10),
+            authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
-        return {"items": account_service.list_accounts(compact=compact)}
+        return account_service.list_accounts_page(
+            compact=compact,
+            query=query,
+            account_type=account_type,
+            status=status,
+            page=page,
+            page_size=page_size,
+        )
 
     @router.get("/api/accounts/summary")
     async def get_account_summary(authorization: str | None = Header(default=None)):
