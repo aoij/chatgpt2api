@@ -770,12 +770,26 @@ def build_image_download(rel: str, uploader: str = "") -> Optional[dict[str, obj
     }
 
 
-def build_images_zip(paths: list[str] | None, uploader: str = "") -> Optional[dict[str, object]]:
+def build_images_zip(
+    paths: list[str] | None,
+    uploader: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    all_matching: bool = False,
+) -> Optional[dict[str, object]]:
     """Build a permission-checked ZIP containing selected images as JPG files."""
-    normalized = _normalize_rel_paths(paths)
+    if all_matching:
+        normalized = _iter_image_rel_paths(start_date=start_date, end_date=end_date, uploader=uploader)
+    else:
+        normalized = _normalize_rel_paths(paths)
+        if start_date or end_date or uploader:
+            allowed = set(_iter_image_rel_paths(start_date=start_date, end_date=end_date, uploader=uploader))
+            normalized = [rel for rel in normalized if rel in allowed]
     if not normalized:
         return None
-    if len(normalized) > MAX_BATCH_DOWNLOAD:
+
+    truncated = len(normalized) > MAX_BATCH_DOWNLOAD
+    if truncated:
         normalized = normalized[:MAX_BATCH_DOWNLOAD]
 
     cleanup_expired_images_if_due()
@@ -820,7 +834,7 @@ def build_images_zip(paths: list[str] | None, uploader: str = "") -> Optional[di
         "content": content,
         "media_type": "application/zip",
         "count": added,
-        "truncated": len(_normalize_rel_paths(paths)) > MAX_BATCH_DOWNLOAD,
+        "truncated": truncated,
         "size": len(content),
     }
 

@@ -616,8 +616,11 @@ export async function downloadManagedImage(path: string) {
   return httpBlobRequest(`/api/images/download?${params.toString()}`);
 }
 
-export async function downloadManagedImages(paths: string[]) {
-  return httpBlobRequest("/api/images/download", { method: "POST", body: { paths } });
+export async function downloadManagedImages(
+  input: string[] | { paths?: string[]; start_date?: string; end_date?: string; uploader?: string; all_matching?: boolean },
+) {
+  const body = Array.isArray(input) ? { paths: input } : input;
+  return httpBlobRequest("/api/images/download", { method: "POST", body });
 }
 
 export function getManagedImagePathFromUrl(src: string) {

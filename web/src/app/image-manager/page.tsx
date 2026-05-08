@@ -82,6 +82,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isFilterDownloading, setIsFilterDownloading] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [deleteMode, setDeleteMode] = useState<"selected" | "filtered" | null>(null);
 
@@ -97,6 +98,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const activeUploaderName = uploaders.find((item) => item.key === uploader)?.name || uploader;
   const fixedViewerLabel = session.name || "当前令牌";
   const filterDeleteDisabled = isDeleting || total === 0 || !hasActiveFilter;
+  const filterZipDisabled = isFilterDownloading || total === 0 || !hasActiveFilter;
 
   const lightboxImages = items.map((item) => ({
     id: imageKey(item),
@@ -213,6 +215,25 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
       toast.error(error instanceof Error ? error.message : "下载 ZIP 失败");
     } finally {
       setIsDownloading(false);
+    }
+  };
+
+  const downloadFiltered = async () => {
+    if (total === 0 || !hasActiveFilter) return;
+    setIsFilterDownloading(true);
+    try {
+      const data = await downloadManagedImages({
+        start_date: startDate,
+        end_date: endDate,
+        ...(isAdmin && uploader ? { uploader } : {}),
+        all_matching: true,
+      });
+      saveBlobAsFile(data.blob, data.filename || `filtered-images-${Date.now()}.zip`);
+      toast.success(`已下载匹配筛选的 ZIP（最多打包 200 张）`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "下载筛选 ZIP 失败");
+    } finally {
+      setIsFilterDownloading(false);
     }
   };
 
@@ -402,6 +423,17 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
             <Button onClick={() => void loadImages()} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-3 text-white hover:bg-stone-800 sm:px-4">
               {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
               查询
+            </Button>
+
+            <Button
+              variant="outline"
+              onClick={() => void downloadFiltered()}
+              disabled={filterZipDisabled}
+              className="col-span-2 h-10 rounded-xl border-stone-200 bg-white px-3 text-stone-700 hover:bg-stone-100 sm:col-span-1 sm:px-4"
+              title={hasActiveFilter ? "按当前筛选条件打包下载，最多 200 张" : "请先选择日期或上传人筛选条件"}
+            >
+              {isFilterDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+              下载当前筛选 ZIP
             </Button>
 
             <Button

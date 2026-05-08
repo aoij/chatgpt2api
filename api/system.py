@@ -51,6 +51,10 @@ class BackupDeleteRequest(BaseModel):
 
 class ImageDownloadRequest(BaseModel):
     paths: list[str] = []
+    start_date: str = ""
+    end_date: str = ""
+    uploader: str = ""
+    all_matching: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -196,7 +200,10 @@ def create_router(app_version: str) -> APIRouter:
         identity = require_identity(authorization)
         payload = build_images_zip(
             body.paths,
-            uploader=_effective_image_uploader(identity),
+            uploader=_effective_image_uploader(identity, body.uploader),
+            start_date=body.start_date.strip(),
+            end_date=body.end_date.strip(),
+            all_matching=body.all_matching,
         )
         if payload is None:
             raise HTTPException(status_code=404, detail={"error": "images not found"})
