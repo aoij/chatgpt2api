@@ -6,7 +6,7 @@ from threading import Event
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import accounts, ai, image_tasks, register, system
@@ -77,7 +77,7 @@ def create_app() -> FastAPI:
     async def serve_web(full_path: str):
         asset = resolve_web_asset(full_path)
         if asset is not None:
-            if asset.suffix == ".html":
+            if asset.suffix in {".html", ".txt"}:
                 text = asset.read_text(encoding="utf-8")
                 # Cloudflare/browser may have cached the original chunk path.
                 # Add a version query so image-manager loads the patched chunk that uses WebP thumbnails.
@@ -90,7 +90,9 @@ def create_app() -> FastAPI:
                     "0sm2er~jf-i~i.js?v=log-thumb-20260428",
                 )
                 text = _inject_runtime_web_config(text)
-                return HTMLResponse(text, headers={"Cache-Control": "no-cache"})
+                if asset.suffix == ".html":
+                    return HTMLResponse(text, headers={"Cache-Control": "no-cache"})
+                return PlainTextResponse(text, headers={"Cache-Control": "no-cache"})
             return FileResponse(asset)
         if full_path.strip("/").startswith("_next/"):
             raise HTTPException(status_code=404, detail="Not Found")
