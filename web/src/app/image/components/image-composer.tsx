@@ -163,6 +163,12 @@ export function ImageComposer({
   }, [expandSignal]);
 
   useEffect(() => {
+    if (!isMobileViewport) {
+      setIsMobilePanelExpanded(true);
+    }
+  }, [isMobileViewport]);
+
+  useEffect(() => {
     if (!isSizeMenuOpen) {
       return;
     }
