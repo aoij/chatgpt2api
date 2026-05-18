@@ -208,6 +208,34 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertLessEqual(max_active, 2)
 
+    def test_handler_timeout_marks_error_and_releases_slot(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def handler(_payload):
+                time.sleep(1.3)
+                return {"data": [{"url": "http://example.test/image.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service._running_task_timeout_seconds = 1
+            original_call = service._call_handler_with_timeout
+
+            def short_timeout_call(handler_func, payload, _timeout_seconds):
+                return original_call(handler_func, payload, 1)
+
+            service._call_handler_with_timeout = short_timeout_call  # type: ignore[method-assign]
+            service.submit_generation(
+                OWNER,
+                client_task_id="timeout-task",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            task = wait_for_task(service, OWNER, "timeout-task", "error", timeout=2.0)
+            self.assertIn("超时", task.get("error", ""))
+            time.sleep(0.5)
+            self.assertEqual(service.get_runtime_stats()["active_upstream_slots"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

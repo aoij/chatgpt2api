@@ -360,6 +360,7 @@ class ImageTaskService:
         with self._lock:
             changed = self._cleanup_if_due_locked()
             changed = self._recover_stale_unfinished_locked() or changed
+            self._reset_upstream_slots_if_no_active_workers_locked()
             if changed:
                 self._save_locked()
             tasks = sorted(
@@ -545,6 +546,16 @@ class ImageTaskService:
             if self._active_upstream_slots > 0:
                 self._active_upstream_slots -= 1
             self._upstream_condition.notify_all()
+
+    def _reset_upstream_slots_if_no_active_workers_locked(self) -> bool:
+        if self._active_worker_tasks:
+            return False
+        with self._upstream_condition:
+            if self._active_upstream_slots <= 0:
+                return False
+            self._active_upstream_slots = 0
+            self._upstream_condition.notify_all()
+        return True
 
     def _enqueue_task(self, key: str, mode: str, payload: dict[str, Any]) -> None:
         self._queue.put((key, mode, payload))
@@ -815,6 +826,36 @@ class ImageTaskService:
             raise last_error
         raise RuntimeError("upstream image download returned empty body")
 
+    def _call_handler_with_timeout(
+        self,
+        handler: Callable[[dict[str, Any]], dict[str, Any]],
+        payload: dict[str, Any],
+        timeout_seconds: int,
+    ) -> dict[str, Any]:
+        result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+        def _target() -> None:
+            try:
+                result_queue.put(("ok", handler(payload)))
+            except Exception as exc:
+                result_queue.put(("error", exc))
+
+        thread = threading.Thread(
+            target=_target,
+            name=f"image-task-call-{int(time.time() * 1000)}",
+            daemon=True,
+        )
+        thread.start()
+        try:
+            status, value = result_queue.get(timeout=max(1, int(timeout_seconds)))
+        except queue.Empty:
+            raise RuntimeError(f"图片任务处理超时（超过 {timeout_seconds} 秒），已自动失败并返还额度，请稍后重试")
+        if status == "error":
+            raise value  # type: ignore[misc]
+        if not isinstance(value, dict):
+            raise RuntimeError("image task returned streaming result unexpectedly")
+        return value
+
     def _update_persist_result(
         self,
         key: str,
@@ -885,9 +926,8 @@ class ImageTaskService:
                 "upstream_concurrency": self._upstream_concurrency,
             })
             handler = self.edit_handler if mode == "edit" else self.generation_handler
-            result = handler(payload)
-            if not isinstance(result, dict):
-                raise RuntimeError("image task returned streaming result unexpectedly")
+            handler_timeout_seconds = max(1, self._running_task_timeout_seconds - int(time.time() - slot_wait_started))
+            result = self._call_handler_with_timeout(handler, payload, handler_timeout_seconds)
             data = result.get("data")
             if not isinstance(data, list) or not data:
                 upstream = _clean(result.get("message"))
