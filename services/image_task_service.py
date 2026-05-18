@@ -386,7 +386,7 @@ class ImageTaskService:
                 ]
                 return int(sum(values) / len(values)) if values else 0
 
-            effective_parallel = max(1, running or self._worker_count or 1)
+            effective_parallel = max(1, min(self._worker_count or 1, self._upstream_concurrency or 1))
             estimated_wait_ms = int((queued / effective_parallel) * avg_duration_ms) if queued > 0 and avg_duration_ms > 0 else 0
             oldest_running_seconds = 0
             now = time.time()
@@ -552,7 +552,8 @@ class ImageTaskService:
     def _worker(self, worker_index: int) -> None:
         while True:
             if not self._worker_enabled(worker_index):
-                return
+                time.sleep(1)
+                continue
             try:
                 key, mode, payload = self._queue.get(timeout=5)
             except queue.Empty:
