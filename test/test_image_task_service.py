@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -171,6 +172,41 @@ class ImageTaskServiceTests(unittest.TestCase):
             elapsed = time.time() - started
             self.assertLess(elapsed, 0.8)
             self.assertEqual(len(starts), 4)
+
+    def test_upstream_concurrency_limits_worker_pool(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            active = 0
+            max_active = 0
+            guard = threading.Lock()
+
+            def handler(_payload):
+                nonlocal active, max_active
+                with guard:
+                    active += 1
+                    max_active = max(max_active, active)
+                try:
+                    time.sleep(0.12)
+                    return {"data": [{"url": "http://example.test/image.png"}]}
+                finally:
+                    with guard:
+                        active -= 1
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service._upstream_concurrency = 2
+            for index in range(5):
+                service.submit_generation(
+                    OWNER,
+                    client_task_id=f"limited-{index}",
+                    prompt="cat",
+                    model="gpt-image-2",
+                    size=None,
+                    base_url="http://local.test",
+                )
+
+            for index in range(5):
+                wait_for_task(service, OWNER, f"limited-{index}", "success", timeout=3.0)
+
+            self.assertLessEqual(max_active, 2)
 
 
 if __name__ == "__main__":

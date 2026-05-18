@@ -25,6 +25,8 @@ export function ConfigCard() {
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setImageTaskWorkerCount = useSettingsStore((state) => state.setImageTaskWorkerCount);
+  const setImageUpstreamConcurrency = useSettingsStore((state) => state.setImageUpstreamConcurrency);
+  const setImagePerAccountConcurrency = useSettingsStore((state) => state.setImagePerAccountConcurrency);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
   const setLogLevel = useSettingsStore((state) => state.setLogLevel);
@@ -204,14 +206,34 @@ export function ConfigCard() {
             <p className="text-xs text-stone-500">仅限制前端用户一次最多提交多少张图，不再限制后端实际生成并发。</p>
           </div>
           <div className="space-y-2">
-            <label className="text-sm text-stone-700">RabbitMQ 消费并发</label>
+            <label className="text-sm text-stone-700">队列工作线程数</label>
             <Input
               value={String(config?.image_task_worker_count || "")}
               onChange={(event) => setImageTaskWorkerCount(event.target.value)}
               placeholder="10"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">控制队列消费者数量，适合配合上游图片并发一起调整。</p>
+            <p className="text-xs text-stone-500">使用本进程内存队列，不再依赖 RabbitMQ；线程数可略高于真实上游并发。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">真实上游生图并发</label>
+            <Input
+              value={String(config?.image_upstream_concurrency || "")}
+              onChange={(event) => setImageUpstreamConcurrency(event.target.value)}
+              placeholder="3"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">真正同时调用 ChatGPT 生图的数量，建议 3-6；账号不稳定时用 3。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">单账号生图并发</label>
+            <Input
+              value={String(config?.image_per_account_concurrency || "")}
+              onChange={(event) => setImagePerAccountConcurrency(event.target.value)}
+              placeholder="1"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">同一个 ChatGPT 账号同时生图数量，建议保持 1，可降低 429 和卡住概率。</p>
           </div>
           <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
             <Checkbox

@@ -2103,6 +2103,9 @@ function ImagePageContent({
             systemRunningCount={Math.max(0, Number(runtimeStats?.running || 0))}
             systemEstimatedWaitText={systemEstimatedWaitText}
             systemAverageDurationText={systemAverageDurationText}
+            systemUpstreamConcurrency={Math.max(0, Number(runtimeStats?.upstream_concurrency || 0))}
+            systemActiveUpstreamSlots={Math.max(0, Number(runtimeStats?.active_upstream_slots || 0))}
+            accountCooldownCount={Math.max(0, Number(runtimeStats?.account_cooldown_accounts || 0))}
             recentQuotaUsageText={recentQuotaUsageText}
             expandSignal={composerExpandSignal}
             referenceImages={referenceImages}

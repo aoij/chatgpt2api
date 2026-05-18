@@ -4,7 +4,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import hashlib
 import json
-from threading import Lock
+import time
+from threading import Condition, Lock
 from typing import Any
 from datetime import datetime
 
@@ -36,9 +37,12 @@ class AccountService:
     def __init__(self, storage_backend: StorageBackend):
         self.storage = storage_backend
         self._lock = Lock()
+        self._image_slot_condition = Condition(self._lock)
         self._index = 0
         self._accounts = self._load_accounts()
         self._public_compact_cache: list[dict] | None = None
+        self._image_inflight: dict[str, int] = {}
+        self._image_cooldown_until: dict[str, float] = {}
 
     @staticmethod
     def _clean_token(value: Any) -> str:
@@ -289,24 +293,98 @@ class AccountService:
         with self._lock:
             return [token for item in self._accounts if (token := self._clean_token(item.get("access_token")))]
 
-    def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+    @staticmethod
+    def _cooldown_seconds_for_error(error: str) -> int:
+        lower = str(error or "").lower()
+        if "401" in lower or "unauthorized" in lower or "invalid access token" in lower:
+            return 0
+        if "429" in lower or "rate limit" in lower or "限流" in lower:
+            return 20 * 60
+        if (
+                "cloudflare" in lower
+                or "error 520" in lower
+                or "error 522" in lower
+                or "error 524" in lower
+                or "bad gateway" in lower
+                or "gateway timeout" in lower
+                or "502" in lower
+                or "503" in lower
+                or "504" in lower
+        ):
+            return 5 * 60
+        if "timeout" in lower or "timed out" in lower or "connection" in lower:
+            return 3 * 60
+        return 60
+
+    def _list_ready_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
         excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
+        now = time.time()
         return [
             token
             for item in self._accounts
             if self._is_image_account_available(item)
                and (token := self._clean_token(item.get("access_token")))
                and token not in excluded
+               and float(self._image_cooldown_until.get(token, 0.0)) <= now
+        ]
+
+    def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+        max_concurrency = max(1, int(getattr(config, "image_per_account_concurrency", 1) or 1))
+        return [
+            token
+            for token in self._list_ready_candidate_tokens(excluded_tokens)
+            if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
     def _pick_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
+        excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
+        wait_started = time.time()
+        with self._image_slot_condition:
+            while True:
+                if not self._list_ready_candidate_tokens(excluded):
+                    raise RuntimeError("no available image quota")
+                tokens = self._list_available_candidate_tokens(excluded)
+                if tokens:
+                    access_token = tokens[self._index % len(tokens)]
+                    self._index += 1
+                    self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
+                    return access_token
+                if time.time() - wait_started >= 30:
+                    raise RuntimeError("waiting for image account slot timed out")
+                self._image_slot_condition.wait(timeout=1.0)
+
+    def release_image_slot(self, access_token: str) -> None:
+        access_token = self._clean_token(access_token)
+        if not access_token:
+            return
+        with self._image_slot_condition:
+            current_inflight = int(self._image_inflight.get(access_token, 0))
+            if current_inflight <= 1:
+                self._image_inflight.pop(access_token, None)
+            else:
+                self._image_inflight[access_token] = current_inflight - 1
+            self._image_slot_condition.notify_all()
+
+    def cooldown_image_token(self, access_token: str, error: str = "", seconds: int | None = None) -> None:
+        access_token = self._clean_token(access_token)
+        if not access_token:
+            return
+        cooldown_seconds = max(0, int(seconds if seconds is not None else self._cooldown_seconds_for_error(error)))
+        with self._image_slot_condition:
+            if cooldown_seconds > 0:
+                self._image_cooldown_until[access_token] = time.time() + cooldown_seconds
+            self._image_slot_condition.notify_all()
+
+    def image_pool_stats(self) -> dict[str, Any]:
+        now = time.time()
         with self._lock:
-            tokens = self._list_available_candidate_tokens(excluded_tokens)
-            if not tokens:
-                raise RuntimeError("no available image quota")
-            access_token = tokens[self._index % len(tokens)]
-            self._index += 1
-            return access_token
+            return {
+                "inflight": sum(max(0, int(value or 0)) for value in self._image_inflight.values()),
+                "inflight_accounts": sum(1 for value in self._image_inflight.values() if int(value or 0) > 0),
+                "cooldown_accounts": sum(1 for value in self._image_cooldown_until.values() if float(value or 0) > now),
+                "per_account_concurrency": max(1, int(getattr(config, "image_per_account_concurrency", 1) or 1)),
+            }
+
 
     def refresh_account_state(self, access_token: str) -> dict | None:
         token_ref = anonymize_token(access_token)
@@ -337,6 +415,7 @@ class AccountService:
             account = self.refresh_account_state(access_token)
             if self._is_image_account_available(account or {}):
                 return access_token
+            self.release_image_slot(access_token)
             print(
                 f"[account-available] skip token={token_ref} "
                 f"quota={account.get('quota') if account else 'unknown'} "
@@ -505,6 +584,9 @@ class AccountService:
             else:
                 self._index = 0
             if removed:
+                for token in target_set:
+                    self._image_inflight.pop(token, None)
+                    self._image_cooldown_until.pop(token, None)
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
             items = self._public_items_compact(self._accounts)
@@ -548,6 +630,7 @@ class AccountService:
         access_token = self._clean_token(access_token)
         if not access_token:
             return None
+        self.release_image_slot(access_token)
         with self._lock:
             index = self._find_account_index(access_token)
             if index < 0:

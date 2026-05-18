@@ -242,6 +242,20 @@ class ConfigStore:
             return 10
 
     @property
+    def image_upstream_concurrency(self) -> int:
+        try:
+            return max(1, int(self.data.get("image_upstream_concurrency", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    @property
+    def image_per_account_concurrency(self) -> int:
+        try:
+            return max(1, int(self.data.get("image_per_account_concurrency", 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    @property
     def auto_remove_invalid_accounts(self) -> bool:
         return _bool_from_config(self.data, "auto_remove_invalid_accounts", False)
 
@@ -359,6 +373,8 @@ class ConfigStore:
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
         data["image_task_worker_count"] = self.image_task_worker_count
+        data["image_upstream_concurrency"] = self.image_upstream_concurrency
+        data["image_per_account_concurrency"] = self.image_per_account_concurrency
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["auto_sync_cpa"] = self.auto_sync_cpa
@@ -381,6 +397,10 @@ class ConfigStore:
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         next_data.pop("backup_state", None)
+        next_data["image_account_concurrency"] = max(1, _normalize_positive_int(next_data.get("image_account_concurrency"), 3, 1))
+        next_data["image_task_worker_count"] = max(1, _normalize_positive_int(next_data.get("image_task_worker_count"), 10, 1))
+        next_data["image_upstream_concurrency"] = max(1, _normalize_positive_int(next_data.get("image_upstream_concurrency"), 3, 1))
+        next_data["image_per_account_concurrency"] = max(1, _normalize_positive_int(next_data.get("image_per_account_concurrency"), 1, 1))
         self.data = next_data
         self._save()
         return self.get()

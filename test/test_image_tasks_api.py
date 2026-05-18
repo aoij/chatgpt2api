@@ -58,6 +58,23 @@ class FakeImageTaskService:
             "missing_ids": [task_id for task_id in ids if task_id == "missing"],
         }
 
+    def get_runtime_stats(self):
+        return {
+            "transport": "memory",
+            "workers": 10,
+            "upstream_concurrency": 3,
+            "active_upstream_slots": 0,
+            "queued": 0,
+            "running": 0,
+            "processing": 0,
+            "recent_avg_duration_ms": 0,
+            "estimated_wait_ms": 0,
+            "frontend_batch_limit": 3,
+            "per_account_concurrency": 1,
+            "account_inflight": 0,
+            "account_cooldown_accounts": 0,
+        }
+
 
 class ImageTasksApiTests(unittest.TestCase):
     def setUp(self):
@@ -125,6 +142,15 @@ class ImageTasksApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual([item["id"] for item in payload["items"]], ["task-1"])
         self.assertEqual(payload["missing_ids"], ["missing"])
+
+    def test_runtime_reports_memory_queue(self):
+        response = self.client.get("/api/image-tasks/runtime", headers=AUTH_HEADERS)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["transport"], "memory")
+        self.assertEqual(payload["upstream_concurrency"], 3)
+        self.assertEqual(payload["per_account_concurrency"], 1)
 
 
 if __name__ == "__main__":

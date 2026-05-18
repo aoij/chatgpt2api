@@ -81,6 +81,8 @@ export type SettingsConfig = {
   image_poll_timeout_secs?: number | string;
   image_account_concurrency?: number | string;
   image_task_worker_count?: number | string;
+  image_upstream_concurrency?: number | string;
+  image_per_account_concurrency?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
@@ -358,18 +360,26 @@ export async function fetchPublicConfig() {
 }
 
 export type ImageTaskRuntime = {
-  transport: "rabbitmq" | "memory" | string;
+  transport: "memory" | string;
   workers: number;
   upstream_concurrency: number;
   active_upstream_slots: number;
+  queue_size?: number;
+  persist_queue_size?: number;
+  oldest_running_seconds?: number;
   queued: number;
   running: number;
   processing: number;
   recent_avg_duration_ms: number;
   estimated_wait_ms: number;
   frontend_batch_limit?: number;
+  per_account_concurrency?: number;
+  account_inflight?: number;
+  account_inflight_accounts?: number;
+  account_cooldown_accounts?: number;
   recent_avg_stage_ms?: {
     slot_wait_ms?: number;
+    slot_wait_with_zeros_ms?: number;
     upstream_stream_ms?: number;
     resolve_urls_ms?: number;
     download_images_ms?: number;

@@ -766,13 +766,17 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 account_service.mark_image_result(token, True)
                 break
             except ImagePollTimeoutError:
+                account_service.mark_image_result(token, False)
+                account_service.cooldown_image_token(token, "image poll timeout")
                 raise
             except ImageGenerationError:
                 account_service.mark_image_result(token, False)
+                account_service.cooldown_image_token(token, str(last_error or "image generation error"), seconds=0)
                 raise
             except Exception as exc:
                 account_service.mark_image_result(token, False)
                 last_error = str(exc)
+                account_service.cooldown_image_token(token, last_error)
                 logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
                 if not emitted_for_token and is_token_invalid_error(last_error):
                     account_service.remove_invalid_token(token, "image_stream")

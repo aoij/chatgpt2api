@@ -22,6 +22,9 @@ type ImageComposerProps = {
   systemRunningCount: number;
   systemEstimatedWaitText: string;
   systemAverageDurationText: string;
+  systemUpstreamConcurrency?: number;
+  systemActiveUpstreamSlots?: number;
+  accountCooldownCount?: number;
   recentQuotaUsageText?: string;
   expandSignal?: number;
   referenceImages: Array<{ name: string; dataUrl: string }>;
@@ -58,6 +61,9 @@ export function ImageComposer({
   systemRunningCount,
   systemEstimatedWaitText,
   systemAverageDurationText,
+  systemUpstreamConcurrency = 0,
+  systemActiveUpstreamSlots = 0,
+  accountCooldownCount = 0,
   recentQuotaUsageText = "",
   expandSignal = 0,
   referenceImages,
@@ -383,6 +389,8 @@ export function ImageComposer({
                 </div>
                 <div className="rounded-2xl bg-sky-50 px-3 py-1.5 text-xs leading-5 text-sky-700">
                   系统处理中 {systemProcessingCount} 个（运行 {systemRunningCount} / 排队 {systemQueuedCount}）
+                  {systemUpstreamConcurrency ? ` · 上游并发 ${systemActiveUpstreamSlots}/${systemUpstreamConcurrency}` : ""}
+                  {accountCooldownCount ? ` · 冷却账号 ${accountCooldownCount}` : ""}
                   {systemEstimatedWaitText ? ` · 预计等待 ${systemEstimatedWaitText}` : ""}
                   {systemAverageDurationText ? ` · 平均每张 ${systemAverageDurationText}` : ""}
                 </div>
@@ -427,6 +435,8 @@ export function ImageComposer({
                   </div>
                   <div className="hidden max-w-full shrink-0 rounded-full bg-sky-50 px-3 py-2 text-xs font-medium text-sky-700 sm:block">
                     系统处理中 {systemProcessingCount} 个（运行 {systemRunningCount} / 排队 {systemQueuedCount}）
+                    {systemUpstreamConcurrency ? ` · 上游并发 ${systemActiveUpstreamSlots}/${systemUpstreamConcurrency}` : ""}
+                    {accountCooldownCount ? ` · 冷却账号 ${accountCooldownCount}` : ""}
                     {systemEstimatedWaitText ? ` · 预计等待 ${systemEstimatedWaitText}` : ""}
                     {systemAverageDurationText ? ` · 平均每张 ${systemAverageDurationText}` : ""}
                   </div>

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 import queue
@@ -19,10 +18,6 @@ from services.log_service import LOG_TYPE_CALL, log_service
 from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from utils.log import logger
-try:
-    import pika
-except Exception:  # pragma: no cover - runtime fallback when vendor package is absent
-    pika = None
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -34,21 +29,10 @@ DEFAULT_IMAGE_TASK_WORKERS = 10
 DEFAULT_CLEANUP_INTERVAL_SECONDS = 600
 DEFAULT_RUNNING_TASK_TIMEOUT_SECONDS = 15 * 60
 DEFAULT_UPSTREAM_CONCURRENCY = 3
-DEFAULT_RABBITMQ_PORT = 5672
-DEFAULT_RABBITMQ_QUEUE = "chatgpt2api.image_tasks"
-DEFAULT_RABBITMQ_RETRY_DELAY_SECONDS = 5
 DEFAULT_TASK_LIST_LIMIT = 24
 MAX_IMAGE_TASK_WORKERS = 24
+MAX_UPSTREAM_CONCURRENCY = 12
 DEFAULT_PERSIST_WORKERS = 4
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = str(os.getenv(name) or "").strip().lower()
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    if value in {"0", "false", "no", "off"}:
-        return False
-    return default
 
 
 def _now_iso() -> str:
@@ -97,6 +81,15 @@ def _uploader_from_identity(identity: dict[str, object]) -> dict[str, object]:
 
 def _task_key(owner_id: str, task_id: str) -> str:
     return f"{owner_id}:{task_id}"
+
+
+def _queue_item_key(item: tuple[str, str, dict[str, Any]] | None) -> str:
+    if not item:
+        return ""
+    try:
+        return _clean(item[0])
+    except Exception:
+        return ""
 
 
 def _hash_account_id(access_token: str) -> str:
@@ -176,55 +169,6 @@ def _compact_image_data(data: object) -> object:
     return result
 
 
-def _encode_queue_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    encoded = dict(payload)
-    images = payload.get("images")
-    if isinstance(images, list):
-        encoded_images: list[dict[str, str]] = []
-        for item in images:
-            if (
-                isinstance(item, tuple)
-                and len(item) == 3
-                and isinstance(item[0], (bytes, bytearray))
-            ):
-                image_data, filename, content_type = item
-                encoded_images.append(
-                    {
-                        "data_b64": base64.b64encode(bytes(image_data)).decode("ascii"),
-                        "filename": str(filename or "image.png"),
-                        "content_type": str(content_type or "image/png"),
-                    }
-                )
-        encoded["images"] = encoded_images
-    return encoded
-
-
-def _decode_queue_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    decoded = dict(payload)
-    images = payload.get("images")
-    if isinstance(images, list):
-        decoded_images: list[tuple[bytes, str, str]] = []
-        for item in images:
-            if not isinstance(item, dict):
-                continue
-            data_b64 = _clean(item.get("data_b64"))
-            if not data_b64:
-                continue
-            try:
-                image_data = base64.b64decode(data_b64.encode("ascii"))
-            except Exception:
-                continue
-            decoded_images.append(
-                (
-                    image_data,
-                    _clean(item.get("filename"), "image.png"),
-                    _clean(item.get("content_type"), "image/png"),
-                )
-            )
-        decoded["images"] = decoded_images
-    return decoded
-
-
 class ImageTaskService:
     def __init__(
         self,
@@ -241,29 +185,12 @@ class ImageTaskService:
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self._queue: queue.Queue[tuple[str, str, dict[str, Any]]] = queue.Queue()
-        self._rabbitmq_enabled = _env_bool("CHATGPT2API_IMAGE_TASK_USE_RABBITMQ", True) and pika is not None
-        self._rabbitmq_host = _clean(os.getenv("CHATGPT2API_IMAGE_TASK_RABBITMQ_HOST"), "host.docker.internal")
-        self._rabbitmq_port = _env_int(
-            "CHATGPT2API_IMAGE_TASK_RABBITMQ_PORT",
-            DEFAULT_RABBITMQ_PORT,
-            minimum=1,
-            maximum=65535,
-        )
-        self._rabbitmq_user = _clean(os.getenv("CHATGPT2API_IMAGE_TASK_RABBITMQ_USER"), "guest")
-        self._rabbitmq_password = _clean(os.getenv("CHATGPT2API_IMAGE_TASK_RABBITMQ_PASSWORD"), "guest")
-        self._rabbitmq_vhost = _clean(os.getenv("CHATGPT2API_IMAGE_TASK_RABBITMQ_VHOST"), "/")
-        self._rabbitmq_queue = _clean(os.getenv("CHATGPT2API_IMAGE_TASK_RABBITMQ_QUEUE"), DEFAULT_RABBITMQ_QUEUE)
-        self._rabbitmq_retry_delay_seconds = _env_int(
-            "CHATGPT2API_IMAGE_TASK_RABBITMQ_RETRY_DELAY_SECONDS",
-            DEFAULT_RABBITMQ_RETRY_DELAY_SECONDS,
-            minimum=1,
-            maximum=60,
-        )
         self._worker_count = 0
         self._upstream_concurrency = 0
         self._upstream_condition = threading.Condition()
         self._active_upstream_slots = 0
         self._started_worker_count = 0
+        self._active_worker_tasks: dict[int, tuple[str, float]] = {}
         self._persist_queue: queue.Queue[tuple[str, dict[str, Any], dict[str, Any]]] = queue.Queue()
         self._persist_worker_count = _env_int(
             "CHATGPT2API_IMAGE_PERSIST_WORKERS",
@@ -288,28 +215,14 @@ class ImageTaskService:
             if changed:
                 self._dirty = True
                 self._save_locked()
-        if self._rabbitmq_enabled:
-            logger.info(
-                {
-                    "event": "image_task_queue_transport",
-                    "transport": "rabbitmq",
-                    "host": self._rabbitmq_host,
-                    "port": self._rabbitmq_port,
-                    "vhost": self._rabbitmq_vhost,
-                    "queue": self._rabbitmq_queue,
-                    "workers": self._worker_count,
-                    "upstream_concurrency": self._upstream_concurrency,
-                }
-            )
-        else:
-            logger.info(
-                {
-                    "event": "image_task_queue_transport",
-                    "transport": "memory",
-                    "workers": self._worker_count,
-                    "upstream_concurrency": self._upstream_concurrency,
-                }
-            )
+        logger.info(
+            {
+                "event": "image_task_queue_transport",
+                "transport": "memory",
+                "workers": self._worker_count,
+                "upstream_concurrency": self._upstream_concurrency,
+            }
+        )
         self.reload_runtime_settings()
         self._start_workers()
 
@@ -327,9 +240,23 @@ class ImageTaskService:
             maximum=MAX_IMAGE_TASK_WORKERS,
         )
 
+    def _resolve_upstream_concurrency(self) -> int:
+        configured = getattr(config, "data", {}).get("image_upstream_concurrency")
+        if configured is not None:
+            try:
+                return min(max(int(configured), 1), MAX_UPSTREAM_CONCURRENCY)
+            except (TypeError, ValueError):
+                pass
+        return _env_int(
+            "CHATGPT2API_IMAGE_UPSTREAM_CONCURRENCY",
+            getattr(config, "image_upstream_concurrency", DEFAULT_UPSTREAM_CONCURRENCY),
+            minimum=1,
+            maximum=MAX_UPSTREAM_CONCURRENCY,
+        )
+
     def reload_runtime_settings(self) -> dict[str, int]:
         worker_count = self._resolve_worker_count()
-        upstream_concurrency = worker_count
+        upstream_concurrency = self._resolve_upstream_concurrency()
         worker_changed = False
         upstream_changed = False
         with self._lock:
@@ -407,7 +334,9 @@ class ImageTaskService:
         owner = _owner_id(identity)
         requested_ids = [_clean(task_id) for task_id in task_ids if _clean(task_id)][:DEFAULT_TASK_LIST_LIMIT]
         with self._lock:
-            if self._cleanup_if_due_locked():
+            changed = self._recover_stale_unfinished_locked()
+            changed = self._cleanup_if_due_locked() or changed
+            if changed:
                 self._save_locked()
             items = []
             missing_ids = []
@@ -429,7 +358,9 @@ class ImageTaskService:
 
     def get_runtime_stats(self) -> dict[str, Any]:
         with self._lock:
-            if self._cleanup_if_due_locked():
+            changed = self._cleanup_if_due_locked()
+            changed = self._recover_stale_unfinished_locked() or changed
+            if changed:
                 self._save_locked()
             tasks = sorted(
                 self._tasks.values(),
@@ -457,20 +388,40 @@ class ImageTaskService:
 
             effective_parallel = max(1, running or self._worker_count or 1)
             estimated_wait_ms = int((queued / effective_parallel) * avg_duration_ms) if queued > 0 and avg_duration_ms > 0 else 0
+            oldest_running_seconds = 0
+            now = time.time()
+            for item in tasks:
+                if item.get("status") != TASK_STATUS_RUNNING:
+                    continue
+                started_at = _timestamp(item.get("started_at")) or _timestamp(item.get("updated_at")) or _timestamp(item.get("created_at"))
+                if started_at > 0:
+                    oldest_running_seconds = max(oldest_running_seconds, int(now - started_at))
+            account_pool_stats = account_service.image_pool_stats()
 
             return {
-                "transport": "rabbitmq" if self._rabbitmq_enabled else "memory",
+                "transport": "memory",
                 "workers": self._worker_count,
                 "upstream_concurrency": self._upstream_concurrency,
                 "active_upstream_slots": self._active_upstream_slots,
+                "queue_size": self._queue.qsize(),
+                "persist_queue_size": self._persist_queue.qsize(),
+                "oldest_running_seconds": oldest_running_seconds,
                 "queued": queued,
                 "running": running,
                 "processing": queued + running,
                 "recent_avg_duration_ms": avg_duration_ms,
                 "estimated_wait_ms": estimated_wait_ms,
                 "frontend_batch_limit": max(1, int(getattr(config, "image_account_concurrency", DEFAULT_UPSTREAM_CONCURRENCY))),
+                "per_account_concurrency": account_pool_stats.get("per_account_concurrency"),
+                "account_inflight": account_pool_stats.get("inflight"),
+                "account_inflight_accounts": account_pool_stats.get("inflight_accounts"),
+                "account_cooldown_accounts": account_pool_stats.get("cooldown_accounts"),
                 "recent_avg_stage_ms": {
                     "slot_wait_ms": _avg_metric("slot_wait_ms"),
+                    "slot_wait_with_zeros_ms": (
+                        int(sum(int((item.get("metrics") or {}).get("slot_wait_ms") or 0) for item in recent_success) / len(recent_success))
+                        if recent_success else 0
+                    ),
                     "upstream_stream_ms": _avg_metric("upstream_stream_ms"),
                     "resolve_urls_ms": _avg_metric("resolve_urls_ms"),
                     "download_images_ms": _avg_metric("download_images_ms"),
@@ -556,7 +507,7 @@ class ImageTaskService:
             self._started_worker_count += 1
             index = self._started_worker_count
             thread = threading.Thread(
-                target=self._rabbitmq_worker if self._rabbitmq_enabled else self._worker,
+                target=self._worker,
                 args=(index,),
                 name=f"image-task-worker-{index}",
                 daemon=True,
@@ -579,7 +530,13 @@ class ImageTaskService:
         return worker_index <= self._worker_count
 
     def _acquire_upstream_slot(self, timeout_seconds: int) -> bool:
+        deadline = time.time() + max(1, timeout_seconds)
         with self._upstream_condition:
+            while self._active_upstream_slots >= max(1, self._upstream_concurrency):
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    return False
+                self._upstream_condition.wait(timeout=min(1.0, remaining))
             self._active_upstream_slots += 1
             return True
 
@@ -589,56 +546,8 @@ class ImageTaskService:
                 self._active_upstream_slots -= 1
             self._upstream_condition.notify_all()
 
-    def _rabbitmq_parameters(self):
-        if pika is None:
-            raise RuntimeError("pika is not available")
-        credentials = pika.PlainCredentials(self._rabbitmq_user, self._rabbitmq_password)
-        return pika.ConnectionParameters(
-            host=self._rabbitmq_host,
-            port=self._rabbitmq_port,
-            virtual_host=self._rabbitmq_vhost,
-            credentials=credentials,
-            heartbeat=600,
-            blocked_connection_timeout=300,
-            socket_timeout=15,
-        )
-
-    def _declare_rabbitmq_queue(self, channel) -> None:
-        channel.queue_declare(queue=self._rabbitmq_queue, durable=True)
-
     def _enqueue_task(self, key: str, mode: str, payload: dict[str, Any]) -> None:
-        if not self._rabbitmq_enabled:
-            self._queue.put((key, mode, payload))
-            return
-        if pika is None:
-            raise RuntimeError("pika is not available")
-        message = json.dumps(
-            {
-                "key": key,
-                "mode": mode,
-                "payload": _encode_queue_payload(payload),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        connection = pika.BlockingConnection(self._rabbitmq_parameters())
-        try:
-            channel = connection.channel()
-            self._declare_rabbitmq_queue(channel)
-            channel.basic_publish(
-                exchange="",
-                routing_key=self._rabbitmq_queue,
-                body=message,
-                properties=pika.BasicProperties(
-                    delivery_mode=2,
-                    content_type="application/json",
-                ),
-            )
-        finally:
-            try:
-                connection.close()
-            except Exception:
-                pass
+        self._queue.put((key, mode, payload))
 
     def _worker(self, worker_index: int) -> None:
         while True:
@@ -649,77 +558,15 @@ class ImageTaskService:
             except queue.Empty:
                 continue
             try:
+                with self._lock:
+                    self._active_worker_tasks[worker_index] = (key, time.time())
                 self._run_task(key, mode, payload)
             except Exception as exc:
                 print(f"[image-task-worker] unexpected error key={key}: {exc}")
             finally:
+                with self._lock:
+                    self._active_worker_tasks.pop(worker_index, None)
                 self._queue.task_done()
-
-    def _rabbitmq_worker(self, worker_index: int) -> None:
-        while True:
-            if not self._worker_enabled(worker_index):
-                return
-            connection = None
-            try:
-                if pika is None:
-                    raise RuntimeError("pika is not available")
-                connection = pika.BlockingConnection(self._rabbitmq_parameters())
-                channel = connection.channel()
-                self._declare_rabbitmq_queue(channel)
-                channel.basic_qos(prefetch_count=1)
-                for method_frame, _, body in channel.consume(
-                    self._rabbitmq_queue,
-                    inactivity_timeout=5,
-                    auto_ack=False,
-                ):
-                    if not self._worker_enabled(worker_index):
-                        return
-                    if method_frame is None or body is None:
-                        if connection.is_closed:
-                            break
-                        continue
-                    delivery_tag = method_frame.delivery_tag
-                    try:
-                        raw = json.loads(body.decode("utf-8"))
-                        key = _clean(raw.get("key"))
-                        mode = "edit" if raw.get("mode") == "edit" else "generate"
-                        payload = _decode_queue_payload(raw.get("payload") if isinstance(raw.get("payload"), dict) else {})
-                        if not key:
-                            channel.basic_ack(delivery_tag)
-                            continue
-                        with self._lock:
-                            existing = dict(self._tasks.get(key) or {})
-                        if existing.get("status") in TERMINAL_STATUSES:
-                            channel.basic_ack(delivery_tag)
-                            continue
-                        self._run_task(key, mode, payload)
-                        channel.basic_ack(delivery_tag)
-                    except Exception as exc:
-                        logger.warning(
-                            {
-                                "event": "image_task_rabbitmq_consume_failed",
-                                "error": str(exc),
-                            }
-                        )
-                        try:
-                            channel.basic_nack(delivery_tag, requeue=False)
-                        except Exception:
-                            pass
-            except Exception as exc:
-                logger.warning(
-                    {
-                        "event": "image_task_rabbitmq_worker_retry",
-                        "error": str(exc),
-                        "retry_delay_seconds": self._rabbitmq_retry_delay_seconds,
-                    }
-                )
-                time.sleep(self._rabbitmq_retry_delay_seconds)
-            finally:
-                if connection is not None:
-                    try:
-                        connection.close()
-                    except Exception:
-                        pass
 
     def _persist_worker(self, worker_index: int) -> None:
         while True:
@@ -1026,7 +873,7 @@ class ImageTaskService:
                 raise RuntimeError("image task waiting for upstream slot timed out")
             started = time.time()
             slot_wait_ms = max(0, int((started - slot_wait_started) * 1000))
-            self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+            self._update_task(key, status=TASK_STATUS_RUNNING, error="", started_at=_now_iso())
             logger.info({
                 "event": "image_task_start",
                 "key": key,
@@ -1155,6 +1002,9 @@ class ImageTaskService:
                 "created_at": _clean(item.get("created_at"), _now_iso()),
                 "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
             }
+            started_at = _clean(item.get("started_at"))
+            if started_at:
+                task["started_at"] = started_at
             data = item.get("data")
             if isinstance(data, list):
                 task["data"] = data
@@ -1186,24 +1036,45 @@ class ImageTaskService:
         tmp_path.replace(self.path)
         self._dirty = False
 
-    def _recover_unfinished_locked(self) -> bool:
+    def _fail_unfinished_task_locked(self, task: dict[str, Any], message: str) -> None:
+        reserved_quota = int(task.get("reserved_quota") or 0)
+        if reserved_quota:
+            auth_service.refund_image_quota_by_id(task.get("owner_id"), reserved_quota)
+            task["reserved_quota"] = 0
+        task["status"] = TASK_STATUS_ERROR
+        task["error"] = message
+        task["updated_at"] = _now_iso()
+        self._dirty = True
+
+    def _recover_stale_unfinished_locked(self) -> bool:
         changed = False
         now = time.time()
+        queued_keys = {_queue_item_key(item) for item in list(getattr(self._queue, "queue", []))}
+        running_keys = {item[0] for item in self._active_worker_tasks.values() if item and item[0]}
         for task in self._tasks.values():
             if task.get("status") in UNFINISHED_STATUSES:
+                key = _task_key(_clean(task.get("owner_id")), _clean(task.get("id")))
+                if task.get("status") == TASK_STATUS_QUEUED and key in queued_keys:
+                    continue
+                if task.get("status") == TASK_STATUS_RUNNING and key in running_keys:
+                    started_at = _timestamp(task.get("started_at")) or _timestamp(task.get("updated_at")) or _timestamp(task.get("created_at"))
+                    if started_at > 0 and now - started_at < self._running_task_timeout_seconds:
+                        continue
+                    self._fail_unfinished_task_locked(
+                        task,
+                        f"图片任务处理超时（超过 {self._running_task_timeout_seconds} 秒），已自动失败并返还额度，请稍后重试",
+                    )
+                    changed = True
+                    continue
                 updated_at = _timestamp(task.get("updated_at")) or _timestamp(task.get("created_at"))
                 if updated_at > 0 and updated_at <= now and now - updated_at < self._running_task_timeout_seconds:
                     continue
-                reserved_quota = int(task.get("reserved_quota") or 0)
-                if reserved_quota:
-                    auth_service.refund_image_quota_by_id(task.get("owner_id"), reserved_quota)
-                    task["reserved_quota"] = 0
-                task["status"] = TASK_STATUS_ERROR
-                task["error"] = "图片任务处理超时或服务已重启，任务已中断，请重新生成"
-                task["updated_at"] = _now_iso()
-                self._dirty = True
+                self._fail_unfinished_task_locked(task, "图片任务处理超时或服务已重启，任务已中断，请重新生成")
                 changed = True
         return changed
+
+    def _recover_unfinished_locked(self) -> bool:
+        return self._recover_stale_unfinished_locked()
 
     def _cleanup_locked(self) -> bool:
         try:
