@@ -1192,14 +1192,14 @@ class ImageTaskService:
         for task in self._tasks.values():
             if task.get("status") in UNFINISHED_STATUSES:
                 updated_at = _timestamp(task.get("updated_at")) or _timestamp(task.get("created_at"))
-                if updated_at > 0 and now - updated_at < self._running_task_timeout_seconds:
+                if updated_at > 0 and updated_at <= now and now - updated_at < self._running_task_timeout_seconds:
                     continue
                 reserved_quota = int(task.get("reserved_quota") or 0)
                 if reserved_quota:
                     auth_service.refund_image_quota_by_id(task.get("owner_id"), reserved_quota)
                     task["reserved_quota"] = 0
                 task["status"] = TASK_STATUS_ERROR
-                task["error"] = "图片任务处理超时或服务已重启，已自动终止，请重新生成"
+                task["error"] = "图片任务处理超时或服务已重启，任务已中断，请重新生成"
                 task["updated_at"] = _now_iso()
                 self._dirty = True
                 changed = True
