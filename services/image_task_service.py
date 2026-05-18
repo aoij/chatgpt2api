@@ -33,6 +33,7 @@ DEFAULT_TASK_LIST_LIMIT = 24
 MAX_IMAGE_TASK_WORKERS = 24
 MAX_UPSTREAM_CONCURRENCY = 12
 DEFAULT_PERSIST_WORKERS = 4
+ACTIVE_WORKER_RECOVERY_GRACE_SECONDS = 30
 
 
 def _now_iso() -> str:
@@ -417,6 +418,7 @@ class ImageTaskService:
                 "account_inflight": account_pool_stats.get("inflight"),
                 "account_inflight_accounts": account_pool_stats.get("inflight_accounts"),
                 "account_cooldown_accounts": account_pool_stats.get("cooldown_accounts"),
+                "account_invalid_cached_accounts": account_pool_stats.get("invalid_cached_accounts"),
                 "recent_avg_stage_ms": {
                     "slot_wait_ms": _avg_metric("slot_wait_ms"),
                     "slot_wait_with_zeros_ms": (
@@ -555,6 +557,7 @@ class ImageTaskService:
                 return False
             self._active_upstream_slots = 0
             self._upstream_condition.notify_all()
+        account_service.release_all_image_slots()
         return True
 
     def _enqueue_task(self, key: str, mode: str, payload: dict[str, Any]) -> None:
@@ -1099,12 +1102,16 @@ class ImageTaskService:
                     continue
                 if task.get("status") == TASK_STATUS_RUNNING and key in running_keys:
                     started_at = _timestamp(task.get("started_at")) or _timestamp(task.get("updated_at")) or _timestamp(task.get("created_at"))
-                    if started_at > 0 and now - started_at < self._running_task_timeout_seconds:
+                    # Active workers own their task state and upstream slot.  Polling endpoints
+                    # should not race the worker's own timeout path; recover only after an
+                    # additional grace window in case the worker thread itself is truly wedged.
+                    if started_at > 0 and now - started_at < self._running_task_timeout_seconds + ACTIVE_WORKER_RECOVERY_GRACE_SECONDS:
                         continue
                     self._fail_unfinished_task_locked(
                         task,
                         f"图片任务处理超时（超过 {self._running_task_timeout_seconds} 秒），已自动失败并返还额度，请稍后重试",
                     )
+                    self._release_upstream_slot()
                     changed = True
                     continue
                 updated_at = _timestamp(task.get("updated_at")) or _timestamp(task.get("created_at"))

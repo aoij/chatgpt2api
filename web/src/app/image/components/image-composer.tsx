@@ -25,6 +25,7 @@ type ImageComposerProps = {
   systemUpstreamConcurrency?: number;
   systemActiveUpstreamSlots?: number;
   accountCooldownCount?: number;
+  accountInvalidCachedCount?: number;
   recentQuotaUsageText?: string;
   expandSignal?: number;
   referenceImages: Array<{ name: string; dataUrl: string }>;
@@ -64,6 +65,7 @@ export function ImageComposer({
   systemUpstreamConcurrency = 0,
   systemActiveUpstreamSlots = 0,
   accountCooldownCount = 0,
+  accountInvalidCachedCount = 0,
   recentQuotaUsageText = "",
   expandSignal = 0,
   referenceImages,
@@ -391,6 +393,7 @@ export function ImageComposer({
                   系统处理中 {systemProcessingCount} 个（运行 {systemRunningCount} / 排队 {systemQueuedCount}）
                   {systemUpstreamConcurrency ? ` · 上游并发 ${systemActiveUpstreamSlots}/${systemUpstreamConcurrency}` : ""}
                   {accountCooldownCount ? ` · 冷却账号 ${accountCooldownCount}` : ""}
+                  {accountInvalidCachedCount ? ` · 已跳过失效账号 ${accountInvalidCachedCount}` : ""}
                   {systemEstimatedWaitText ? ` · 预计等待 ${systemEstimatedWaitText}` : ""}
                   {systemAverageDurationText ? ` · 平均每张 ${systemAverageDurationText}` : ""}
                 </div>
@@ -437,6 +440,7 @@ export function ImageComposer({
                     系统处理中 {systemProcessingCount} 个（运行 {systemRunningCount} / 排队 {systemQueuedCount}）
                     {systemUpstreamConcurrency ? ` · 上游并发 ${systemActiveUpstreamSlots}/${systemUpstreamConcurrency}` : ""}
                     {accountCooldownCount ? ` · 冷却账号 ${accountCooldownCount}` : ""}
+                    {accountInvalidCachedCount ? ` · 已跳过失效账号 ${accountInvalidCachedCount}` : ""}
                     {systemEstimatedWaitText ? ` · 预计等待 ${systemEstimatedWaitText}` : ""}
                     {systemAverageDurationText ? ` · 平均每张 ${systemAverageDurationText}` : ""}
                   </div>

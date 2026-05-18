@@ -377,6 +377,7 @@ export type ImageTaskRuntime = {
   account_inflight?: number;
   account_inflight_accounts?: number;
   account_cooldown_accounts?: number;
+  account_invalid_cached_accounts?: number;
   recent_avg_stage_ms?: {
     slot_wait_ms?: number;
     slot_wait_with_zeros_ms?: number;

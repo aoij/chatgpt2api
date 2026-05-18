@@ -11,7 +11,7 @@ from datetime import datetime
 
 from curl_cffi.requests import Session
 
-from services.config import config
+from services.config import DATA_DIR, config
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
@@ -43,6 +43,9 @@ class AccountService:
         self._public_compact_cache: list[dict] | None = None
         self._image_inflight: dict[str, int] = {}
         self._image_cooldown_until: dict[str, float] = {}
+        self._image_remote_refresh_ttl_seconds = 600
+        self._invalid_tokens_path = DATA_DIR / "invalid_image_tokens.json"
+        self._invalid_tokens = self._load_invalid_tokens()
 
     @staticmethod
     def _clean_token(value: Any) -> str:
@@ -151,6 +154,7 @@ class AccountService:
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
+        normalized["last_remote_checked_at"] = self._clean_token(normalized.get("last_remote_checked_at")) or None
         return normalized
 
     @staticmethod
@@ -176,6 +180,40 @@ class AccountService:
     def _save_account(self, account: dict) -> None:
         self.storage.save_account(account)
         self._public_compact_cache = None
+
+    def _load_invalid_tokens(self) -> set[str]:
+        try:
+            raw = json.loads(self._invalid_tokens_path.read_text(encoding="utf-8"))
+        except Exception:
+            return set()
+        items = raw.get("tokens") if isinstance(raw, dict) else raw
+        if not isinstance(items, list):
+            return set()
+        return {self._clean_token(item) for item in items if self._clean_token(item)}
+
+    def _save_invalid_tokens_locked(self) -> None:
+        try:
+            self._invalid_tokens_path.parent.mkdir(parents=True, exist_ok=True)
+            self._invalid_tokens_path.write_text(
+                json.dumps({"tokens": sorted(self._invalid_tokens)}, ensure_ascii=False, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(f"[account-invalid-cache] save failed: {exc}")
+
+    def mark_invalid_image_token(self, access_token: str, reason: str = "") -> None:
+        access_token = self._clean_token(access_token)
+        if not access_token:
+            return
+        with self._image_slot_condition:
+            if access_token not in self._invalid_tokens:
+                self._invalid_tokens.add(access_token)
+                self._save_invalid_tokens_locked()
+            self._image_inflight.pop(access_token, None)
+            self._image_cooldown_until.pop(access_token, None)
+            self._image_slot_condition.notify_all()
+        if config.auto_remove_invalid_accounts:
+            self.remove_invalid_token(access_token, reason or "image_stream")
 
     def _build_remote_headers(self, access_token: str) -> tuple[dict[str, str], str]:
         account = self.get_account(access_token) or {}
@@ -225,6 +263,7 @@ class AccountService:
                 "success": int(account.get("success") or 0),
                 "fail": int(account.get("fail") or 0),
                 "lastUsedAt": account.get("last_used_at"),
+                "lastRemoteCheckedAt": account.get("last_remote_checked_at"),
             }
             for account in accounts
             if (access_token := self._clean_token(account.get("access_token")))
@@ -250,6 +289,7 @@ class AccountService:
                 "success": int(account.get("success") or 0),
                 "fail": int(account.get("fail") or 0),
                 "lastUsedAt": account.get("last_used_at"),
+                "lastRemoteCheckedAt": account.get("last_remote_checked_at"),
             })
         return items
 
@@ -316,17 +356,42 @@ class AccountService:
             return 3 * 60
         return 60
 
+    def _candidate_account_sort_key(self, account: dict, now: float) -> tuple[int, float, int, float, str]:
+        checked_at = self._account_remote_checked_timestamp(account)
+        last_used_at = self._account_last_used_timestamp(account)
+        success_count = int(account.get("success") or 0)
+        token = self._clean_token(account.get("access_token"))
+        # Prefer accounts recently verified by /backend-api/me.  This avoids spending
+        # every image request walking thousands of stale imported tokens before reaching
+        # known-good accounts.
+        if checked_at > 0 and now - checked_at < self._image_remote_refresh_ttl_seconds:
+            group = 0
+        elif success_count > 0:
+            group = 1
+        elif checked_at > 0:
+            group = 2
+        else:
+            group = 3
+        return (group, last_used_at, -success_count, -checked_at, token)
+
     def _list_ready_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
         excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
         now = time.time()
-        return [
-            token
-            for item in self._accounts
-            if self._is_image_account_available(item)
-               and (token := self._clean_token(item.get("access_token")))
-               and token not in excluded
-               and float(self._image_cooldown_until.get(token, 0.0)) <= now
-        ]
+        candidates: list[tuple[tuple[int, float, int, float, str], str]] = []
+        for item in self._accounts:
+            if not self._is_image_account_available(item):
+                continue
+            token = self._clean_token(item.get("access_token"))
+            if (
+                not token
+                or token in excluded
+                or token in self._invalid_tokens
+                or float(self._image_cooldown_until.get(token, 0.0)) > now
+            ):
+                continue
+            candidates.append((self._candidate_account_sort_key(item, now), token))
+        candidates.sort(key=lambda row: row[0])
+        return [token for _, token in candidates]
 
     def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
         max_concurrency = max(1, int(getattr(config, "image_per_account_concurrency", 1) or 1))
@@ -345,7 +410,7 @@ class AccountService:
                     raise RuntimeError("no available image quota")
                 tokens = self._list_available_candidate_tokens(excluded)
                 if tokens:
-                    access_token = tokens[self._index % len(tokens)]
+                    access_token = tokens[0]
                     self._index += 1
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
@@ -365,6 +430,11 @@ class AccountService:
                 self._image_inflight[access_token] = current_inflight - 1
             self._image_slot_condition.notify_all()
 
+    def release_all_image_slots(self) -> None:
+        with self._image_slot_condition:
+            self._image_inflight.clear()
+            self._image_slot_condition.notify_all()
+
     def cooldown_image_token(self, access_token: str, error: str = "", seconds: int | None = None) -> None:
         access_token = self._clean_token(access_token)
         if not access_token:
@@ -382,19 +452,57 @@ class AccountService:
                 "inflight": sum(max(0, int(value or 0)) for value in self._image_inflight.values()),
                 "inflight_accounts": sum(1 for value in self._image_inflight.values() if int(value or 0) > 0),
                 "cooldown_accounts": sum(1 for value in self._image_cooldown_until.values() if float(value or 0) > now),
+                "invalid_cached_accounts": len(self._invalid_tokens),
                 "per_account_concurrency": max(1, int(getattr(config, "image_per_account_concurrency", 1) or 1)),
             }
 
 
-    def refresh_account_state(self, access_token: str) -> dict | None:
+    def _account_needs_remote_refresh(self, account: dict | None) -> bool:
+        if not isinstance(account, dict):
+            return True
+        checked = self._account_remote_checked_timestamp(account)
+        if checked <= 0:
+            return True
+        return time.time() - checked >= self._image_remote_refresh_ttl_seconds
+
+    def _account_remote_checked_timestamp(self, account: dict | None) -> float:
+        if not isinstance(account, dict):
+            return 0.0
+        value = self._clean_token(account.get("last_remote_checked_at"))
+        if not value:
+            return 0.0
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(value[:26], fmt).timestamp()
+            except ValueError:
+                continue
+        return 0.0
+
+    def _account_last_used_timestamp(self, account: dict | None) -> float:
+        if not isinstance(account, dict):
+            return 0.0
+        value = self._clean_token(account.get("last_used_at"))
+        if not value:
+            return 0.0
+        try:
+            return datetime.strptime(value[:19], "%Y-%m-%d %H:%M:%S").timestamp()
+        except ValueError:
+            return 0.0
+
+    def refresh_account_state(self, access_token: str, *, force: bool = False) -> dict | None:
         token_ref = anonymize_token(access_token)
+        if not force:
+            current = self.get_account(access_token)
+            if current and not self._account_needs_remote_refresh(current):
+                return current
         try:
             remote_info = self.fetch_remote_info(access_token)
         except Exception as exc:
             message = str(exc)
             print(f"[account-available] refresh token={token_ref} fail {message}")
             if "/backend-api/me failed: HTTP 401" in message:
-                if self.remove_invalid_token(access_token, "refresh_account_state"):
+                self.mark_invalid_image_token(access_token, "refresh_account_state")
+                if config.auto_remove_invalid_accounts:
                     return None
                 return self.update_account(
                     access_token,
@@ -404,7 +512,13 @@ class AccountService:
                     },
                 )
             return None
-        return self.update_account(access_token, remote_info)
+        return self.update_account(
+            access_token,
+            {
+                **remote_info,
+                "last_remote_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
 
     def get_available_access_token(self) -> str:
         attempted_tokens: set[str] = set()
@@ -416,6 +530,7 @@ class AccountService:
             if self._is_image_account_available(account or {}):
                 return access_token
             self.release_image_slot(access_token)
+            self.cooldown_image_token(access_token, "remote account refresh failed", seconds=60)
             print(
                 f"[account-available] skip token={token_ref} "
                 f"quota={account.get('quota') if account else 'unknown'} "
@@ -443,7 +558,14 @@ class AccountService:
 
     def has_available_account(self) -> bool:
         with self._lock:
-            return any(self._is_image_account_available(item) for item in self._accounts)
+            now = time.time()
+            return any(
+                self._is_image_account_available(item)
+                and (token := self._clean_token(item.get("access_token")))
+                and token not in self._invalid_tokens
+                and float(self._image_cooldown_until.get(token, 0.0)) <= now
+                for item in self._accounts
+            )
 
     def get_account(self, access_token: str) -> dict | None:
         access_token = self._clean_token(access_token)
@@ -548,7 +670,11 @@ class AccountService:
             indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
             added = 0
             skipped = 0
+            invalid_cache_changed = False
             for access_token in cleaned_tokens:
+                if access_token in self._invalid_tokens:
+                    self._invalid_tokens.discard(access_token)
+                    invalid_cache_changed = True
                 current = indexed.get(access_token)
                 if current is None:
                     added += 1
@@ -565,6 +691,8 @@ class AccountService:
                 if account is not None:
                     indexed[access_token] = account
             self._accounts = list(indexed.values())
+            if invalid_cache_changed:
+                self._save_invalid_tokens_locked()
             self._save_accounts()
             items = self._public_items_compact(self._accounts)
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个", {"added": added, "skipped": skipped})
@@ -587,6 +715,8 @@ class AccountService:
                 for token in target_set:
                     self._image_inflight.pop(token, None)
                     self._image_cooldown_until.pop(token, None)
+                    self._invalid_tokens.discard(token)
+                self._save_invalid_tokens_locked()
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
             items = self._public_items_compact(self._accounts)
@@ -801,13 +931,20 @@ class AccountService:
                 access_token = future_map[future]
                 try:
                     remote_info = future.result()
-                    if self.update_account(access_token, remote_info) is not None:
+                    if self.update_account(
+                        access_token,
+                        {
+                            **remote_info,
+                            "last_remote_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        },
+                    ) is not None:
                         refreshed += 1
                 except Exception as exc:
                     message = str(exc)
                     print(f"[account-refresh] fail {anonymize_token(access_token)} {message}")
                     if "/backend-api/me failed: HTTP 401" in message:
-                        if not self.remove_invalid_token(access_token, "refresh_accounts"):
+                        self.mark_invalid_image_token(access_token, "refresh_accounts")
+                        if not config.auto_remove_invalid_accounts:
                             self.update_account(access_token, {"status": "异常", "quota": 0})
                         message = "检测到封号"
                     errors.append({"access_token": access_token, "error": message})
