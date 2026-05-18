@@ -44,6 +44,19 @@ class ImageConversationModel(Base):
     updated_at = Column(String(64), nullable=False, index=True)
 
 
+
+class ImageTaskModel(Base):
+    """Image generation task data model."""
+    __tablename__ = "image_tasks"
+
+    owner_id = Column(String(255), primary_key=True)
+    task_id = Column(String(255), primary_key=True)
+    status = Column(String(32), nullable=False, index=True)
+    payload = Column(Text, nullable=False)
+    created_at = Column(String(64), nullable=False, index=True)
+    updated_at = Column(String(64), nullable=False, index=True)
+
+
 class DatabaseStorageBackend(StorageBackend):
     """数据库存储后端（支持 SQLite、PostgreSQL、MySQL 等）"""
 

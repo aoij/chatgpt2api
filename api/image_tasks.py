@@ -170,16 +170,35 @@ def _sync_conversations_with_tasks(identity: dict[str, object], items: list[dict
                     data = task.get("data") if isinstance(task.get("data"), list) else []
                     first = next((item for item in data if isinstance(item, dict) and (item.get("url") or item.get("b64_json"))), None)
                     if first:
-                        next_image["status"] = "success"
-                        if first.get("url"):
-                            next_image["url"] = first.get("url")
-                            next_image.pop("b64_json", None)
-                        elif first.get("b64_json"):
-                            next_image["b64_json"] = first.get("b64_json")
+                        persist_summary = task.get("persist_summary") if isinstance(task.get("persist_summary"), dict) else {}
+                        persist_pending = int(persist_summary.get("pending") or 0) > 0
+                        persist_failed = int(persist_summary.get("failed") or 0) > 0
+                        url = first.get("url") if isinstance(first.get("url"), str) else ""
+                        has_b64 = bool(first.get("b64_json"))
+                        if persist_pending and url and not _is_managed_image_url(url) and not has_b64:
+                            next_image["status"] = "loading"
+                            next_image["persistStatus"] = "pending"
+                            next_image["error"] = "图片已生成，正在转存本地…"
                             next_image.pop("url", None)
+                            next_image.pop("b64_json", None)
+                        elif persist_failed and url and not _is_managed_image_url(url) and not has_b64:
+                            next_image["status"] = "error"
+                            next_image["persistStatus"] = "error"
+                            next_image["error"] = "图片已生成，但转存本地失败，远程临时链接无法稳定展示，请重新生成或检查号池下载链路"
+                            next_image.pop("url", None)
+                            next_image.pop("b64_json", None)
+                        else:
+                            next_image["status"] = "success"
+                            next_image["persistStatus"] = "pending" if persist_pending else "error" if persist_failed else "done"
+                            if url:
+                                next_image["url"] = url
+                                next_image.pop("b64_json", None)
+                            elif has_b64:
+                                next_image["b64_json"] = first.get("b64_json")
+                                next_image.pop("url", None)
+                            next_image.pop("error", None)
                         if first.get("revised_prompt"):
                             next_image["revised_prompt"] = first.get("revised_prompt")
-                        next_image.pop("error", None)
                 elif status == "error":
                     next_image["status"] = "error"
                     next_image["error"] = _friendly_image_task_error(task.get("error") or "生成失败")

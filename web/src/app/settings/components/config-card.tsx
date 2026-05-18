@@ -213,7 +213,7 @@ export function ConfigCard() {
               placeholder="10"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">使用本进程内存队列，不再依赖 RabbitMQ；线程数可略高于真实上游并发。</p>
+            <p className="text-xs text-stone-500">使用本进程内存队列 + SQLite 任务表持久化；线程数可略高于真实上游并发。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">真实上游生图并发</label>

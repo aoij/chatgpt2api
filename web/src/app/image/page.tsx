@@ -355,6 +355,10 @@ async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: 
   return optimizeReferenceFile(file);
 }
 
+function isManagedImageUrl(value?: string) {
+  return Boolean(value && value.includes("/images/"));
+}
+
 function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage {
   let nextImage: StoredImage;
 
@@ -370,17 +374,43 @@ function taskDataToStoredImage(image: StoredImage, task: ImageTask): StoredImage
     } else {
       const persistPending = Number(task.persist_summary?.pending || 0) > 0;
       const persistFailed = Number(task.persist_summary?.failed || 0) > 0;
-      const transientError = persistFailed ? "图片已生成，转存本地失败，暂时使用远程链接展示" : undefined;
-      nextImage = {
-        ...image,
-        taskId: task.id,
-        status: "success",
-        b64_json: first.url ? undefined : first.b64_json,
-        url: first.url,
-        revised_prompt: first.revised_prompt,
-        error: persistPending ? "图片已生成，正在转存本地…" : transientError,
-        persistStatus: persistPending ? "pending" : persistFailed ? "error" : "done",
-      };
+      const nextUrl = typeof first.url === "string" ? first.url : undefined;
+      const isLocalStoredUrl = isManagedImageUrl(nextUrl);
+      if (persistPending && nextUrl && !isLocalStoredUrl && !first.b64_json) {
+        nextImage = {
+          ...image,
+          taskId: task.id,
+          status: "loading",
+          b64_json: undefined,
+          url: undefined,
+          revised_prompt: first.revised_prompt,
+          error: "图片已生成，正在转存本地…",
+          persistStatus: "pending",
+        };
+      } else if (persistFailed && nextUrl && !isLocalStoredUrl && !first.b64_json) {
+        nextImage = {
+          ...image,
+          taskId: task.id,
+          status: "error",
+          b64_json: undefined,
+          url: undefined,
+          revised_prompt: first.revised_prompt,
+          error: "图片已生成，但转存本地失败，远程临时链接无法稳定展示，请重新生成或检查号池下载链路",
+          persistStatus: "error",
+        };
+      } else {
+        const transientError = persistFailed ? "图片已生成，转存本地失败，暂时使用远程链接展示" : undefined;
+        nextImage = {
+          ...image,
+          taskId: task.id,
+          status: "success",
+          b64_json: nextUrl ? undefined : first.b64_json,
+          url: nextUrl,
+          revised_prompt: first.revised_prompt,
+          error: persistPending ? "图片已生成，正在转存本地…" : transientError,
+          persistStatus: persistPending ? "pending" : persistFailed ? "error" : "done",
+        };
+      }
     }
   } else if (task.status === "error") {
     nextImage = {
@@ -559,7 +589,8 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
             image.taskId &&
             (image.status !== "success" ||
               (!image.url && !image.b64_json) ||
-              (shouldRepairRecentSuccess && Boolean(image.url) && !String(image.url).includes("/images/")))
+              image.persistStatus === "pending" ||
+              (shouldRepairRecentSuccess && Boolean(image.url) && !isManagedImageUrl(String(image.url))))
               ? [image.taskId]
               : [],
           ),
@@ -588,7 +619,12 @@ async function syncConversationImageTasks(items: ImageConversation[]) {
       const images = turn.images.map((image) => {
         if (
           !image.taskId ||
-          (!shouldRepairRecentSuccess && image.status === "success" && (image.url || image.b64_json))
+          (
+            !shouldRepairRecentSuccess &&
+            image.status === "success" &&
+            image.persistStatus !== "pending" &&
+            (image.url || image.b64_json)
+          )
         ) {
           return image;
         }

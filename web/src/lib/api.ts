@@ -361,6 +361,7 @@ export async function fetchPublicConfig() {
 
 export type ImageTaskRuntime = {
   transport: "memory" | string;
+  storage?: "sqlite" | "database" | "json" | string;
   workers: number;
   upstream_concurrency: number;
   active_upstream_slots: number;

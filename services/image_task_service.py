@@ -4,12 +4,19 @@ import json
 import os
 import queue
 import threading
+import atexit
 import time
 import hashlib
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool, StaticPool
 
 from services.account_service import account_service
 from services.auth_service import ImageQuotaExceeded, auth_service
@@ -17,6 +24,7 @@ from services.config import DATA_DIR, config
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.openai_backend_api import OpenAIBackendAPI
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from services.storage.database_storage import Base, ImageTaskModel
 from utils.log import logger
 
 TASK_STATUS_QUEUED = "queued"
@@ -170,6 +178,85 @@ def _compact_image_data(data: object) -> object:
     return result
 
 
+def _task_database_url(path: Path) -> str:
+    configured = (
+        os.getenv("IMAGE_TASKS_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+        or ""
+    ).strip()
+    if configured:
+        return configured
+    return f"sqlite:///{path.with_suffix('.db').as_posix()}"
+
+
+def _create_task_engine(database_url: str):
+    url = make_url(database_url)
+    if url.drivername.startswith("sqlite") and url.database and url.database != ":memory:":
+        Path(url.database).parent.mkdir(parents=True, exist_ok=True)
+    kwargs: dict[str, Any] = {"pool_pre_ping": True, "pool_recycle": 3600}
+    if url.drivername.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+        kwargs["poolclass"] = StaticPool if url.database == ":memory:" else NullPool
+    engine = create_engine(database_url, **kwargs)
+    if url.drivername.startswith("sqlite"):
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=30000")
+            finally:
+                cursor.close()
+    return engine
+
+
+def _normalize_task_item(item: object) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    task_id = _clean(item.get("id"))
+    owner = _clean(item.get("owner_id"))
+    if not task_id or not owner:
+        return None
+    status = _clean(item.get("status"))
+    if status not in {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING, TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}:
+        status = TASK_STATUS_ERROR
+    task: dict[str, Any] = {
+        "id": task_id,
+        "owner_id": owner,
+        "owner_name": _clean(item.get("owner_name")),
+        "owner_role": _clean(item.get("owner_role")),
+        "status": status,
+        "mode": "edit" if item.get("mode") == "edit" else "generate",
+        "model": _clean(item.get("model"), "gpt-image-2"),
+        "size": _clean(item.get("size")),
+        "reserved_quota": int(item.get("reserved_quota") or 0),
+        "duration_ms": int(item.get("duration_ms") or 0),
+        "created_at": _clean(item.get("created_at"), _now_iso()),
+        "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
+    }
+    started_at = _clean(item.get("started_at"))
+    if started_at:
+        task["started_at"] = started_at
+    data = item.get("data")
+    if isinstance(data, list):
+        task["data"] = data
+    metrics = item.get("metrics")
+    if isinstance(metrics, dict):
+        task["metrics"] = metrics
+    persist_summary = item.get("persist_summary")
+    if isinstance(persist_summary, dict):
+        task["persist_summary"] = {
+            "pending": int(persist_summary.get("pending") or 0),
+            "completed": int(persist_summary.get("completed") or 0),
+            "failed": int(persist_summary.get("failed") or 0),
+        }
+    error = _clean(item.get("error"))
+    if error:
+        task["error"] = error
+    return task
+
+
 class ImageTaskService:
     def __init__(
         self,
@@ -178,6 +265,8 @@ class ImageTaskService:
         generation_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_generations.handle,
         edit_handler: Callable[[dict[str, Any]], dict[str, Any]] = openai_v1_image_edit.handle,
         retention_days_getter: Callable[[], int] | None = None,
+        database_url: str | None = None,
+        enable_database: bool = True,
     ):
         self.path = path
         self.generation_handler = generation_handler
@@ -191,6 +280,7 @@ class ImageTaskService:
         self._upstream_condition = threading.Condition()
         self._active_upstream_slots = 0
         self._started_worker_count = 0
+        self._worker_executor = ThreadPoolExecutor(max_workers=MAX_IMAGE_TASK_WORKERS, thread_name_prefix="image-task-worker")
         self._active_worker_tasks: dict[int, tuple[str, float]] = {}
         self._persist_queue: queue.Queue[tuple[str, dict[str, Any], dict[str, Any]]] = queue.Queue()
         self._persist_worker_count = _env_int(
@@ -200,7 +290,15 @@ class ImageTaskService:
             maximum=8,
         )
         self._persist_threads_started = 0
+        self._active_persist_tasks = 0
+        self._persist_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="image-persist-worker")
         self._dirty = False
+        self._db_available = False
+        self._engine = None
+        self._Session = None
+        self.database_url = database_url if database_url is not None else _task_database_url(path)
+        if enable_database:
+            self._init_database()
         self._running_task_timeout_seconds = _env_int(
             "CHATGPT2API_IMAGE_TASK_TIMEOUT_SECONDS",
             DEFAULT_RUNNING_TASK_TIMEOUT_SECONDS,
@@ -210,6 +308,8 @@ class ImageTaskService:
         self._last_cleanup_at = 0.0
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
+            if self._db_available:
+                self._migrate_legacy_json_to_db_locked()
             self._tasks = self._load_locked()
             changed = self._recover_unfinished_locked()
             changed = self._cleanup_locked() or changed
@@ -226,6 +326,31 @@ class ImageTaskService:
         )
         self.reload_runtime_settings()
         self._start_workers()
+
+    def _init_database(self) -> None:
+        try:
+            self._engine = _create_task_engine(self.database_url)
+            Base.metadata.create_all(self._engine, tables=[ImageTaskModel.__table__])
+            self._Session = sessionmaker(bind=self._engine, expire_on_commit=False)
+            self._db_available = True
+            logger.info({"event": "image_task_storage", "backend": "sqlite" if "sqlite" in self.database_url else "database"})
+        except Exception as exc:
+            self._db_available = False
+            self._engine = None
+            self._Session = None
+            logger.warning({"event": "image_task_storage_fallback_json", "error": str(exc)})
+
+    def close(self) -> None:
+        try:
+            self._worker_executor.shutdown(wait=False, cancel_futures=False)
+        except Exception:
+            pass
+        try:
+            self._persist_executor.shutdown(wait=False, cancel_futures=False)
+        except Exception:
+            pass
+        if self._engine is not None:
+            self._engine.dispose()
 
     def _resolve_worker_count(self) -> int:
         configured = getattr(config, "data", {}).get("image_task_worker_count")
@@ -402,6 +527,7 @@ class ImageTaskService:
 
             return {
                 "transport": "memory",
+                "storage": "sqlite" if self._db_available and "sqlite" in self.database_url else ("database" if self._db_available else "json"),
                 "workers": self._worker_count,
                 "upstream_concurrency": self._upstream_concurrency,
                 "active_upstream_slots": self._active_upstream_slots,
@@ -506,28 +632,10 @@ class ImageTaskService:
         self._ensure_persist_threads()
 
     def _ensure_worker_threads(self) -> None:
-        while self._started_worker_count < self._worker_count:
-            self._started_worker_count += 1
-            index = self._started_worker_count
-            thread = threading.Thread(
-                target=self._worker,
-                args=(index,),
-                name=f"image-task-worker-{index}",
-                daemon=True,
-            )
-            thread.start()
+        self._drain_task_queue()
 
     def _ensure_persist_threads(self) -> None:
-        while self._persist_threads_started < self._persist_worker_count:
-            self._persist_threads_started += 1
-            index = self._persist_threads_started
-            thread = threading.Thread(
-                target=self._persist_worker,
-                args=(index,),
-                name=f"image-persist-worker-{index}",
-                daemon=True,
-            )
-            thread.start()
+        self._drain_persist_queue()
 
     def _worker_enabled(self, worker_index: int) -> bool:
         return worker_index <= self._worker_count
@@ -562,46 +670,70 @@ class ImageTaskService:
 
     def _enqueue_task(self, key: str, mode: str, payload: dict[str, Any]) -> None:
         self._queue.put((key, mode, payload))
+        self._drain_task_queue()
 
-    def _worker(self, worker_index: int) -> None:
-        while True:
-            if not self._worker_enabled(worker_index):
-                time.sleep(1)
-                continue
-            try:
-                key, mode, payload = self._queue.get(timeout=5)
-            except queue.Empty:
-                continue
-            try:
-                with self._lock:
-                    self._active_worker_tasks[worker_index] = (key, time.time())
-                self._run_task(key, mode, payload)
-            except Exception as exc:
-                print(f"[image-task-worker] unexpected error key={key}: {exc}")
-            finally:
-                with self._lock:
-                    self._active_worker_tasks.pop(worker_index, None)
+    def _drain_task_queue(self) -> None:
+        with self._lock:
+            while len(self._active_worker_tasks) < max(1, self._worker_count):
+                try:
+                    key, mode, payload = self._queue.get_nowait()
+                except queue.Empty:
+                    return
+                self._started_worker_count += 1
+                index = self._started_worker_count
+                self._active_worker_tasks[index] = (key, time.time())
+                try:
+                    self._worker_executor.submit(self._run_queue_item, index, key, mode, payload)
+                except Exception:
+                    self._active_worker_tasks.pop(index, None)
+                    self._queue.task_done()
+                    raise
+
+    def _run_queue_item(self, worker_index: int, key: str, mode: str, payload: dict[str, Any]) -> None:
+        try:
+            self._run_task(key, mode, payload)
+        except Exception as exc:
+            print(f"[image-task-worker] unexpected error key={key}: {exc}")
+        finally:
+            with self._lock:
+                self._active_worker_tasks.pop(worker_index, None)
                 self._queue.task_done()
+            self._drain_task_queue()
 
-    def _persist_worker(self, worker_index: int) -> None:
-        while True:
-            try:
-                key, item, context = self._persist_queue.get(timeout=5)
-            except queue.Empty:
-                continue
-            try:
-                self._persist_task_image(key, item, context)
-            except Exception as exc:
-                logger.warning(
-                    {
-                        "event": "image_task_persist_worker_failed",
-                        "worker": worker_index,
-                        "key": key,
-                        "error": str(exc),
-                    }
-                )
-            finally:
+    def _drain_persist_queue(self) -> None:
+        with self._lock:
+            while self._active_persist_tasks < max(1, self._persist_worker_count):
+                try:
+                    key, item, context = self._persist_queue.get_nowait()
+                except queue.Empty:
+                    return
+                self._persist_threads_started += 1
+                index = self._persist_threads_started
+                self._active_persist_tasks += 1
+                try:
+                    self._persist_executor.submit(self._run_persist_item, index, key, item, context)
+                except Exception:
+                    self._active_persist_tasks = max(0, self._active_persist_tasks - 1)
+                    self._persist_queue.task_done()
+                    raise
+
+    def _run_persist_item(self, worker_index: int, key: str, item: dict[str, Any], context: dict[str, Any]) -> None:
+        try:
+            self._persist_task_image(key, item, context)
+        except Exception as exc:
+            logger.warning(
+                {
+                    "event": "image_task_persist_worker_failed",
+                    "worker": worker_index,
+                    "key": key,
+                    "error": str(exc),
+                }
+            )
+        finally:
+            with self._lock:
+                self._active_persist_tasks = max(0, self._active_persist_tasks - 1)
                 self._persist_queue.task_done()
+            self._drain_persist_queue()
 
     def _log_task_call(self, key: str, *, started: float, status: str, result: object = None, error: str = "") -> None:
         task = self._tasks.get(key, {})
@@ -681,6 +813,7 @@ class ImageTaskService:
                 self._persist_queue.put_nowait((key, item, context))
             except Exception:
                 self._update_persist_result(key, item, None, "persist queue unavailable", 0)
+        self._drain_persist_queue()
 
     def _persist_task_image(self, key: str, queued_item: dict[str, Any], context: dict[str, Any]) -> None:
         persist_meta = queued_item.get("_persist") if isinstance(queued_item.get("_persist"), dict) else {}
@@ -1011,7 +1144,7 @@ class ImageTaskService:
             self._dirty = True
             self._save_locked()
 
-    def _load_locked(self) -> dict[str, dict[str, Any]]:
+    def _load_from_disk_locked(self) -> dict[str, dict[str, Any]]:
         if not self.path.exists():
             return {}
         try:
@@ -1023,61 +1156,140 @@ class ImageTaskService:
             return {}
         tasks: dict[str, dict[str, Any]] = {}
         for item in raw_items:
-            if not isinstance(item, dict):
-                continue
-            task_id = _clean(item.get("id"))
-            owner = _clean(item.get("owner_id"))
-            if not task_id or not owner:
-                continue
-            status = _clean(item.get("status"))
-            if status not in {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING, TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}:
-                status = TASK_STATUS_ERROR
-            task = {
-                "id": task_id,
-                "owner_id": owner,
-                "owner_name": _clean(item.get("owner_name")),
-                "owner_role": _clean(item.get("owner_role")),
-                "status": status,
-                "mode": "edit" if item.get("mode") == "edit" else "generate",
-                "model": _clean(item.get("model"), "gpt-image-2"),
-                "size": _clean(item.get("size")),
-                "reserved_quota": int(item.get("reserved_quota") or 0),
-                "duration_ms": int(item.get("duration_ms") or 0),
-                "created_at": _clean(item.get("created_at"), _now_iso()),
-                "updated_at": _clean(item.get("updated_at"), _clean(item.get("created_at"), _now_iso())),
-            }
-            started_at = _clean(item.get("started_at"))
-            if started_at:
-                task["started_at"] = started_at
-            data = item.get("data")
-            if isinstance(data, list):
-                task["data"] = data
-            metrics = item.get("metrics")
-            if isinstance(metrics, dict):
-                task["metrics"] = metrics
-            persist_summary = item.get("persist_summary")
-            if isinstance(persist_summary, dict):
-                task["persist_summary"] = {
-                    "pending": int(persist_summary.get("pending") or 0),
-                    "completed": int(persist_summary.get("completed") or 0),
-                    "failed": int(persist_summary.get("failed") or 0),
-                }
-            error = _clean(item.get("error"))
-            if error:
-                task["error"] = error
-            tasks[_task_key(owner, task_id)] = task
+            task = _normalize_task_item(item)
+            if task is not None:
+                tasks[_task_key(_clean(task.get("owner_id")), _clean(task.get("id")))] = task
         return tasks
 
-    def _save_locked(self) -> None:
-        if not self._dirty:
+    def _load_from_db_locked(self) -> dict[str, dict[str, Any]]:
+        if self._Session is None:
+            return {}
+        session = self._Session()
+        try:
+            rows = session.query(ImageTaskModel).order_by(ImageTaskModel.updated_at.desc()).all()
+            tasks: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                try:
+                    payload = json.loads(row.payload)
+                except Exception:
+                    continue
+                task = _normalize_task_item(payload)
+                if task is not None:
+                    tasks[_task_key(_clean(task.get("owner_id")), _clean(task.get("id")))] = task
+            return tasks
+        finally:
+            session.close()
+
+    def _migrate_legacy_json_to_db_locked(self) -> None:
+        if self._Session is None or not self.path.exists():
             return
-        items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        legacy_tasks = self._load_from_disk_locked()
+        if not legacy_tasks:
+            return
+        session = self._Session()
+        migrated = 0
+        try:
+            for task in legacy_tasks.values():
+                owner = _clean(task.get("owner_id"))
+                task_id = _clean(task.get("id"))
+                if not owner or not task_id:
+                    continue
+                row = (
+                    session.query(ImageTaskModel)
+                    .filter(ImageTaskModel.owner_id == owner, ImageTaskModel.task_id == task_id)
+                    .one_or_none()
+                )
+                payload = json.dumps(task, ensure_ascii=False, separators=(",", ":"))
+                created_at = _clean(task.get("created_at"), _now_iso())
+                updated_at = _clean(task.get("updated_at"), created_at)
+                if row is None:
+                    session.add(
+                        ImageTaskModel(
+                            owner_id=owner,
+                            task_id=task_id,
+                            status=_clean(task.get("status"), TASK_STATUS_ERROR),
+                            payload=payload,
+                            created_at=created_at,
+                            updated_at=updated_at,
+                        )
+                    )
+                    migrated += 1
+                elif _timestamp(updated_at) >= _timestamp(row.updated_at):
+                    row.status = _clean(task.get("status"), TASK_STATUS_ERROR)
+                    row.payload = payload
+                    row.created_at = created_at
+                    row.updated_at = updated_at
+                    migrated += 1
+            session.commit()
+            if migrated:
+                logger.info({"event": "image_task_json_migrated_to_db", "migrated": migrated})
+        except Exception as exc:
+            session.rollback()
+            self._db_available = False
+            logger.warning({"event": "image_task_json_migration_failed", "error": str(exc)})
+        finally:
+            session.close()
+
+    def _load_locked(self) -> dict[str, dict[str, Any]]:
+        if self._db_available:
+            try:
+                return self._load_from_db_locked()
+            except Exception as exc:
+                self._db_available = False
+                logger.warning({"event": "image_task_db_load_failed", "error": str(exc)})
+        return self._load_from_disk_locked()
+
+    def _save_to_db_locked(self, items: list[dict[str, Any]]) -> None:
+        if self._Session is None:
+            raise RuntimeError("image task database session is unavailable")
+        session = self._Session()
+        try:
+            session.query(ImageTaskModel).delete()
+            for item in items:
+                owner = _clean(item.get("owner_id"))
+                task_id = _clean(item.get("id"))
+                if not owner or not task_id:
+                    continue
+                created_at = _clean(item.get("created_at"), _now_iso())
+                updated_at = _clean(item.get("updated_at"), created_at)
+                session.add(
+                    ImageTaskModel(
+                        owner_id=owner,
+                        task_id=task_id,
+                        status=_clean(item.get("status"), TASK_STATUS_ERROR),
+                        payload=json.dumps(item, ensure_ascii=False, separators=(",", ":")),
+                        created_at=created_at,
+                        updated_at=updated_at,
+                    )
+                )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def _save_to_disk_locked(self, items: list[dict[str, Any]]) -> None:
         tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp_path.write_text(
             json.dumps({"tasks": items}, ensure_ascii=False, separators=(",", ":")) + "\n",
             encoding="utf-8",
         )
         tmp_path.replace(self.path)
+
+    def _save_locked(self) -> None:
+        if not self._dirty:
+            return
+        items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        if self._db_available:
+            try:
+                self._save_to_db_locked(items)
+                self._dirty = False
+                return
+            except Exception as exc:
+                self._db_available = False
+                logger.warning({"event": "image_task_db_save_failed_fallback_json", "error": str(exc)})
+        self._save_to_disk_locked(items)
         self._dirty = False
 
     def _fail_unfinished_task_locked(self, task: dict[str, Any], message: str) -> None:
@@ -1150,3 +1362,4 @@ class ImageTaskService:
 
 
 image_task_service = ImageTaskService(DATA_DIR / "image_tasks.json")
+atexit.register(image_task_service.close)
