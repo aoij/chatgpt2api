@@ -116,6 +116,14 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
+def _collect_local_image_urls(data: list[Any]) -> list[str]:
+    urls: list[str] = []
+    for url in _collect_image_urls(data):
+        if "/images/" in url:
+            urls.append(url)
+    return urls
+
+
 def _count_success_images(data: object) -> int:
     if not isinstance(data, list):
         return 0
@@ -739,6 +747,7 @@ class ImageTaskService:
         task = self._tasks.get(key, {})
         endpoint = "/v1/images/edits" if task.get("mode") == "edit" else "/v1/images/generations"
         detail: dict[str, Any] = {
+            "task_id": task.get("id"),
             "key_id": task.get("owner_id"),
             "key_name": task.get("owner_name") or task.get("owner_id"),
             "role": task.get("owner_role") or "user",
@@ -1040,6 +1049,10 @@ class ImageTaskService:
             task["updated_at"] = _now_iso()
             self._dirty = True
             self._save_locked()
+            persist_summary = task.get("persist_summary") if isinstance(task.get("persist_summary"), dict) else {}
+            local_urls = _collect_local_image_urls(raw_data)
+            if int(persist_summary.get("pending") or 0) == 0 and local_urls:
+                log_service.update_call_urls(task.get("owner_id"), task.get("id"), local_urls)
 
     def _run_task(self, key: str, mode: str, payload: dict[str, Any]) -> None:
         slot_wait_started = time.time()

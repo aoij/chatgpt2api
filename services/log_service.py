@@ -106,6 +106,41 @@ class LogService:
         self.path.write_text(content, encoding="utf-8")
         return {"removed": removed}
 
+    def update_call_urls(self, key_id: object, task_id: object, urls: list[str]) -> bool:
+        normalized_key_id = str(key_id or "").strip()
+        normalized_task_id = str(task_id or "").strip()
+        normalized_urls = [str(url or "").strip() for url in urls if str(url or "").strip()]
+        if not self.path.exists() or not normalized_key_id or not normalized_task_id or not normalized_urls:
+            return False
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        updated = False
+        rewritten: list[str] = []
+        for line_number, raw_line in enumerate(lines):
+            item = self._parse_line(raw_line, line_number)
+            if item is None:
+                rewritten.append(raw_line)
+                continue
+            detail = item.get("detail") if isinstance(item.get("detail"), dict) else None
+            if (
+                not updated
+                and item.get("type") == LOG_TYPE_CALL
+                and isinstance(detail, dict)
+                and str(detail.get("key_id") or "").strip() == normalized_key_id
+                and str(detail.get("task_id") or "").strip() == normalized_task_id
+            ):
+                next_detail = dict(detail)
+                next_detail["urls"] = list(dict.fromkeys(normalized_urls))
+                next_detail.pop("thumbnail_urls", None)
+                item = {**item, "detail": next_detail}
+                updated = True
+            rewritten.append(self._serialize_item(item))
+        if updated:
+            content = "\n".join(rewritten)
+            if content:
+                content += "\n"
+            self.path.write_text(content, encoding="utf-8")
+        return updated
+
 
 log_service = LogService(DATA_DIR / "logs.jsonl")
 

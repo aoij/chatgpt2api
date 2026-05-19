@@ -35,6 +35,21 @@ LIST_CACHE_TTL_SECONDS = 20
 _UNKNOWN_UPLOADER = "未知上传人"
 
 
+def _timestamp(value: object) -> float:
+    if not isinstance(value, str) or not value.strip():
+        return 0.0
+    text = value.strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:26], fmt).timestamp()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
 def _thumb_root() -> Path:
     path = config.images_dir.parent / "image_thumbs"
     path.mkdir(parents=True, exist_ok=True)
@@ -396,8 +411,69 @@ def thumbnail_url_for_image_url(base_url: str, image_url: str) -> Optional[str]:
         return None
 
 
+def _list_local_image_urls_for_day(base_url: str, day: str) -> list[tuple[str, str]]:
+    parts = [part for part in str(day or "").strip().split("-") if part]
+    if len(parts) != 3:
+        return []
+    day_dir = config.images_dir / parts[0] / parts[1] / parts[2]
+    if not day_dir.exists() or not day_dir.is_dir():
+        return []
+    result: list[tuple[str, str]] = []
+    for path in sorted(day_dir.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in _IMAGE_SUFFIXES:
+            continue
+        rel = path.relative_to(config.images_dir).as_posix()
+        timestamp = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        result.append((timestamp, f"{base_url.rstrip('/')}/images/{rel}"))
+    return result
+
+
+def _repair_log_urls_with_local_images(
+    item: dict[str, object],
+    urls: list[str],
+    base_url: str,
+    local_images_by_day: dict[str, list[tuple[str, str]]],
+) -> list[str]:
+    if not urls or any("/images/" in str(url or "") for url in urls):
+        return urls
+    if not all("chatgpt.com/backend-api/estuary/" in str(url or "") for url in urls):
+        return urls
+    time_text = _clean(item.get("time"))
+    if len(time_text) < 10:
+        return urls
+    day = time_text[:10]
+    local_images = local_images_by_day.get(day)
+    if local_images is None:
+        local_images = _list_local_image_urls_for_day(base_url, day)
+        local_images_by_day[day] = local_images
+    if not local_images:
+        return urls
+    target_count = len(urls)
+    window: list[tuple[int, str]] = []
+    item_ts = _timestamp(time_text)
+    for image_time, image_url in local_images:
+        image_ts = _timestamp(image_time)
+        if item_ts <= 0 or image_ts <= 0:
+            continue
+        delta = abs(int(image_ts - item_ts))
+        if delta <= 30:
+            window.append((delta, image_url))
+    if len(window) < target_count:
+        return urls
+    window.sort(key=lambda row: row[0])
+    chosen: list[str] = []
+    for _delta, image_url in window:
+        if image_url in chosen:
+            continue
+        chosen.append(image_url)
+        if len(chosen) >= target_count:
+            return chosen
+    return urls
+
+
 def add_log_image_thumbnails(items: list[dict[str, object]], base_url: str) -> list[dict[str, object]]:
     normalized_base_url = base_url.rstrip("/")
+    local_images_by_day: dict[str, list[tuple[str, str]]] = {}
     for item in items:
         detail = item.get("detail") if isinstance(item, dict) else None
         if not isinstance(detail, dict):
@@ -405,6 +481,10 @@ def add_log_image_thumbnails(items: list[dict[str, object]], base_url: str) -> l
         urls = detail.get("urls")
         if not isinstance(urls, list):
             continue
+        repaired_urls = _repair_log_urls_with_local_images(item, [str(url) for url in urls if isinstance(url, str)], normalized_base_url, local_images_by_day)
+        if repaired_urls != urls:
+            detail["urls"] = repaired_urls
+            urls = repaired_urls
         thumbnails: list[Optional[str]] = []
         has_thumbnail = False
         for url in urls:

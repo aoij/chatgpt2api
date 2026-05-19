@@ -42,6 +42,11 @@ function getUrls(item: SystemLog | null) {
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
 }
 
+function getThumbnailUrls(item: SystemLog | null) {
+  const urls = item?.detail?.thumbnail_urls;
+  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
+}
+
 function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
@@ -206,6 +211,7 @@ function LogsContent() {
               <TableBody>
                 {currentRows.map((item) => {
                   const urls = getUrls(item);
+                  const thumbnailUrls = getThumbnailUrls(item);
                   return (
                     <TableRow key={item.id} className="text-stone-600">
                       <TableCell>
@@ -234,7 +240,11 @@ function LogsContent() {
                                   onClick={() => openLogImage(item, imageIndex)}
                                   title="预览图片"
                                 >
-                                  <ImageThumbnail src={url} thumbnailSrc={getImageThumbnailUrl(url)} className="h-full w-full" />
+                                  <ImageThumbnail
+                                    src={url}
+                                    thumbnailSrc={thumbnailUrls[imageIndex] || getImageThumbnailUrl(url)}
+                                    className="h-full w-full"
+                                  />
                                 </button>
                               ))}
                               {urls.length > 3 ? <span className="text-xs text-stone-400">+{urls.length - 3}</span> : null}
@@ -295,7 +305,9 @@ function LogsContent() {
               </div>
               {detailUrls.length ? (
                 <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-                  {detailUrls.map((url, index) => (
+                  {detailUrls.map((url, index) => {
+                    const thumbnailUrl = getThumbnailUrls(detailLog)[index] || getImageThumbnailUrl(url);
+                    return (
                     <button
                       key={url}
                       type="button"
@@ -305,9 +317,10 @@ function LogsContent() {
                         setLightboxOpen(true);
                       }}
                     >
-                      <img src={url} alt="" className="h-full w-full object-cover" />
+                      <ImageThumbnail src={url} thumbnailSrc={thumbnailUrl} className="h-full w-full" imageClassName="h-full w-full object-cover" />
                     </button>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : null}
               <pre className="max-h-[72vh] overflow-auto rounded-xl border border-stone-200 bg-stone-50 p-4 text-xs leading-6 text-stone-700">
