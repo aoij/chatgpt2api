@@ -210,7 +210,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     try {
       const data = await downloadManagedImages(selectedPaths);
       saveBlobAsFile(data.blob, data.filename || `images-${Date.now()}.zip`);
-      toast.success(`已下载 ZIP（共 ${selectedPaths.length} 张）`);
+      toast.success(`已下载原图尺寸 JPG ZIP（共 ${selectedPaths.length} 张）`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "下载 ZIP 失败");
     } finally {
@@ -229,7 +229,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
         all_matching: true,
       });
       saveBlobAsFile(data.blob, data.filename || `filtered-images-${Date.now()}.zip`);
-      toast.success(`已下载匹配筛选的 ZIP（最多打包 200 张）`);
+      toast.success(`已下载匹配筛选的原图尺寸 JPG ZIP（最多打包 200 张）`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "下载筛选 ZIP 失败");
     } finally {
@@ -351,8 +351,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
           </h1>
           <p className="text-sm leading-6 text-stone-500">
             {isSelfMode
-              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；支持单张 JPG 下载与批量 ZIP 下载，图片仅保存 10 天，请及时保存。"
-              : "支持按日期和上传人筛选图片，分组查看、批量选择、批量 ZIP 下载并执行删除；单张下载会自动转成 JPG，图片仅保存 10 天。"}
+              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；单张下载为手机友好的 JPG，批量 ZIP 会打包原图尺寸 JPG，图片仅保存 10 天，请及时保存。"
+              : "支持按日期和上传人筛选图片，分组查看、批量选择、批量原图尺寸 JPG ZIP 下载并执行删除；单张下载会自动转成 JPG，图片仅保存 10 天。"}
           </p>
         </div>
 
@@ -433,7 +433,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
               title={hasActiveFilter ? "按当前筛选条件打包下载，最多 200 张" : "请先选择日期或上传人筛选条件"}
             >
               {isFilterDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-              下载当前筛选 ZIP
+              下载当前筛选原图尺寸 JPG ZIP
             </Button>
 
             <Button
@@ -473,7 +473,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
                 disabled={selectedPaths.length === 0 || isDownloading}
               >
                 {isDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-                下载所选 ZIP
+                下载所选原图尺寸 JPG ZIP
               </Button>
               <Button
                 variant="outline"

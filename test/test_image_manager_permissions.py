@@ -95,7 +95,7 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
             self.assertFalse(image_one.exists())
             self.assertTrue(image_two.exists())
 
-    def test_download_images_respects_uploader_and_returns_jpeg_zip(self) -> None:
+    def test_download_images_respects_uploader_and_returns_full_size_jpeg_zip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
             images_dir = root / "images"
@@ -137,6 +137,9 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
             self.assertIsNotNone(batch)
             with zipfile.ZipFile(BytesIO(batch["content"])) as archive:
                 self.assertEqual(archive.namelist(), ["2026/04/30/user-1.jpg"])
+                with Image.open(BytesIO(archive.read("2026/04/30/user-1.jpg"))) as image:
+                    self.assertEqual(image.format, "JPEG")
+                    self.assertEqual(image.size, (16, 16))
 
 
 if __name__ == "__main__":

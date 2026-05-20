@@ -857,7 +857,7 @@ def build_images_zip(
     end_date: str = "",
     all_matching: bool = False,
 ) -> Optional[dict[str, object]]:
-    """Build a permission-checked ZIP containing selected images as JPG files."""
+    """Build a permission-checked ZIP containing full-size JPG conversions."""
     if all_matching:
         normalized = _iter_image_rel_paths(start_date=start_date, end_date=end_date, uploader=uploader)
     else:
@@ -893,7 +893,7 @@ def build_images_zip(
                 content = _jpeg_bytes(path, image_rel)
                 entry_name = _zip_entry_name(image_rel, added + 1)
             except Exception as exc:
-                print(f"[image-download] zip convert jpeg failed path={path}: {exc}")
+                print(f"[image-download] zip convert full-size jpeg failed path={path}: {exc}")
                 content = path.read_bytes()
                 try:
                     entry_name = path.relative_to(root).as_posix()
