@@ -219,19 +219,29 @@ def encoding_for_model(model: str):
             return tiktoken.get_encoding("cl100k_base")
 
 
-def count_message_tokens(messages: list[dict[str, Any]], model: str) -> int:
+def count_message_image_tokens(messages: list[dict[str, Any]], model: str) -> int:
+    return sum(count_image_content_tokens(message.get("content"), model) for message in messages)
+
+
+def count_message_text_tokens(messages: list[dict[str, Any]], model: str) -> int:
     encoding = encoding_for_model(model)
     total = 0
     for message in messages:
         total += 3
         for key, value in message.items():
-            if not isinstance(value, str):
+            if key == "content" and isinstance(value, list):
+                total += len(encoding.encode(message_text(value)))
+            elif isinstance(value, str):
+                total += len(encoding.encode(value))
+            else:
                 continue
-            total += len(encoding.encode(value))
             if key == "name":
                 total += 1
     return total + 3
 
+
+def count_message_tokens(messages: list[dict[str, Any]], model: str) -> int:
+    return count_message_text_tokens(messages, model) + count_message_image_tokens(messages, model)
 
 def count_text_tokens(text: str, model: str) -> int:
     return len(encoding_for_model(model).encode(text))
