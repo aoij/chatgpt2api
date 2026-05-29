@@ -207,6 +207,11 @@ class AccountService:
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["last_used_at"] = normalized.get("last_used_at")
         normalized["last_remote_checked_at"] = self._clean_token(normalized.get("last_remote_checked_at")) or None
+        normalized["refresh_token"] = self._clean_token(normalized.get("refresh_token")) or None
+        normalized["id_token"] = self._clean_token(normalized.get("id_token")) or None
+        normalized["last_token_refresh_at"] = self._clean_token(normalized.get("last_token_refresh_at")) or None
+        normalized["last_token_refresh_error"] = self._clean_token(normalized.get("last_token_refresh_error")) or None
+        normalized["last_token_refresh_error_at"] = self._clean_token(normalized.get("last_token_refresh_error_at")) or None
         return normalized
 
     @staticmethod
@@ -1088,6 +1093,67 @@ class AccountService:
             return result
         finally:
             session.close()
+
+    def _jwt_exp(self, access_token: str) -> int:
+        try:
+            return int(self._decode_jwt_payload(access_token).get("exp") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _token_needs_refresh(self, access_token: str, *, force: bool = False) -> bool:
+        if force:
+            return True
+        exp = self._jwt_exp(access_token)
+        if exp <= 0:
+            return False
+        return exp - int(time.time()) <= 24 * 60 * 60
+
+    @staticmethod
+    def _parse_iso_datetime(value: object) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def list_expiring_access_tokens(self) -> list[str]:
+        with self._lock:
+            return [
+                token
+                for account in self._accounts
+                if self._clean_token(account.get("refresh_token"))
+                and (token := self._clean_token(account.get("access_token")))
+                and self._token_needs_refresh(token)
+            ]
+
+    def list_refresh_token_keepalive_tokens(self) -> list[str]:
+        now = time.time()
+        due: list[tuple[float, str]] = []
+        with self._lock:
+            for account in self._accounts:
+                token = self._clean_token(account.get("access_token"))
+                if not token or not self._clean_token(account.get("refresh_token")) or account.get("status") == "禁用":
+                    continue
+                last_error = self._parse_iso_datetime(account.get("last_token_refresh_error_at"))
+                if last_error and now - last_error.timestamp() < 6 * 60 * 60:
+                    continue
+                last_refresh = self._parse_iso_datetime(account.get("last_token_refresh_at"))
+                anchor = last_refresh.timestamp() if last_refresh else 0
+                if anchor <= 0:
+                    exp = self._jwt_exp(token)
+                    anchor = float(exp) if exp > 0 else 0.0
+                if anchor <= 0 or now - anchor >= 3 * 24 * 60 * 60:
+                    due.append((anchor, token))
+        due.sort(key=lambda item: item[0])
+        return [token for _, token in due[:3]]
+
+    def keepalive_refresh_tokens(self, access_tokens: list[str]) -> dict[str, Any]:
+        # Full OAuth refresh is only available in upstream account_service; keep this
+        # conservative no-op so the watcher does not crash on deployments that retain
+        # duan's customized account refresh path.
+        return {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
 
     def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
         cleaned_tokens = self._clean_tokens(access_tokens)
