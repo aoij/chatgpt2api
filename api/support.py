@@ -168,6 +168,11 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
     def worker() -> None:
         while not stop_event.is_set():
             try:
+                if config.auto_remove_invalid_accounts:
+                    removed_result = account_service.remove_marked_invalid_accounts(event="account-watcher")
+                    removed = int(removed_result.get("removed") or 0)
+                    if removed:
+                        print(f"[account-limited-watcher] removed {removed} abnormal accounts")
                 limited_tokens = account_service.list_limited_tokens()
                 if limited_tokens:
                     print(f"[account-limited-watcher] checking {len(limited_tokens)} limited accounts")

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -64,6 +64,7 @@ function LogsContent() {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
+  const [jumpPage, setJumpPage] = useState("1");
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -133,6 +134,16 @@ function LogsContent() {
       setIsDeleting(false);
     }
   };
+
+  const goToJumpPage = useCallback(() => {
+    const nextPage = Math.min(pageCount, Math.max(1, Math.floor(Number(jumpPage) || 1)));
+    setJumpPage(String(nextPage));
+    setPage(nextPage);
+  }, [jumpPage, pageCount]);
+
+  useEffect(() => {
+    setJumpPage(String(safePage));
+  }, [safePage]);
 
   useEffect(() => {
     void loadLogs();
@@ -274,11 +285,32 @@ function LogsContent() {
               </TableBody>
             </Table>
           </div>
-          <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
+          <div className="flex flex-wrap items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
             <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
+            <div className="flex items-center gap-1.5 rounded-xl border border-stone-200 bg-white px-2 py-1">
+              <span className="text-xs text-stone-400">跳到</span>
+              <input
+                type="number"
+                min={1}
+                max={pageCount}
+                value={jumpPage}
+                onChange={(event) => setJumpPage(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    goToJumpPage();
+                  }
+                }}
+                className="h-7 w-16 rounded-lg border border-stone-200 bg-stone-50 px-2 text-center text-sm text-stone-700 outline-none focus:border-stone-300"
+              />
+              <span className="text-xs text-stone-400">页</span>
+              <Button variant="ghost" className="h-7 rounded-lg px-2 text-xs text-stone-600" onClick={goToJumpPage}>
+                跳转
+              </Button>
+            </div>
             <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
               <ChevronRight className="size-4" />
             </Button>
@@ -317,7 +349,7 @@ function LogsContent() {
                         setLightboxOpen(true);
                       }}
                     >
-                      <ImageThumbnail src={url} thumbnailSrc={thumbnailUrl} className="h-full w-full" imageClassName="h-full w-full object-cover" />
+                      <ImageThumbnail src={url} thumbnailSrc={thumbnailUrl} className="h-full w-full" imageClassName="h-full w-full object-cover" fallbackToOriginal />
                     </button>
                     );
                   })}

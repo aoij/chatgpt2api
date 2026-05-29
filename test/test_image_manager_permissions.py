@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 import zipfile
-from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -15,6 +13,15 @@ from PIL import Image
 
 import api.system as system_module
 import services.image_service as image_service_module
+
+
+TEST_TMP_ROOT = Path(__file__).resolve().parent.parent / ".test-tmp"
+
+
+def make_test_dir(name: str) -> Path:
+    path = TEST_TMP_ROOT / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 class ImageManagerApiTests(unittest.TestCase):
@@ -60,8 +67,16 @@ class ImageManagerApiTests(unittest.TestCase):
 
 class ImageServiceDeletePermissionTests(unittest.TestCase):
     def test_delete_images_only_removes_matching_uploader_when_paths_are_selected(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
+        root = make_test_dir("image-delete-permission")
+        deleted_paths: list[Path] = []
+
+        def fake_unlink(path: Path) -> None:
+            deleted_paths.append(path.resolve())
+
+        with (
+            mock.patch.object(image_service_module, "_cleanup_empty_dirs", lambda _root: None),
+            mock.patch.object(Path, "unlink", fake_unlink),
+        ):
             images_dir = root / "images"
             image_one = images_dir / "2026" / "04" / "30" / "user-1.png"
             image_two = images_dir / "2026" / "04" / "30" / "user-2.png"
@@ -92,12 +107,14 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
                 )
 
             self.assertEqual(result["removed"], 1)
-            self.assertFalse(image_one.exists())
+            self.assertIn(image_one.resolve(), deleted_paths)
+            self.assertNotIn(image_two.resolve(), deleted_paths)
             self.assertTrue(image_two.exists())
 
-    def test_download_images_respects_uploader_and_returns_jpeg_zip(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            root = Path(tmp_dir)
+    def test_download_images_respects_uploader_and_returns_full_size_jpeg_zip(self) -> None:
+        root = make_test_dir("image-download-permission")
+        zip_cache_path = root / "image_downloads" / "_zips" / "test-cache.zip"
+        with mock.patch.object(image_service_module, "_cleanup_empty_dirs", lambda _root: None):
             images_dir = root / "images"
             image_one = images_dir / "2026" / "04" / "30" / "user-1.png"
             image_two = images_dir / "2026" / "04" / "30" / "user-2.png"
@@ -122,6 +139,7 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
             with (
                 mock.patch.object(image_service_module, "config", fake_config),
                 mock.patch.object(image_service_module, "_METADATA_FILE", metadata_path),
+                mock.patch.object(image_service_module, "_download_zip_path_for", return_value=zip_cache_path),
             ):
                 single = image_service_module.build_image_download("2026/04/30/user-1.png", uploader="user-1")
                 denied = image_service_module.build_image_download("2026/04/30/user-2.png", uploader="user-1")
@@ -133,10 +151,15 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
             self.assertIsNotNone(single)
             self.assertEqual(single["media_type"], "image/jpeg")
             self.assertTrue(str(single["filename"]).endswith(".jpg"))
+            self.assertIn("file_path", single)
             self.assertIsNone(denied)
             self.assertIsNotNone(batch)
-            with zipfile.ZipFile(BytesIO(batch["content"])) as archive:
+            self.assertIn("file_path", batch)
+            with zipfile.ZipFile(batch["file_path"]) as archive:
                 self.assertEqual(archive.namelist(), ["2026/04/30/user-1.jpg"])
+                with archive.open("2026/04/30/user-1.jpg") as member, Image.open(member) as image:
+                    self.assertEqual(image.format, "JPEG")
+                    self.assertEqual(image.size, (16, 16))
 
 
 if __name__ == "__main__":

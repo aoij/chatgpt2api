@@ -6,7 +6,7 @@ from threading import Event
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from api import accounts, ai, image_tasks, register, system
@@ -66,7 +66,10 @@ def create_app() -> FastAPI:
     async def serve_image_thumb(thumb_path: str):
         resolved = resolve_thumbnail_file(thumb_path)
         if resolved is None or not resolved.is_file():
-            raise HTTPException(status_code=404, detail="Not Found")
+            # Missing thumbnails are generated asynchronously by list APIs. Return
+            # a tiny cacheable 204 instead of forcing each visible image to load the
+            # full original as fallback, which was the main cause of slow image pages.
+            return Response(status_code=204, headers={"Cache-Control": "private, max-age=5"})
         return FileResponse(
             resolved,
             media_type="image/webp",
@@ -93,7 +96,8 @@ def create_app() -> FastAPI:
                 if asset.suffix == ".html":
                     return HTMLResponse(text, headers={"Cache-Control": "no-cache"})
                 return PlainTextResponse(text, headers={"Cache-Control": "no-cache"})
-            return FileResponse(asset)
+            static_headers = {"Cache-Control": "public, max-age=31536000, immutable"} if "/_next/" in asset.as_posix() else None
+            return FileResponse(asset, headers=static_headers) if static_headers else FileResponse(asset)
         if full_path.strip("/").startswith("_next/"):
             raise HTTPException(status_code=404, detail="Not Found")
         fallback = resolve_web_asset("")

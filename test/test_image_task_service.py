@@ -143,7 +143,8 @@ class ImageTaskServiceTests(unittest.TestCase):
             result = service.list_tasks(OWNER, ["queued-task", "running-task"])
 
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
-            self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+            self.assertIn("缺少运行参数", result["items"][0].get("error", ""))
+            self.assertIn("已中断", result["items"][1].get("error", ""))
 
     def test_tasks_run_with_worker_pool(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -235,6 +236,69 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertIn("超时", task.get("error", ""))
             time.sleep(0.5)
             self.assertEqual(service.get_runtime_stats()["active_upstream_slots"], 0)
+
+    def test_orphan_queued_task_is_requeued_from_persisted_payload(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            calls = 0
+
+            def handler(_payload):
+                nonlocal calls
+                calls += 1
+                return {"data": [{"url": "http://example.test/requeued.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service._worker_count = 0
+            service.submit_generation(
+                OWNER,
+                client_task_id="orphan-queued",
+                prompt="cat",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            with service._lock:
+                while True:
+                    try:
+                        service._queue.get_nowait()
+                        service._queue.task_done()
+                    except Exception:
+                        break
+                service._worker_count = 1
+                service._active_worker_tasks.clear()
+
+            task = wait_for_task(service, OWNER, "orphan-queued", "success", timeout=2.0)
+
+            self.assertEqual(calls, 1)
+            self.assertEqual(task["data"][0]["url"], "http://example.test/requeued.png")
+
+    def test_orphan_queued_task_without_payload_fails_and_unblocks(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "image_tasks.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "id": "old-queued",
+                                "owner_id": "owner-1",
+                                "status": "queued",
+                                "mode": "generate",
+                                "model": "gpt-image-2",
+                                "reserved_quota": 0,
+                                "created_at": "2099-01-01 00:00:00",
+                                "updated_at": "2099-01-01 00:00:00",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            service = self.make_service(path)
+            result = service.list_tasks(OWNER, ["old-queued"])
+
+            self.assertEqual(result["items"][0]["status"], "error")
+            self.assertIn("缺少运行参数", result["items"][0].get("error", ""))
 
 
 if __name__ == "__main__":

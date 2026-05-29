@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
-import { LoaderCircle, MessageSquarePlus, Pencil, Trash2 } from "lucide-react";
+import { LoaderCircle, MessageSquarePlus, Pencil, RefreshCw, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -13,6 +13,7 @@ type ImageSidebarProps = {
   selectedConversationId: string | null;
   onCreateDraft: () => void;
   onClearHistory: () => void | Promise<void>;
+  onRefreshConversations?: () => void | Promise<void>;
   onSelectConversation: (id: string) => void;
   onDeleteConversation: (id: string) => void | Promise<void>;
   onRenameConversation: (id: string, title: string) => void | Promise<void>;
@@ -26,6 +27,7 @@ export function ImageSidebar({
   selectedConversationId,
   onCreateDraft,
   onClearHistory,
+  onRefreshConversations,
   onSelectConversation,
   onDeleteConversation,
   onRenameConversation,
@@ -74,8 +76,20 @@ export function ImageSidebar({
             <Button
               variant="outline"
               className="h-10 rounded-xl border-stone-200 bg-white/85 px-3 text-stone-600 hover:bg-white"
+              onClick={() => void onRefreshConversations?.()}
+              disabled={isLoadingHistory || !onRefreshConversations}
+              title="刷新当前登录人的全部会话"
+              aria-label="刷新当前登录人的全部会话"
+            >
+              <RefreshCw className={cn("size-4", isLoadingHistory && "animate-spin")} />
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-xl border-stone-200 bg-white/85 px-3 text-stone-600 hover:bg-white"
               onClick={() => void onClearHistory()}
               disabled={conversations.length === 0}
+              title="清空历史记录"
+              aria-label="清空历史记录"
             >
               <Trash2 className="size-4" />
             </Button>

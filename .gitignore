@@ -28,3 +28,18 @@ docker-compose-local.yml
 
 # Git cache
 git_cache/
+.test-tmp/
+pytest-cache-files-*/
+????????
+web/tmp_unbalanced_quotes.txt
+
+# Local Codex/deploy artifacts
+*.tar.gz
+local_test_server*.log
+playwright-*.png
+codex_tmp_*.diff
+codex_write_test.txt
+patch/
+patch_deploy/
+web_build_tmp*/
+web_out_*.tar.gz

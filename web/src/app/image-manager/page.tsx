@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   CalendarDays,
   ChevronLeft,
@@ -25,14 +25,14 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
+  buildManagedImageDownloadParams,
+  buildManagedImagesDownloadParams,
   fetchManagedImages,
   deleteManagedImages,
-  downloadManagedImage,
-  downloadManagedImages,
   type ManagedImage,
   type ManagedImageUploader,
 } from "@/lib/api";
-import { defaultImageDownloadName, saveBlobAsFile } from "@/lib/download";
+import { openDirectDownload } from "@/lib/download";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 import type { StoredAuthSession } from "@/store/auth";
@@ -50,6 +50,105 @@ function imageKey(item: ManagedImage) {
 function imageDimensions(item: ManagedImage) {
   return item.width && item.height ? `${item.width} × ${item.height}` : "-";
 }
+
+type ImageCardProps = {
+  item: ManagedImage;
+  imageIndex: number;
+  selected: boolean;
+  actorLabel: string;
+  isSelfMode: boolean;
+  isDownloading: boolean;
+  onCopy: (url: string) => void;
+  onDownload: (path: string, filename?: string) => void;
+  onToggle: (path: string, checked: boolean) => void;
+  onOpen: (index: number) => void;
+};
+
+const ImageCard = memo(function ImageCard({
+  item,
+  imageIndex,
+  selected,
+  actorLabel,
+  isSelfMode,
+  isDownloading,
+  onCopy,
+  onDownload,
+  onToggle,
+  onOpen,
+}: ImageCardProps) {
+  const key = imageKey(item);
+  return (
+    <div
+      className={cn(
+        "group rounded-[24px] border bg-white/95 p-2.5 shadow-sm transition sm:p-3",
+        selected ? "border-stone-900 ring-1 ring-stone-900/10" : "border-stone-200/80 hover:border-stone-300",
+      )}
+    >
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="min-w-0 truncate text-[11px] font-medium text-stone-500">
+          {item.created_at}
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8 rounded-xl text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+            onClick={() => onCopy(item.url)}
+          >
+            <Copy className="size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8 rounded-xl text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+            disabled={isDownloading}
+            onClick={() => onDownload(key, item.name ? `${item.name.replace(/\.[^.]+$/, "")}.jpg` : undefined)}
+            title="下载 JPG 图片"
+          >
+            <Download className="size-4" />
+          </Button>
+          <span className="flex size-8 items-center justify-center rounded-xl border border-stone-200 bg-white">
+            <Checkbox checked={selected} onCheckedChange={(checked) => onToggle(key, Boolean(checked))} />
+          </span>
+        </div>
+      </div>
+
+      <button
+        type="button"
+        className="relative block aspect-square w-full cursor-zoom-in overflow-hidden rounded-[20px] bg-stone-100 text-left"
+        onClick={() => onOpen(imageIndex)}
+      >
+        <ImageThumbnail
+          src={item.url}
+          thumbnailSrc={item.thumbnail_url}
+          alt={item.name}
+          className="h-full w-full"
+          imageClassName="transition duration-200 group-hover:scale-[1.02]"
+        />
+        <span className="absolute right-2 bottom-2 rounded-full bg-black/50 p-2 text-white opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">
+          <Maximize2 className="size-4" />
+        </span>
+      </button>
+
+      <div className="mt-3 space-y-2 text-xs text-stone-500">
+        <div className="flex items-center gap-1.5 text-stone-600">
+          <Users className="size-3.5" />
+          <span className="truncate" title={actorLabel}>
+            {isSelfMode ? "令牌" : "上传人"}：{actorLabel}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5 text-stone-600">
+          <CalendarDays className="size-3.5" />
+          <span className="truncate">{item.date}</span>
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span>{formatSize(item.size)}</span>
+          <span>{imageDimensions(item)}</span>
+        </div>
+      </div>
+    </div>
+  );
+});
 
 function uploaderLabel(item: Pick<ManagedImage, "uploader_name" | "uploader_id">) {
   return item.uploader_name || item.uploader_id || "未知上传人";
@@ -78,6 +177,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
+  const [jumpPage, setJumpPage] = useState("1");
   const [total, setTotal] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -100,14 +200,19 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
   const filterDeleteDisabled = isDeleting || total === 0 || !hasActiveFilter;
   const filterZipDisabled = isFilterDownloading || total === 0 || !hasActiveFilter;
 
-  const lightboxImages = items.map((item) => ({
+  const lightboxImages = useMemo(() => items.map((item) => ({
     id: imageKey(item),
     src: item.url,
     sizeLabel: formatSize(item.size),
     dimensions: imageDimensions(item),
     downloadPath: item.path || imageKey(item),
     filename: item.name ? `${item.name.replace(/\.[^.]+$/, "")}.jpg` : undefined,
-  }));
+  })), [items]);
+  const itemIndexByKey = useMemo(() => {
+    const map = new Map<string, number>();
+    items.forEach((item, index) => map.set(imageKey(item), index));
+    return map;
+  }, [items]);
 
   const groupedCurrentRows = useMemo(() => {
     if (effectiveGroupMode !== "uploader") {
@@ -194,9 +299,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     if (!path) return;
     setIsDownloading(true);
     try {
-      const data = await downloadManagedImage(path);
-      saveBlobAsFile(data.blob, data.filename || filename || defaultImageDownloadName(path, "jpg"));
-      toast.success("已下载 JPG 图片，手机端可直接保存/查看");
+      await openDirectDownload("/api/images/download", buildManagedImageDownloadParams(path));
+      toast.success(filename ? `已开始下载 ${filename}` : "已开始下载 JPG 图片");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "下载图片失败");
     } finally {
@@ -208,9 +312,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     if (selectedPaths.length === 0) return;
     setIsDownloading(true);
     try {
-      const data = await downloadManagedImages(selectedPaths);
-      saveBlobAsFile(data.blob, data.filename || `images-${Date.now()}.zip`);
-      toast.success(`已下载 ZIP（共 ${selectedPaths.length} 张）`);
+      await openDirectDownload("/api/images/download", buildManagedImagesDownloadParams(selectedPaths));
+      toast.success(`已下载原图尺寸 JPG ZIP（共 ${selectedPaths.length} 张）`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "下载 ZIP 失败");
     } finally {
@@ -222,20 +325,29 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     if (total === 0 || !hasActiveFilter) return;
     setIsFilterDownloading(true);
     try {
-      const data = await downloadManagedImages({
+      await openDirectDownload("/api/images/download", buildManagedImagesDownloadParams({
         start_date: startDate,
         end_date: endDate,
         ...(isAdmin && uploader ? { uploader } : {}),
         all_matching: true,
-      });
-      saveBlobAsFile(data.blob, data.filename || `filtered-images-${Date.now()}.zip`);
-      toast.success(`已下载匹配筛选的 ZIP（最多打包 200 张）`);
+      }));
+      toast.success(`已下载匹配筛选的原图尺寸 JPG ZIP（最多打包 200 张）`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "下载筛选 ZIP 失败");
     } finally {
       setIsFilterDownloading(false);
     }
   };
+
+  const goToJumpPage = useCallback(() => {
+    const nextPage = Math.min(pageCount, Math.max(1, Math.floor(Number(jumpPage) || 1)));
+    setJumpPage(String(nextPage));
+    setPage(nextPage);
+  }, [jumpPage, pageCount]);
+
+  useEffect(() => {
+    setJumpPage(String(safePage));
+  }, [safePage]);
 
   useEffect(() => {
     setPage(1);
@@ -245,90 +357,19 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
     void loadImages();
   }, [page, startDate, endDate, uploader, isAdmin]);
 
-  const renderImageCard = (item: ManagedImage) => {
-    const key = imageKey(item);
-    const imageIndex = items.findIndex((row) => imageKey(row) === key);
-    const actorLabel = isSelfMode ? fixedViewerLabel : uploaderLabel(item);
+  const handleCopyImageUrl = useCallback((url: string) => {
+    void navigator.clipboard.writeText(url);
+    toast.success("图片地址已复制");
+  }, []);
 
-    return (
-      <div
-        key={key}
-        className={cn(
-          "group rounded-[24px] border bg-white/95 p-2.5 shadow-sm transition sm:p-3",
-          selectedSet.has(key) ? "border-stone-900 ring-1 ring-stone-900/10" : "border-stone-200/80 hover:border-stone-300",
-        )}
-      >
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <div className="min-w-0 truncate text-[11px] font-medium text-stone-500">
-            {item.created_at}
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 rounded-xl text-stone-400 hover:bg-stone-100 hover:text-stone-700"
-              onClick={() => {
-                void navigator.clipboard.writeText(item.url);
-                toast.success("图片地址已复制");
-              }}
-            >
-              <Copy className="size-4" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 rounded-xl text-stone-400 hover:bg-stone-100 hover:text-stone-700"
-              disabled={isDownloading}
-              onClick={() => void downloadOne(key, item.name ? `${item.name.replace(/\.[^.]+$/, "")}.jpg` : undefined)}
-              title="下载 JPG 图片"
-            >
-              <Download className="size-4" />
-            </Button>
-            <span className="flex size-8 items-center justify-center rounded-xl border border-stone-200 bg-white">
-              <Checkbox checked={selectedSet.has(key)} onCheckedChange={(checked) => togglePaths([key], Boolean(checked))} />
-            </span>
-          </div>
-        </div>
+  const handleToggleOne = useCallback((path: string, checked: boolean) => {
+    setSelectedPaths((current) => checked ? Array.from(new Set([...current, path])) : current.filter((item) => item !== path));
+  }, []);
 
-        <button
-          type="button"
-          className="relative block aspect-square w-full cursor-zoom-in overflow-hidden rounded-[20px] bg-stone-100 text-left"
-          onClick={() => {
-            setLightboxIndex(Math.max(0, imageIndex));
-            setLightboxOpen(true);
-          }}
-        >
-          <ImageThumbnail
-            src={item.url}
-            thumbnailSrc={item.thumbnail_url}
-            alt={item.name}
-            className="h-full w-full"
-            imageClassName="transition duration-200 group-hover:scale-[1.02]"
-          />
-          <span className="absolute right-2 bottom-2 rounded-full bg-black/50 p-2 text-white opacity-100 transition sm:opacity-0 sm:group-hover:opacity-100">
-            <Maximize2 className="size-4" />
-          </span>
-        </button>
-
-        <div className="mt-3 space-y-2 text-xs text-stone-500">
-          <div className="flex items-center gap-1.5 text-stone-600">
-            <Users className="size-3.5" />
-            <span className="truncate" title={actorLabel}>
-              {isSelfMode ? "令牌" : "上传人"}：{actorLabel}
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5 text-stone-600">
-            <CalendarDays className="size-3.5" />
-            <span className="truncate">{item.date}</span>
-          </div>
-          <div className="flex items-center justify-between gap-2">
-            <span>{formatSize(item.size)}</span>
-            <span>{imageDimensions(item)}</span>
-          </div>
-        </div>
-      </div>
-    );
-  };
+  const handleOpenLightbox = useCallback((index: number) => {
+    setLightboxIndex(Math.max(0, index));
+    setLightboxOpen(true);
+  }, []);
 
   const deleteDialogTitle = deleteMode === "filtered"
     ? (isSelfMode ? "删除当前筛选的图片" : "删除匹配筛选的图片")
@@ -351,8 +392,8 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
           </h1>
           <p className="text-sm leading-6 text-stone-500">
             {isSelfMode
-              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；支持单张 JPG 下载与批量 ZIP 下载，图片仅保存 10 天，请及时保存。"
-              : "支持按日期和上传人筛选图片，分组查看、批量选择、批量 ZIP 下载并执行删除；单张下载会自动转成 JPG，图片仅保存 10 天。"}
+              ? "这里只显示当前令牌生成的图片，支持按日期筛选、预览、复制、下载和删除；单张下载为手机友好的 JPG，批量 ZIP 会打包原图尺寸 JPG，图片仅保存 10 天，请及时保存。"
+              : "支持按日期和上传人筛选图片，分组查看、批量选择、批量原图尺寸 JPG ZIP 下载并执行删除；单张下载会自动转成 JPG，图片仅保存 10 天。"}
           </p>
         </div>
 
@@ -433,7 +474,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
               title={hasActiveFilter ? "按当前筛选条件打包下载，最多 200 张" : "请先选择日期或上传人筛选条件"}
             >
               {isFilterDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-              下载当前筛选 ZIP
+              下载当前筛选原图尺寸 JPG ZIP
             </Button>
 
             <Button
@@ -473,7 +514,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
                 disabled={selectedPaths.length === 0 || isDownloading}
               >
                 {isDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-                下载所选 ZIP
+                下载所选原图尺寸 JPG ZIP
               </Button>
               <Button
                 variant="outline"
@@ -513,34 +554,74 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
                       </div>
                     ) : null}
                     <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-4">
-                      {group.items.map(renderImageCard)}
+                      {group.items.map((item) => {
+                        const key = imageKey(item);
+                        return (
+                          <ImageCard
+                            key={key}
+                            item={item}
+                            imageIndex={itemIndexByKey.get(key) ?? 0}
+                            selected={selectedSet.has(key)}
+                            actorLabel={isSelfMode ? fixedViewerLabel : uploaderLabel(item)}
+                            isSelfMode={isSelfMode}
+                            isDownloading={isDownloading}
+                            onCopy={handleCopyImageUrl}
+                            onDownload={downloadOne}
+                            onToggle={handleToggleOne}
+                            onOpen={handleOpenLightbox}
+                          />
+                        );
+                      })}
                     </div>
                   </div>
                 ))}
               </div>
 
-              <div className="flex items-center justify-between gap-2 border-t border-stone-100 pt-1 text-sm text-stone-500 sm:justify-end">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-stone-100 pt-1 text-sm text-stone-500 sm:justify-end">
                 <span>
                   第 {safePage} / {pageCount} 页，共 {total} 张
                 </span>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="size-9 rounded-xl border-stone-200 bg-white"
-                  disabled={safePage <= 1}
-                  onClick={() => setPage((value) => Math.max(1, value - 1))}
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="size-9 rounded-xl border-stone-200 bg-white"
-                  disabled={safePage >= pageCount}
-                  onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="size-9 rounded-xl border-stone-200 bg-white"
+                    disabled={safePage <= 1}
+                    onClick={() => setPage((value) => Math.max(1, value - 1))}
+                  >
+                    <ChevronLeft className="size-4" />
+                  </Button>
+                  <div className="flex items-center gap-1.5 rounded-xl border border-stone-200 bg-white px-2 py-1">
+                    <span className="text-xs text-stone-400">跳到</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={pageCount}
+                      value={jumpPage}
+                      onChange={(event) => setJumpPage(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          goToJumpPage();
+                        }
+                      }}
+                      className="h-7 w-16 rounded-lg border border-stone-200 bg-stone-50 px-2 text-center text-sm text-stone-700 outline-none focus:border-stone-300"
+                    />
+                    <span className="text-xs text-stone-400">页</span>
+                    <Button variant="ghost" className="h-7 rounded-lg px-2 text-xs text-stone-600" onClick={goToJumpPage}>
+                      跳转
+                    </Button>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="size-9 rounded-xl border-stone-200 bg-white"
+                    disabled={safePage >= pageCount}
+                    onClick={() => setPage((value) => Math.min(pageCount, value + 1))}
+                  >
+                    <ChevronRight className="size-4" />
+                  </Button>
+                </div>
               </div>
             </>
           )}

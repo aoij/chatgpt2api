@@ -108,10 +108,11 @@ def save_image_bytes(image_data: bytes, base_url: str | None = None, uploader: d
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(stored_image_data)
     try:
-        from services.image_service import ensure_thumbnail_for_rel, record_image_metadata
+        from services.image_service import record_image_metadata, submit_download_cache_task, submit_thumbnail_task
 
         record_image_metadata(relative_path, uploader)
-        ensure_thumbnail_for_rel(relative_path)
+        submit_thumbnail_task(relative_path)
+        submit_download_cache_task(relative_path)
     except Exception as exc:
         logger.warning({"event": "image_metadata_record_failed", "path": str(file_path), "error": str(exc)})
     return f"{(base_url or config.base_url)}/images/{relative_path}"

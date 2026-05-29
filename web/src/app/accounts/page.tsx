@@ -45,6 +45,7 @@ import {
   fetchAccounts,
   fetchAccountSummary,
   fetchAccountTokens,
+  removeAbnormalAccounts,
   refreshAccounts,
   updateAccount,
   type Account,
@@ -286,10 +287,6 @@ function AccountsPageContent() {
     return accounts.filter((item) => selectedSet.has(item.id)).map((item) => item.id);
   }, [accounts, selectedIds]);
 
-  const abnormalTokens = useMemo(() => {
-    return accounts.filter((item) => item.status === "异常").map((item) => item.id);
-  }, [accounts]);
-
   const paginationItems = useMemo(() => {
     const items: (number | "...")[] = [];
     const start = Math.max(1, safePage - 1);
@@ -368,6 +365,22 @@ function AccountsPageContent() {
     setEditingAccount(account);
     setEditStatus(account.status);
     setEditType(displayAccountType(account));
+  };
+
+  const handleRemoveAbnormalAccounts = async () => {
+    setIsDeleting(true);
+    try {
+      const data = await removeAbnormalAccounts();
+      setSelectedIds([]);
+      await loadAccounts(true);
+      await loadSummary();
+      toast.success(`已移除 ${data.removed ?? 0} 个异常账号`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "移除异常账号失败";
+      toast.error(message);
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   const handleUpdateAccount = async () => {
@@ -619,11 +632,11 @@ function AccountsPageContent() {
                 <Button
                   variant="ghost"
                   className="h-9 rounded-lg px-2 text-rose-500 hover:bg-rose-50 hover:text-rose-600 sm:h-8 sm:px-3"
-                  onClick={() => void handleDeleteTokens(abnormalTokens)}
-                  disabled={abnormalTokens.length === 0 || isDeleting}
+                  onClick={() => void handleRemoveAbnormalAccounts()}
+                  disabled={summary.abnormal === 0 || isDeleting}
                 >
                   {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  移除异常账号
+                  移除全部异常账号
                 </Button>
                 <Button
                   variant="ghost"

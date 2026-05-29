@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any, Optional
 from urllib.parse import unquote, urlsplit
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_STORED, ZipFile
 
 from PIL import Image, ImageOps
 
@@ -18,6 +21,7 @@ THUMB_MAX_SIZE = (480, 480)
 THUMB_QUALITY = 74
 DOWNLOAD_JPEG_QUALITY = 90
 MAX_BATCH_DOWNLOAD = 200
+DOWNLOAD_CONVERT_WORKERS = 6
 CLEANUP_INTERVAL_SECONDS = 600
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 _METADATA_FILE = DATA_DIR / "image_metadata.json"
@@ -31,8 +35,20 @@ _LIST_CACHE: dict[str, object] = {
     "items": [],
     "uploaders": [],
 }
-LIST_CACHE_TTL_SECONDS = 20
+_IMAGES_DIR_SIGNATURE_CACHE: dict[str, object] = {
+    "created_at": 0.0,
+    "signature": "",
+}
+LIST_CACHE_TTL_SECONDS = 60
+IMAGES_DIR_SIGNATURE_TTL_SECONDS = 8
 _UNKNOWN_UPLOADER = "未知上传人"
+_THUMB_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="image-thumb")
+_DOWNLOAD_CACHE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="image-download-cache")
+_PENDING_THUMB_TASKS: set[str] = set()
+_PENDING_THUMB_LOCK = RLock()
+_PENDING_DOWNLOAD_CACHE_TASKS: set[str] = set()
+_PENDING_DOWNLOAD_CACHE_LOCK = RLock()
+_DIMENSION_CACHE: dict[str, tuple[str, tuple[int, int] | None]] = {}
 
 
 def _timestamp(value: object) -> float:
@@ -70,6 +86,10 @@ def _download_jpeg_path_for(rel: str) -> Path:
     return (_download_root() / Path(rel)).with_suffix(".jpg")
 
 
+def _download_zip_path_for(cache_key: str) -> Path:
+    return _download_root() / "_zips" / f"{cache_key}.zip"
+
+
 def _image_dimensions(path: Path) -> Optional[tuple[int, int]]:
     try:
         with Image.open(path) as image:
@@ -77,6 +97,22 @@ def _image_dimensions(path: Path) -> Optional[tuple[int, int]]:
     except Exception as exc:
         print(f"[image-thumbnail] read dimensions failed path={path}: {exc}")
         return None
+
+
+def _cached_image_dimensions(path: Path, rel: str) -> Optional[tuple[int, int]]:
+    try:
+        stat = path.stat()
+        signature = f"{stat.st_size}:{stat.st_mtime_ns}"
+    except OSError:
+        signature = "missing"
+    with _LIST_CACHE_LOCK:
+        cached = _DIMENSION_CACHE.get(rel)
+        if cached and cached[0] == signature:
+            return cached[1]
+    dimensions = _image_dimensions(path)
+    with _LIST_CACHE_LOCK:
+        _DIMENSION_CACHE[rel] = (signature, dimensions)
+    return dimensions
 
 
 def _ensure_thumbnail(path: Path, rel: str) -> tuple[Optional[Path], Optional[tuple[int, int]]]:
@@ -95,10 +131,10 @@ def _ensure_thumbnail(path: Path, rel: str) -> tuple[Optional[Path], Optional[tu
         with Image.open(path) as image:
             image = ImageOps.exif_transpose(image)
             dimensions = image.size
-            image.thumbnail(THUMB_MAX_SIZE, Image.Resampling.LANCZOS)
+            image.thumbnail(THUMB_MAX_SIZE, Image.Resampling.BILINEAR)
             if image.mode not in ("RGB", "RGBA"):
                 image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
-            image.save(thumb_path, "WEBP", quality=THUMB_QUALITY, method=6)
+            image.save(thumb_path, "WEBP", quality=THUMB_QUALITY, method=3)
         return thumb_path, dimensions
     except Exception as exc:
         print(f"[image-thumbnail] generate failed path={path}: {exc}")
@@ -142,26 +178,47 @@ def _write_jpeg(source_path: Path, target_path: Path) -> bytes:
             image = background
         elif image.mode != "RGB":
             image = image.convert("RGB")
-        image.save(output, "JPEG", quality=DOWNLOAD_JPEG_QUALITY)
+        image.save(output, "JPEG", quality=DOWNLOAD_JPEG_QUALITY, optimize=False)
     content = output.getvalue()
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_bytes(content)
+    tmp_path = target_path.with_name(f".{target_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        tmp_path.write_bytes(content)
+        try:
+            tmp_path.replace(target_path)
+        except PermissionError:
+            if target_path.exists():
+                return content
+            raise
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
     return content
 
 
-def _jpeg_bytes(path: Path, rel: str) -> bytes:
-    """Return mobile-friendly JPEG bytes, using an on-disk conversion cache."""
-    if path.suffix.lower() in {".jpg", ".jpeg"}:
-        return path.read_bytes()
-
+def _ensure_jpeg_file(path: Path, rel: str) -> Path:
+    """Return a full-size JPG file path, creating/reusing the conversion cache."""
     cache_path = _download_jpeg_path_for(rel)
     try:
         source_mtime = path.stat().st_mtime
         if cache_path.exists() and cache_path.stat().st_mtime >= source_mtime:
-            return cache_path.read_bytes()
+            return cache_path
     except OSError:
         pass
-    return _write_jpeg(path, cache_path)
+
+    if path.suffix.lower() in {".jpg", ".jpeg"}:
+        return path
+
+    _write_jpeg(path, cache_path)
+    return cache_path
+
+
+def _jpeg_bytes(path: Path, rel: str) -> bytes:
+    """Return mobile-friendly JPEG bytes, using an on-disk conversion cache."""
+    return _ensure_jpeg_file(path, rel).read_bytes()
 
 
 def _download_filename(rel: str, index: int | None = None) -> str:
@@ -296,6 +353,56 @@ def ensure_thumbnail_for_rel(rel: str) -> bool:
         return False
     _invalidate_list_cache()
     return True
+
+
+def _ensure_thumbnail_async(rel: str) -> None:
+    try:
+        ensure_thumbnail_for_rel(rel)
+    except Exception as exc:
+        print(f"[image-thumbnail] async generate failed rel={rel}: {exc}")
+    finally:
+        with _PENDING_THUMB_LOCK:
+            _PENDING_THUMB_TASKS.discard(rel)
+
+
+def submit_thumbnail_task(rel: str) -> None:
+    with _PENDING_THUMB_LOCK:
+        if rel in _PENDING_THUMB_TASKS:
+            return
+        _PENDING_THUMB_TASKS.add(rel)
+    _THUMB_EXECUTOR.submit(_ensure_thumbnail_async, rel)
+
+
+def _ensure_download_cache_async(rel: str) -> None:
+    try:
+        image_rel, path = _safe_image_path(rel)
+        if image_rel and path is not None:
+            _ensure_jpeg_file(path, image_rel)
+    except Exception as exc:
+        print(f"[image-download] async cache failed rel={rel}: {exc}")
+    finally:
+        with _PENDING_DOWNLOAD_CACHE_LOCK:
+            _PENDING_DOWNLOAD_CACHE_TASKS.discard(rel)
+
+
+def submit_download_cache_task(rel: str) -> None:
+    image_rel = str(rel or "").strip().lstrip("/")
+    if not image_rel:
+        return
+    cache_path = _download_jpeg_path_for(image_rel)
+    image_rel, path = _safe_image_path(image_rel)
+    if not image_rel or path is None:
+        return
+    try:
+        if cache_path.exists() and cache_path.stat().st_mtime >= path.stat().st_mtime:
+            return
+    except OSError:
+        pass
+    with _PENDING_DOWNLOAD_CACHE_LOCK:
+        if image_rel in _PENDING_DOWNLOAD_CACHE_TASKS:
+            return
+        _PENDING_DOWNLOAD_CACHE_TASKS.add(image_rel)
+    _DOWNLOAD_CACHE_EXECUTOR.submit(_ensure_download_cache_async, image_rel)
 
 
 def resolve_thumbnail_file(rel: str) -> Optional[Path]:
@@ -528,14 +635,35 @@ def _invalidate_list_cache() -> None:
         _LIST_CACHE["created_at"] = 0.0
         _LIST_CACHE["items"] = []
         _LIST_CACHE["uploaders"] = []
+        _IMAGES_DIR_SIGNATURE_CACHE["signature"] = ""
+        _IMAGES_DIR_SIGNATURE_CACHE["created_at"] = 0.0
 
 
 def _images_dir_signature(root: Path) -> str:
+    now = time.time()
+    with _LIST_CACHE_LOCK:
+        cached_signature = str(_IMAGES_DIR_SIGNATURE_CACHE.get("signature") or "")
+        cached_at = float(_IMAGES_DIR_SIGNATURE_CACHE.get("created_at") or 0)
+        if cached_signature and now - cached_at < IMAGES_DIR_SIGNATURE_TTL_SECONDS:
+            return cached_signature
     try:
-        stat = root.stat()
-        return f"{int(stat.st_mtime_ns)}:{stat.st_size}"
+        latest_mtime = 0
+        total_size = 0
+        total_count = 0
+        for path in root.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in _IMAGE_SUFFIXES:
+                continue
+            stat = path.stat()
+            total_count += 1
+            total_size += stat.st_size
+            latest_mtime = max(latest_mtime, int(stat.st_mtime_ns))
+        signature = f"{total_count}:{total_size}:{latest_mtime}"
     except OSError:
-        return "missing"
+        signature = "missing"
+    with _LIST_CACHE_LOCK:
+        _IMAGES_DIR_SIGNATURE_CACHE["signature"] = signature
+        _IMAGES_DIR_SIGNATURE_CACHE["created_at"] = now
+    return signature
 
 
 def cleanup_expired_images() -> dict[str, int]:
@@ -700,6 +828,8 @@ def list_images(
             day = _image_day(path, rel)
             meta = _image_metadata(rel, stored_metadata, log_index)
             stat = path.stat()
+            thumb_path = _thumb_path_for(rel)
+            cached_thumb = thumb_path.is_file()
             item = {
                 "path": rel,
                 "name": path.name,
@@ -710,7 +840,10 @@ def list_images(
                 "uploader_id": _clean(meta.get("uploader_id")),
                 "uploader_name": _uploader_name(meta),
                 "uploader_role": _clean(meta.get("uploader_role")),
+                "thumbnail_path": thumb_path.relative_to(thumb_root).as_posix() if cached_thumb else "",
             }
+            if not cached_thumb:
+                item["thumbnail_pending"] = True
             all_items.append(item)
 
         all_items.sort(key=lambda item: str(item["created_at"]), reverse=True)
@@ -746,15 +879,18 @@ def list_images(
         public_item["url"] = f"{normalized_base_url}/images/{rel}"
         image_rel, path = _safe_image_path(rel)
         thumbnail_url: str | None = None
+        thumbnail_path = str(public_item.get("thumbnail_path") or "")
+        if thumbnail_path:
+            thumbnail_url = f"{normalized_base_url}/image-thumbs/{thumbnail_path}"
         if image_rel and path is not None:
-            thumb_path, dimensions = _ensure_thumbnail(path, image_rel)
-            if thumb_path and thumb_path.exists():
-                thumbnail_rel = thumb_path.relative_to(_thumb_root()).as_posix()
-                thumbnail_url = f"{normalized_base_url}/image-thumbs/{thumbnail_rel}"
+            dimensions = _cached_image_dimensions(path, image_rel)
             if dimensions:
                 public_item["dimensions"] = f"{dimensions[0]} x {dimensions[1]}"
                 public_item["width"] = dimensions[0]
                 public_item["height"] = dimensions[1]
+            if not thumbnail_url and public_item.get("thumbnail_pending"):
+                submit_thumbnail_task(image_rel)
+            submit_download_cache_task(image_rel)
         public_item["thumbnail_url"] = thumbnail_url
         enriched_page_items.append(public_item)
 
@@ -831,23 +967,71 @@ def build_image_download(rel: str, uploader: str = "") -> Optional[dict[str, obj
         return None
 
     try:
-        content = _jpeg_bytes(path, image_rel)
+        download_path = _ensure_jpeg_file(path, image_rel)
         filename = _download_filename(image_rel)
         media_type = "image/jpeg"
+        return {
+            "path": image_rel,
+            "filename": filename,
+            "file_path": download_path,
+            "media_type": media_type,
+            "size": download_path.stat().st_size,
+        }
     except Exception as exc:
         print(f"[image-download] convert jpeg failed path={path}: {exc}")
-        content = path.read_bytes()
         filename = path.name
         suffix = path.suffix.lower()
         media_type = "image/png" if suffix == ".png" else "image/webp" if suffix == ".webp" else "image/jpeg"
+        return {
+            "path": image_rel,
+            "filename": filename,
+            "file_path": path,
+            "media_type": media_type,
+            "size": path.stat().st_size,
+        }
 
-    return {
-        "path": image_rel,
-        "filename": filename,
-        "content": content,
-        "media_type": media_type,
-        "size": len(content),
-    }
+
+def _zip_cache_signature(paths: list[str]) -> str:
+    parts: list[str] = []
+    for rel in paths:
+        image_rel, path = _safe_image_path(rel)
+        if not image_rel or path is None:
+            continue
+        try:
+            stat = path.stat()
+            source_sig = f"{stat.st_size}:{stat.st_mtime_ns}"
+        except OSError:
+            source_sig = "missing"
+        cache_path = _download_jpeg_path_for(image_rel)
+        try:
+            cache_stat = cache_path.stat()
+            cache_sig = f"{cache_stat.st_size}:{cache_stat.st_mtime_ns}"
+        except OSError:
+            cache_sig = "-"
+        parts.append(f"{image_rel}|{source_sig}|{cache_sig}")
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    return digest[:24]
+
+
+def _prepare_zip_item(
+    item: tuple[int, str],
+    stored_metadata: dict[str, dict[str, Any]],
+    log_index: dict[str, str],
+    uploader: str,
+) -> Optional[tuple[str, Path]]:
+    index, rel = item
+    image_rel, path = _safe_image_path(rel)
+    if not image_rel or path is None:
+        return None
+    meta = _image_metadata(image_rel, stored_metadata, log_index)
+    if not _matches_uploader(meta, uploader):
+        return None
+    try:
+        jpeg_path = _ensure_jpeg_file(path, image_rel)
+        return _zip_entry_name(image_rel, index), jpeg_path
+    except Exception as exc:
+        print(f"[image-download] zip prepare jpeg failed path={path}: {exc}")
+        return _download_filename(image_rel, index), path
 
 
 def build_images_zip(
@@ -857,7 +1041,7 @@ def build_images_zip(
     end_date: str = "",
     all_matching: bool = False,
 ) -> Optional[dict[str, object]]:
-    """Build a permission-checked ZIP containing selected images as JPG files."""
+    """Build a permission-checked ZIP containing full-size JPG conversions."""
     if all_matching:
         normalized = _iter_image_rel_paths(start_date=start_date, end_date=end_date, uploader=uploader)
     else:
@@ -873,51 +1057,120 @@ def build_images_zip(
         normalized = normalized[:MAX_BATCH_DOWNLOAD]
 
     cleanup_expired_images_if_due()
-    root = config.images_dir.resolve()
     with _METADATA_LOCK:
         stored_metadata = _load_metadata()
     log_index = _log_uploader_index()
 
-    output = io.BytesIO()
-    added = 0
-    used_names: set[str] = set()
-    with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
-        for rel in normalized:
-            image_rel, path = _safe_image_path(rel)
-            if not image_rel or path is None:
-                continue
-            meta = _image_metadata(image_rel, stored_metadata, log_index)
-            if not _matches_uploader(meta, uploader):
-                continue
-            try:
-                content = _jpeg_bytes(path, image_rel)
-                entry_name = _zip_entry_name(image_rel, added + 1)
-            except Exception as exc:
-                print(f"[image-download] zip convert jpeg failed path={path}: {exc}")
-                content = path.read_bytes()
-                try:
-                    entry_name = path.relative_to(root).as_posix()
-                except Exception:
-                    entry_name = _download_filename(image_rel, added + 1)
-            if entry_name in used_names:
-                entry_name = _download_filename(image_rel, added + 1)
-            used_names.add(entry_name)
-            archive.writestr(entry_name, content)
-            added += 1
+    work_items = list(enumerate(normalized, start=1))
+    prepared: list[tuple[str, Path]] = []
+    if len(work_items) > 1:
+        worker_count = min(DOWNLOAD_CONVERT_WORKERS, len(work_items))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for item in executor.map(
+                lambda entry: _prepare_zip_item(entry, stored_metadata, log_index, uploader),
+                work_items,
+            ):
+                if item is not None:
+                    prepared.append(item)
+    else:
+        item = _prepare_zip_item(work_items[0], stored_metadata, log_index, uploader)
+        if item is not None:
+            prepared.append(item)
 
-    if added <= 0:
+    if not prepared:
         return None
+
+    cache_key = _zip_cache_signature([rel for _, rel in work_items])
+    zip_path = _download_zip_path_for(cache_key)
+    if zip_path.exists():
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return {
+            "filename": f"images-{timestamp}.zip",
+            "file_path": zip_path,
+            "media_type": "application/zip",
+            "count": len(prepared),
+            "truncated": truncated,
+            "size": zip_path.stat().st_size,
+            "cached": True,
+        }
+
+    used_names: set[str] = set()
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = zip_path.with_name(f".{zip_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        with ZipFile(tmp_path, "w", compression=ZIP_STORED) as archive:
+            for index, (entry_name, file_path) in enumerate(prepared, start=1):
+                if entry_name in used_names:
+                    entry_name = _download_filename(entry_name, index)
+                if entry_name in used_names:
+                    entry_name = f"{index:03d}_{Path(entry_name).name}"
+                used_names.add(entry_name)
+                try:
+                    archive.write(file_path, entry_name)
+                except Exception as exc:
+                    print(f"[image-download] zip write failed path={file_path}: {exc}")
+        try:
+            tmp_path.replace(zip_path)
+        except FileExistsError:
+            if zip_path.exists():
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                return {
+                    "filename": f"images-{timestamp}.zip",
+                    "file_path": zip_path,
+                    "media_type": "application/zip",
+                    "count": len(prepared),
+                    "truncated": truncated,
+                    "size": zip_path.stat().st_size,
+                    "cached": True,
+                }
+            raise
+        except PermissionError:
+            if zip_path.exists():
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                return {
+                    "filename": f"images-{timestamp}.zip",
+                    "file_path": zip_path,
+                    "media_type": "application/zip",
+                    "count": len(prepared),
+                    "truncated": truncated,
+                    "size": zip_path.stat().st_size,
+                    "cached": True,
+                }
+            raise
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    content = output.getvalue()
     return {
         "filename": f"images-{timestamp}.zip",
-        "content": content,
+        "file_path": zip_path,
         "media_type": "application/zip",
-        "count": added,
+        "count": len(prepared),
         "truncated": truncated,
-        "size": len(content),
+        "size": zip_path.stat().st_size,
+        "cached": False,
     }
 
+
+
+def warm_image_download_cache(paths: list[str] | None) -> None:
+    """Best-effort cache warmer for direct downloads.
+
+    This runs after a response is handed to the client, so it must never block or
+    fail the request. It mainly prepares JPG conversions for the next click.
+    """
+    for rel in _normalize_rel_paths(paths):
+        image_rel, path = _safe_image_path(rel)
+        if not image_rel or path is None:
+            continue
+        try:
+            _ensure_jpeg_file(path, image_rel)
+        except Exception as exc:
+            print(f"[image-download] warm cache failed path={path}: {exc}")
 
 def _cleanup_empty_dirs(root: Path) -> None:
     if not root.exists():

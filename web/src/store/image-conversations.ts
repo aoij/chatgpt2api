@@ -62,6 +62,12 @@ export type ImageConversationSummary = {
   hasDetail?: boolean;
 };
 
+type ImageConversationSyncDetail = {
+  items?: ImageConversation[];
+  summaries?: ImageConversationSummary[];
+  scope?: "summary" | "detail";
+};
+
 export type ImageConversationStats = {
   queued: number;
   running: number;
@@ -77,7 +83,7 @@ const IMAGE_CONVERSATIONS_BROADCAST_CHANNEL = "chatgpt2api:image-conversations";
 
 const IMAGE_CONVERSATIONS_KEY = "items";
 const DELETED_IMAGE_CONVERSATIONS_KEY = "deleted_items";
-const REMOTE_CACHE_TTL_MS = 60_000;
+const REMOTE_CACHE_TTL_MS = 30_000;
 const REMOTE_SAVE_DEBOUNCE_MS = 800;
 const MAX_REFERENCE_DATA_URL_CHARS = 180_000;
 const DELETED_TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -95,8 +101,7 @@ let localConversationCache:
     items: ImageConversation[];
   }
   | null = null;
-let remoteSaveTimer: number | null = null;
-let remoteSaveQueue: Promise<void> = Promise.resolve();
+let remoteSaveQueue: Promise<void> | null = null;
 const pendingRemoteConversationSaves = new Map<string, ImageConversation>();
 let imageConversationsBroadcastChannel: BroadcastChannel | null = null;
 const detailConversationLoads = new Map<string, Promise<ImageConversation | null>>();
@@ -312,6 +317,28 @@ function pickLatestConversation(current: ImageConversation, next: ImageConversat
   return getTimestamp(next.updatedAt) >= getTimestamp(current.updatedAt) ? next : current;
 }
 
+function pickLatestConversationWithPending(current: ImageConversation, next: ImageConversation) {
+  const currentTurnIds = new Set(current.turns.map((turn) => turn.id).filter(Boolean));
+  const nextHasNewTurns = next.turns.some((turn) => !currentTurnIds.has(turn.id));
+  if (nextHasNewTurns) {
+    return pickLatestConversation(current, next);
+  }
+
+  const currentHasPending = current.turns.some((turn) =>
+    !turn.resultsDeleted && (turn.status === "queued" || turn.status === "generating")
+  );
+  const nextHasPending = next.turns.some((turn) =>
+    !turn.resultsDeleted && (turn.status === "queued" || turn.status === "generating")
+  );
+  if (currentHasPending && !nextHasPending && getTimestamp(next.updatedAt) >= getTimestamp(current.updatedAt)) {
+    return next;
+  }
+  if (nextHasPending && !currentHasPending && getTimestamp(current.updatedAt) >= getTimestamp(next.updatedAt)) {
+    return current;
+  }
+  return pickLatestConversation(current, next);
+}
+
 function pruneDeletedConversationMap(value: unknown): Record<string, number> {
   const now = Date.now();
   if (!value || typeof value !== "object") {
@@ -422,7 +449,7 @@ function mergeConversationLists(current: ImageConversation[], incoming: ImageCon
   const conversationMap = new Map(current.map((item) => [item.id, item]));
   for (const conversation of incoming.map(normalizeConversation)) {
     const existing = conversationMap.get(conversation.id);
-    conversationMap.set(conversation.id, existing ? pickLatestConversation(existing, conversation) : conversation);
+    conversationMap.set(conversation.id, existing ? pickLatestConversationWithPending(existing, conversation) : conversation);
   }
   return sortImageConversations([...conversationMap.values()]);
 }
@@ -447,9 +474,10 @@ export function summarizeImageConversation(conversation: ImageConversation): Ima
   return summarizeConversation(conversation);
 }
 
-async function fetchRemoteImageConversationSummaries(): Promise<ImageConversationSummary[] | null> {
+async function fetchRemoteImageConversationSummaries(options: { force?: boolean } = {}): Promise<ImageConversationSummary[] | null> {
   const subjectKey = await getScopedSubjectKey();
   if (
+    !options.force &&
     remoteConversationCache &&
     remoteConversationCache.subjectKey === subjectKey &&
     Date.now() - remoteConversationCache.fetchedAt < REMOTE_CACHE_TTL_MS
@@ -481,37 +509,52 @@ async function fetchRemoteImageConversationSummaries(): Promise<ImageConversatio
   }
 }
 
-function emitImageConversationsSynced(items: ImageConversation[]) {
+function emitImageConversationsSynced(items: ImageConversation[], summaries?: ImageConversationSummary[]) {
   if (typeof window === "undefined") {
     return;
   }
-  window.dispatchEvent(new CustomEvent(IMAGE_CONVERSATIONS_SYNC_EVENT, { detail: { items } }));
+  const summaryItems = summaries && summaries.length > 0 ? summaries : items.map(summarizeConversation);
+  const localDetail: ImageConversationSyncDetail = { items, summaries: summaryItems, scope: "detail" };
+  window.dispatchEvent(new CustomEvent(IMAGE_CONVERSATIONS_SYNC_EVENT, { detail: localDetail }));
   try {
-    getImageConversationsBroadcastChannel()?.postMessage({ items });
+    // Cross-tab sync only needs lightweight summaries. Sending full conversations
+    // (especially reference-image data URLs and many result URLs) blocks the UI
+    // when the history is large.
+    getImageConversationsBroadcastChannel()?.postMessage({ summaries: summaryItems, scope: "summary" });
   } catch {
     // ignore cross-tab broadcast failures
   }
 }
 
 export function subscribeImageConversationSync(
-  listener: (items: ImageConversation[]) => void,
+  listener: (items: ImageConversation[], summaries?: ImageConversationSummary[]) => void,
 ): () => void {
   if (typeof window === "undefined") {
     return () => undefined;
   }
 
   const handleWindowEvent = (event: Event) => {
-    const items = (event as CustomEvent<{ items?: ImageConversation[] }>).detail?.items;
+    const detail = (event as CustomEvent<ImageConversationSyncDetail>).detail || {};
+    const items = detail.items;
     if (Array.isArray(items)) {
-      listener(items);
+      listener(items, Array.isArray(detail.summaries) ? detail.summaries : undefined);
+      return;
+    }
+    if (Array.isArray(detail.summaries)) {
+      listener([], detail.summaries);
     }
   };
 
   const channel = getImageConversationsBroadcastChannel();
-  const handleChannelMessage = (event: MessageEvent<{ items?: ImageConversation[] }>) => {
-    const items = event.data?.items;
+  const handleChannelMessage = (event: MessageEvent<ImageConversationSyncDetail>) => {
+    const detail = event.data || {};
+    if (Array.isArray(detail.summaries)) {
+      listener([], detail.summaries);
+      return;
+    }
+    const items = detail.items;
     if (Array.isArray(items)) {
-      listener(items);
+      listener(items, Array.isArray(detail.summaries) ? detail.summaries : undefined);
     }
   };
 
@@ -613,30 +656,15 @@ function scheduleRemoteConversationSaves(conversations: ImageConversation[]) {
   conversations.map(normalizeConversation).forEach((conversation) => {
     pendingRemoteConversationSaves.set(conversation.id, conversation);
   });
-  if (typeof window === "undefined") {
-    remoteSaveQueue = remoteSaveQueue
-      .catch(() => undefined)
-      .then(async () => {
-        const deleted = await readDeletedConversationMap();
-        const items = filterDeletedConversations(Array.from(pendingRemoteConversationSaves.values()), deleted);
-        for (const id of Object.keys(deleted)) {
-          pendingRemoteConversationSaves.delete(id);
-        }
-        pendingRemoteConversationSaves.clear();
-        if (items.length > 0) {
-          await saveRemoteImageConversations(items);
-        }
-      });
+  if (remoteSaveQueue) {
     return;
   }
-  if (remoteSaveTimer !== null) {
-    window.clearTimeout(remoteSaveTimer);
-  }
-  remoteSaveTimer = window.setTimeout(() => {
-    remoteSaveTimer = null;
-    remoteSaveQueue = remoteSaveQueue
-      .catch(() => undefined)
-      .then(async () => {
+  remoteSaveQueue = (async () => {
+    try {
+      if (typeof window !== "undefined") {
+        await new Promise((resolve) => window.setTimeout(resolve, REMOTE_SAVE_DEBOUNCE_MS));
+      }
+      while (pendingRemoteConversationSaves.size > 0) {
         const deleted = await readDeletedConversationMap();
         const items = filterDeletedConversations(Array.from(pendingRemoteConversationSaves.values()), deleted);
         for (const id of Object.keys(deleted)) {
@@ -646,18 +674,19 @@ function scheduleRemoteConversationSaves(conversations: ImageConversation[]) {
         if (items.length > 0) {
           await saveRemoteImageConversations(items);
         }
-      });
-  }, REMOTE_SAVE_DEBOUNCE_MS);
+      }
+    } finally {
+      remoteSaveQueue = null;
+      if (pendingRemoteConversationSaves.size > 0) {
+        scheduleRemoteConversationSaves([]);
+      }
+    }
+  })();
 }
 
-export async function listImageConversations(): Promise<ImageConversationSummary[]> {
+export async function listImageConversations(options: { forceRemote?: boolean } = {}): Promise<ImageConversationSummary[]> {
   const localItems = await readStoredImageConversations();
-  if (localItems.length > 0) {
-    void syncRemoteImageConversations(localItems);
-    return sortImageConversationSummaries(localItems.map(summarizeConversation));
-  }
-
-  const remoteItems = await fetchRemoteImageConversationSummaries();
+  const remoteItems = await fetchRemoteImageConversationSummaries({ force: options.forceRemote === true });
   if (remoteItems === null) {
     return sortImageConversationSummaries(localItems.map(summarizeConversation));
   }
@@ -677,9 +706,6 @@ export async function fetchImageConversation(id: string): Promise<ImageConversat
   }
   const localItems = await readStoredImageConversations();
   const localItem = localItems.find((item) => item.id === normalizedId) ?? null;
-  if (localItem) {
-    return localItem;
-  }
   const existingPromise = detailConversationLoads.get(normalizedId);
   if (existingPromise) {
     return existingPromise;
@@ -691,25 +717,29 @@ export async function fetchImageConversation(id: string): Promise<ImageConversat
         { redirectOnUnauthorized: false },
       );
       if (!data.item) {
-        return null;
+        const latestLocalItems = await readStoredImageConversations();
+        return latestLocalItems.find((item) => item.id === normalizedId) ?? null;
       }
       const item = normalizeConversation(data.item);
       const items = await readStoredImageConversations();
+      const existingItem = items.find((conversation) => conversation.id === item.id) ?? null;
+      const mergedItem = existingItem ? pickLatestConversationWithPending(existingItem, item) : item;
       await writeStoredImageConversations(
-        sortImageConversations([item, ...items.filter((conversation) => conversation.id !== item.id)]),
+        sortImageConversations([mergedItem, ...items.filter((conversation) => conversation.id !== mergedItem.id)]),
       );
       emitImageConversationsSynced(await readStoredImageConversations());
       const subjectKey = await getScopedSubjectKey();
-      const summary = summarizeConversation(item);
+      const summary = summarizeConversation(mergedItem);
       const baseItems = remoteConversationCache?.subjectKey === subjectKey ? remoteConversationCache.items : [];
       remoteConversationCache = {
         subjectKey,
         fetchedAt: Date.now(),
         items: mergeConversationSummaries(baseItems, [summary]),
       };
-      return item;
+      return mergedItem;
     } catch {
-      return null;
+      const latestLocalItems = await readStoredImageConversations();
+      return latestLocalItems.find((item) => item.id === normalizedId) ?? null;
     } finally {
       detailConversationLoads.delete(normalizedId);
     }
@@ -725,7 +755,7 @@ export async function saveImageConversations(conversations: ImageConversation[])
     const incoming = filterDeletedConversations(conversations.map(normalizeConversation), deleted);
     const nextItems = filterDeletedConversations(mergeConversationLists(items, incoming), deleted);
     await writeStoredImageConversations(nextItems);
-    emitImageConversationsSynced(nextItems);
+    emitImageConversationsSynced(nextItems, incoming.map(summarizeConversation));
     const changedItems = incoming;
     scheduleRemoteConversationSaves(changedItems);
   });
@@ -741,13 +771,13 @@ export async function saveImageConversation(conversation: ImageConversation): Pr
       return;
     }
     const current = items.find((item) => item.id === nextConversation.id);
-    const persistedConversation = current ? pickLatestConversation(current, nextConversation) : nextConversation;
+    const persistedConversation = current ? pickLatestConversationWithPending(current, nextConversation) : nextConversation;
     const nextItems = sortImageConversations([
       persistedConversation,
       ...items.filter((item) => item.id !== persistedConversation.id),
     ]);
     await writeStoredImageConversations(nextItems);
-    emitImageConversationsSynced(nextItems);
+    emitImageConversationsSynced(nextItems, [summarizeConversation(persistedConversation)]);
     scheduleRemoteConversationSaves([persistedConversation]);
   });
 }
@@ -762,7 +792,7 @@ export async function renameImageConversation(id: string, title: string): Promis
       updated,
       ...items.filter((item) => item.id !== id),
     ]);
-    await imageConversationStorage.setItem(IMAGE_CONVERSATIONS_KEY, nextItems);
+    await writeStoredImageConversations(nextItems);
   });
 }
 

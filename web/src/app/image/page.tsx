@@ -1,10 +1,12 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { History, LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { History, LoaderCircle, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
+import type { BananaPrompt } from "@/app/image/banana-prompts";
 import { ImageComposer } from "@/app/image/components/image-composer";
+import { ImagePromptMarket } from "@/app/image/components/image-prompt-market";
 import { ImageResults, type ImageLightboxItem } from "@/app/image/components/image-results";
 import { ImageSidebar } from "@/app/image/components/image-sidebar";
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -67,6 +69,7 @@ const CONVERSATION_QUEUE_LOCK_STORAGE_KEY = "chatgpt2api:image_conversation_queu
 const CONVERSATION_QUEUE_LOCK_TTL_MS = 90_000;
 const CONVERSATION_QUEUE_RETRY_INTERVAL_MS = 10_000;
 const MAX_POLL_TASK_IDS = 12;
+const MISSING_TASK_REQUEUE_LIMIT = 2;
 
 function clampImageCount(value: string) {
   return String(Math.min(100, Math.max(1, Math.floor(Number(value) || 1))));
@@ -339,6 +342,30 @@ async function fetchImageAsFile(url: string, fileName: string) {
   return new File([blob], fileName, { type: blob.type || "image/png" });
 }
 
+function buildReferenceFileName(url: string, index: number, fallbackPrefix: string) {
+  const path = url.split(/[?#]/, 1)[0] || "";
+  const rawName = path.split("/").filter(Boolean).pop() || "";
+  try {
+    const decodedName = decodeURIComponent(rawName).trim();
+    if (decodedName && /\.[a-z0-9]{2,8}$/i.test(decodedName)) {
+      return decodedName;
+    }
+  } catch {
+    // ignore malformed URI
+  }
+  return `${fallbackPrefix}-${index + 1}.png`;
+}
+
+async function buildReferenceImageFromUrl(url: string, index: number, fallbackPrefix: string) {
+  const file = await fetchImageAsFile(url, buildReferenceFileName(url, index, fallbackPrefix));
+  return optimizeReferenceFile(file);
+}
+
+function getPromptReferenceImageUrls(prompt: BananaPrompt) {
+  const urls = prompt.referenceImageUrls.length > 0 ? prompt.referenceImageUrls : [prompt.preview];
+  return Array.from(new Set(urls.map((url) => url.trim()).filter(Boolean)));
+}
+
 async function buildReferenceImageFromStoredImage(image: StoredImage, fileName: string) {
   const direct = buildReferenceImageFromResult(image, fileName);
   if (direct) {
@@ -554,22 +581,16 @@ function deriveTurnStatus(turn: ImageTurn): Pick<ImageTurn, "status" | "error"> 
   return { status: "queued", error: undefined };
 }
 
-function collectPendingTaskIds(conversation: ImageConversation | null, limit = MAX_POLL_TASK_IDS) {
-  if (!conversation) {
+function collectPendingTaskIdsFromTurn(turn: ImageTurn | null | undefined, limit = MAX_POLL_TASK_IDS) {
+  if (!turn || turn.resultsDeleted) {
     return [];
   }
   const ids: string[] = [];
-  for (let turnIndex = conversation.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
-    const turn = conversation.turns[turnIndex];
-    if (turn.resultsDeleted) {
-      continue;
-    }
-    for (const image of turn.images) {
-      if (image.status === "loading" && image.taskId && !ids.includes(image.taskId)) {
-        ids.push(image.taskId);
-        if (ids.length >= limit) {
-          return ids;
-        }
+  for (const image of turn.images) {
+    if (image.status === "loading" && image.taskId && !ids.includes(image.taskId)) {
+      ids.push(image.taskId);
+      if (ids.length >= limit) {
+        return ids;
       }
     }
   }
@@ -736,11 +757,13 @@ function ImagePageContent({
   const draftModeRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const promptApplyRequestIdRef = useRef(0);
 
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
   const [imageSize, setImageSize] = useState("");
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isPromptMarketOpen, setIsPromptMarketOpen] = useState(false);
   const [referenceImageFiles, setReferenceImageFiles] = useState<File[]>([]);
   const [referenceImages, setReferenceImages] = useState<StoredReferenceImage[]>([]);
   const [conversations, setConversations] = useState<ImageConversation[]>([]);
@@ -784,8 +807,31 @@ function ImagePageContent({
     [conversations],
   );
 
-  const syncConversationSummaries = useCallback((items: ImageConversation[]) => {
-    const summaries = items.map((item) => summarizeImageConversation(item));
+  const mergeConversationSummaries = useCallback((items: ImageConversation[] | ImageConversationSummary[]) => {
+    if (items.length === 0) {
+      return;
+    }
+    let changed = false;
+    const summaryMap = new Map(conversationSummariesRef.current.map((item) => [item.id, item]));
+    items.forEach((item) => {
+      const summary = "turns" in item ? summarizeImageConversation(item) : item;
+      const current = summaryMap.get(summary.id);
+      if (
+        !current ||
+        current.updatedAt !== summary.updatedAt ||
+        current.title !== summary.title ||
+        current.turnCount !== summary.turnCount ||
+        current.queuedCount !== summary.queuedCount ||
+        current.runningCount !== summary.runningCount
+      ) {
+        summaryMap.set(summary.id, summary);
+        changed = true;
+      }
+    });
+    if (!changed) {
+      return;
+    }
+    const summaries = Array.from(summaryMap.values()).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     conversationSummariesRef.current = summaries;
     setConversationSummaries(summaries);
   }, []);
@@ -808,13 +854,18 @@ function ImagePageContent({
         if (!item) {
           return null;
         }
+        const currentItem = conversationsRef.current.find((conversation) => conversation.id === item.id) ?? null;
+        if (currentItem === item) {
+          mergeConversationSummaries([item]);
+          return item;
+        }
         const nextConversations = sortImageConversations([
           item,
           ...conversationsRef.current.filter((conversation) => conversation.id !== item.id),
         ]);
         conversationsRef.current = nextConversations;
         setConversations(nextConversations);
-        syncConversationSummaries(nextConversations);
+        mergeConversationSummaries([item]);
         return item;
       } finally {
         if (!options.silent) {
@@ -822,7 +873,7 @@ function ImagePageContent({
         }
       }
     },
-    [syncConversationSummaries],
+    [mergeConversationSummaries],
   );
   const systemEstimatedWaitText = useMemo(
     () => formatRuntimeDuration(Number(runtimeStats?.estimated_wait_ms || 0)),
@@ -867,6 +918,50 @@ function ImagePageContent({
     setSelectedConversationId(normalizedConversationId);
     persistActiveConversationSelection(normalizedConversationId, isDraft);
   }, [persistActiveConversationSelection]);
+
+  const applyConversationSummaries = useCallback(
+    (items: ImageConversationSummary[], options: { background?: boolean } = {}) => {
+      conversationSummariesRef.current = items;
+      setConversationSummaries(items);
+      const storedConversationId = readPersistedActiveConversationSelection();
+      const storedDraftSelection = storedConversationId === DRAFT_CONVERSATION_STORAGE_VALUE;
+      const nextSelectedConversationId =
+        (storedConversationId && items.some((conversation) => conversation.id === storedConversationId)
+          ? storedConversationId
+          : null) ?? items[0]?.id ?? null;
+      const currentSelection = selectedConversationIdRef.current;
+      const currentSelectionStillExists = Boolean(currentSelection && items.some((item) => item.id === currentSelection));
+      if (storedDraftSelection) {
+        setConversationSelection(null, { draft: true });
+        return;
+      }
+      if (draftModeRef.current) {
+        return;
+      }
+      if (!options.background || (!currentSelection && !draftModeRef.current) || !currentSelectionStillExists) {
+        setConversationSelection(nextSelectedConversationId);
+      }
+    },
+    [setConversationSelection],
+  );
+
+  const handleRefreshConversations = useCallback(async () => {
+    setIsLoadingHistory(true);
+    try {
+      const items = await listImageConversations({ forceRemote: true });
+      applyConversationSummaries(items);
+      const activeId = selectedConversationIdRef.current;
+      if (activeId && items.some((item) => item.id === activeId)) {
+        await ensureConversationDetailLoaded(activeId, { silent: true });
+      }
+      toast.success(`已刷新当前登录人的 ${items.length} 个会话`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "刷新会话失败";
+      toast.error(message);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, [applyConversationSummaries, ensureConversationDetailLoaded]);
   const deleteConfirmTitle =
     deleteConfirm?.type === "all"
       ? "清空历史记录"
@@ -918,41 +1013,15 @@ function ImagePageContent({
       ]);
       conversationsRef.current = nextConversations;
       setConversations(nextConversations);
-      syncConversationSummaries(nextConversations);
+      mergeConversationSummaries([item]);
     })();
     return () => {
       cancelled = true;
     };
-  }, [ensureConversationDetailLoaded, selectedConversationId, syncConversationSummaries]);
+  }, [ensureConversationDetailLoaded, mergeConversationSummaries, selectedConversationId]);
 
   useEffect(() => {
     let cancelled = false;
-
-    const applyHistorySummaries = async (items: ImageConversationSummary[], options: { background?: boolean } = {}) => {
-      if (cancelled) {
-        return;
-      }
-      conversationSummariesRef.current = items;
-      setConversationSummaries(items);
-      const storedConversationId = readPersistedActiveConversationSelection();
-      const storedDraftSelection = storedConversationId === DRAFT_CONVERSATION_STORAGE_VALUE;
-      const nextSelectedConversationId =
-        (storedConversationId && items.some((conversation) => conversation.id === storedConversationId)
-          ? storedConversationId
-          : null) ?? items[0]?.id ?? null;
-      const currentSelection = selectedConversationIdRef.current;
-      const currentSelectionStillExists = Boolean(currentSelection && items.some((item) => item.id === currentSelection));
-      if (storedDraftSelection) {
-        setConversationSelection(null, { draft: true });
-        return;
-      }
-      if (draftModeRef.current) {
-        return;
-      }
-      if (!options.background || (!currentSelection && !draftModeRef.current) || !currentSelectionStillExists) {
-        setConversationSelection(nextSelectedConversationId);
-      }
-    };
 
     const loadHistory = async () => {
       try {
@@ -961,7 +1030,9 @@ function ImagePageContent({
         setImageCount("1");
 
         const items = await listImageConversations();
-        await applyHistorySummaries(items);
+        if (!cancelled) {
+          applyConversationSummaries(items);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : "读取会话记录失败";
         toast.error(message);
@@ -972,17 +1043,37 @@ function ImagePageContent({
       }
     };
 
-    const unsubscribeSync = subscribeImageConversationSync((items) => {
-      conversationsRef.current = items;
-      setConversations(items);
-      syncConversationSummaries(items);
+    const unsubscribeSync = subscribeImageConversationSync((items, summaries) => {
+      if (summaries?.length) {
+        mergeConversationSummaries(summaries);
+      } else if (items.length > 0) {
+        mergeConversationSummaries(items);
+      }
+      if (items.length === 0) {
+        return;
+      }
+      const selectedId = selectedConversationIdRef.current;
+      const selectedItem = selectedId ? items.find((item) => item.id === selectedId) : null;
+      if (!selectedItem) {
+        return;
+      }
+      const currentSelected = conversationsRef.current.find((item) => item.id === selectedItem.id);
+      if (currentSelected === selectedItem) {
+        return;
+      }
+      const nextConversations = sortImageConversations([
+        selectedItem,
+        ...conversationsRef.current.filter((item) => item.id !== selectedItem.id),
+      ]);
+      conversationsRef.current = nextConversations;
+      setConversations(nextConversations);
     });
     void loadHistory();
     return () => {
       cancelled = true;
       unsubscribeSync();
     };
-  }, [setConversationSelection, syncConversationSummaries]);
+  }, [applyConversationSummaries, mergeConversationSummaries]);
 
   const loadQuota = useCallback(async () => {
     try {
@@ -1133,6 +1224,9 @@ function ImagePageContent({
   }, [batchLimit]);
 
   useEffect(() => {
+    if (draftModeRef.current) {
+      return;
+    }
     if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
       setConversationSelection(pickFallbackConversationId(conversations));
     }
@@ -1145,7 +1239,7 @@ function ImagePageContent({
     ]);
     conversationsRef.current = nextConversations;
     setConversations(nextConversations);
-    syncConversationSummaries(nextConversations);
+    mergeConversationSummaries([conversation]);
     await saveImageConversation(conversation);
   };
 
@@ -1163,7 +1257,7 @@ function ImagePageContent({
       ]);
       conversationsRef.current = nextConversations;
       setConversations(nextConversations);
-      syncConversationSummaries(nextConversations);
+      mergeConversationSummaries([nextConversation]);
       if (options.persist !== false) {
         await saveImageConversation(nextConversation);
       }
@@ -1172,6 +1266,7 @@ function ImagePageContent({
   );
 
   const clearComposerInputs = useCallback(() => {
+    promptApplyRequestIdRef.current += 1;
     setImagePrompt("");
     setReferenceImageFiles([]);
     setReferenceImages([]);
@@ -1195,7 +1290,9 @@ function ImagePageContent({
     const nextConversations = conversations.filter((item) => item.id !== id);
     conversationsRef.current = nextConversations;
     setConversations(nextConversations);
-    syncConversationSummaries(nextConversations);
+    const summaries = nextConversations.map((item) => summarizeImageConversation(item));
+    conversationSummariesRef.current = summaries;
+    setConversationSummaries(summaries);
     if (selectedConversationId === id) {
       setConversationSelection(pickFallbackConversationId(nextConversations));
       resetComposer();
@@ -1207,8 +1304,7 @@ function ImagePageContent({
       const message = error instanceof Error ? error.message : "删除会话失败";
       toast.error(message);
       const items = await listImageConversations();
-      conversationSummariesRef.current = items;
-      setConversationSummaries(items);
+      applyConversationSummaries(items, { background: true });
     }
   };
 
@@ -1320,6 +1416,7 @@ function ImagePageContent({
     if (files.length === 0) {
       return;
     }
+    promptApplyRequestIdRef.current += 1;
 
     try {
         const prepared = await Promise.all(files.map((file) => optimizeReferenceFile(file)));
@@ -1345,6 +1442,52 @@ function ImagePageContent({
     },
     [appendReferenceImages],
   );
+
+  const handleApplyMarketPrompt = useCallback(async (prompt: BananaPrompt) => {
+    const referenceImageUrls = getPromptReferenceImageUrls(prompt);
+    const requestId = promptApplyRequestIdRef.current + 1;
+    promptApplyRequestIdRef.current = requestId;
+
+    setConversationSelection(null, { draft: true });
+    setImagePrompt(prompt.prompt);
+    setImageCount("1");
+    setImageSize("");
+    setReferenceImageFiles([]);
+    setReferenceImages([]);
+    setIsPromptMarketOpen(false);
+    setComposerExpandSignal((value) => value + 1);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+    textareaRef.current?.focus();
+
+    if (referenceImageUrls.length === 0) {
+      toast.success("已套用提示词");
+      return;
+    }
+
+    const toastId = toast.loading(`正在读取 ${referenceImageUrls.length} 张参考图`);
+    const results = await Promise.allSettled(
+      referenceImageUrls.map((url, index) => buildReferenceImageFromUrl(url, index, "prompt-reference")),
+    );
+    const loadedReferences = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+
+    toast.dismiss(toastId);
+    if (promptApplyRequestIdRef.current !== requestId) {
+      return;
+    }
+    if (loadedReferences.length > 0) {
+      setReferenceImages(loadedReferences.map((item) => item.referenceImage));
+      setReferenceImageFiles(loadedReferences.map((item) => item.file));
+      toast.success(
+        loadedReferences.length === referenceImageUrls.length
+          ? "已套用提示词和参考图"
+          : `已套用提示词，成功读取 ${loadedReferences.length}/${referenceImageUrls.length} 张参考图`,
+      );
+    } else {
+      toast.warning("已套用提示词，但参考图读取失败，可直接文生图或手动上传参考图");
+    }
+  }, [setConversationSelection]);
 
   const handleRemoveReferenceImage = useCallback((index: number) => {
     setReferenceImageFiles((prev) => {
@@ -1544,6 +1687,7 @@ function ImagePageContent({
         });
       };
 
+      const missingTaskRetryCounts = new Map<string, number>();
       const markImagesError = async (errors: Array<{ image: StoredImage; error: unknown }>) => {
         refreshConversationQueueLock(conversationId);
         if (errors.length === 0) {
@@ -1664,7 +1808,7 @@ function ImagePageContent({
           dataUrlToFile(image.dataUrl, image.name || `${activeTurn.id}-${index + 1}.png`, image.type),
         );
         const canSubmitMissingEditTasks = activeTurn.mode !== "edit" || referenceFiles.length > 0;
-        const pendingImages = activeTurn.images.filter((image) => image.status === "loading");
+        let pendingImages = activeTurn.images.filter((image) => image.status === "loading");
         if (pendingImages.length > 0 && canSubmitMissingEditTasks) {
           refreshConversationQueueLock(conversationId);
           await submitPendingTasks(pendingImages, referenceFiles);
@@ -1676,8 +1820,18 @@ function ImagePageContent({
           refreshConversationQueueLock(conversationId);
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
           const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
-          const loadingTaskIds = collectPendingTaskIds(latestConversation ?? null);
+          const loadingTaskIds = collectPendingTaskIdsFromTurn(latestTurn);
+          pendingImages = latestTurn?.images.filter((image) => image.status === "loading") ?? [];
+          if (pendingImages.length === 0) {
+            break;
+          }
           if (loadingTaskIds.length === 0) {
+            await markImagesError(
+              pendingImages.map((image) => ({
+                image,
+                error: "任务缺少后台编号，已自动跳过，请重试这一张",
+              })),
+            );
             break;
           }
 
@@ -1702,7 +1856,29 @@ function ImagePageContent({
             );
             if (missingImages.length > 0) {
               if (canSubmitMissingEditTasks) {
-                await submitPendingTasks(missingImages, referenceFiles);
+                const retryableImages: StoredImage[] = [];
+                const exhaustedImages: StoredImage[] = [];
+                for (const image of missingImages) {
+                  const taskId = image.taskId || image.id;
+                  const nextCount = (missingTaskRetryCounts.get(taskId) || 0) + 1;
+                  missingTaskRetryCounts.set(taskId, nextCount);
+                  if (nextCount > MISSING_TASK_REQUEUE_LIMIT) {
+                    exhaustedImages.push(image);
+                  } else {
+                    retryableImages.push(image);
+                  }
+                }
+                if (retryableImages.length > 0) {
+                  await submitPendingTasks(retryableImages, referenceFiles);
+                }
+                if (exhaustedImages.length > 0) {
+                  await markImagesError(
+                    exhaustedImages.map((image) => ({
+                      image,
+                      error: "任务提交后未在后台队列中找到，已自动跳过，请重试这一张",
+                    })),
+                  );
+                }
               } else {
                 await updateConversation(conversationId, (current) => {
                   const conversation = current ?? snapshot;
@@ -1744,7 +1920,8 @@ function ImagePageContent({
         const message = friendlyImageError(error) || "生成图片失败";
         if (isRetryableTaskError(error)) {
           const latestConversation = conversationsRef.current.find((conversation) => conversation.id === conversationId);
-          const taskIds = collectPendingTaskIds(latestConversation ?? null);
+          const latestTurn = latestConversation?.turns.find((turn) => turn.id === activeTurn.id);
+          const taskIds = collectPendingTaskIdsFromTurn(latestTurn);
           if (taskIds.length > 0) {
             try {
               const taskList = await fetchImageTasks(taskIds);
@@ -2022,6 +2199,7 @@ function ImagePageContent({
             selectedConversationId={selectedConversationId}
             onCreateDraft={handleCreateDraft}
             onClearHistory={openClearHistoryConfirm}
+            onRefreshConversations={handleRefreshConversations}
             onSelectConversation={setConversationSelection}
             onDeleteConversation={openDeleteConversationConfirm}
             onRenameConversation={handleRenameConversation}
@@ -2036,7 +2214,7 @@ function ImagePageContent({
                 <History className="size-5" />
                 历史记录
               </DialogTitle>
-              <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 pt-2 sm:hidden">
+              <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2 pt-2 sm:hidden">
                 <Button
                   className="h-10 min-w-0 rounded-2xl bg-stone-950 text-white shadow-sm"
                   onClick={() => {
@@ -2046,6 +2224,16 @@ function ImagePageContent({
                 >
                   <Plus className="size-4" />
                   新建对话
+                </Button>
+                <Button
+                  variant="outline"
+                  className="h-10 rounded-2xl border-stone-200 bg-white px-3 text-stone-600 shadow-sm"
+                  onClick={() => void handleRefreshConversations()}
+                  disabled={isLoadingHistory}
+                  title="刷新当前登录人的全部会话"
+                  aria-label="刷新当前登录人的全部会话"
+                >
+                  <RefreshCw className={cn("size-4", isLoadingHistory && "animate-spin")} />
                 </Button>
                 <Button
                   variant="outline"
@@ -2067,6 +2255,7 @@ function ImagePageContent({
                   setIsHistoryOpen(false);
                 }}
                 onClearHistory={openClearHistoryConfirm}
+                onRefreshConversations={handleRefreshConversations}
                 onSelectConversation={(id) => {
                   setConversationSelection(id);
                   setIsHistoryOpen(false);
@@ -2081,7 +2270,7 @@ function ImagePageContent({
         </Dialog>
 
         <div className="flex min-h-0 flex-col gap-2 sm:gap-4">
-          <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 px-1 lg:hidden">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-2 px-1 lg:hidden">
             <Button
               variant="outline"
               className="h-10 min-w-0 rounded-2xl border-stone-200 bg-white/90 px-3 text-stone-700 shadow-sm"
@@ -2096,6 +2285,16 @@ function ImagePageContent({
             >
               <Plus className="size-4" />
               新建
+            </Button>
+            <Button
+              variant="outline"
+              className="h-10 rounded-2xl border-stone-200 bg-white/85 px-3 text-stone-600 shadow-sm"
+              onClick={() => void handleRefreshConversations()}
+              disabled={isLoadingHistory}
+              title="刷新当前登录人的全部会话"
+              aria-label="刷新当前登录人的全部会话"
+            >
+              <RefreshCw className={cn("size-4", isLoadingHistory && "animate-spin")} />
             </Button>
             <Button
               variant="outline"
@@ -2152,6 +2351,7 @@ function ImagePageContent({
             onImageCountChange={(value) => setImageCount(value ? clampImageCountWithLimit(value, batchLimit) : "")}
             onImageSizeChange={setImageSize}
             onSubmit={handleSubmit}
+            onOpenPromptMarket={() => setIsPromptMarketOpen(true)}
             onPickReferenceImage={() => fileInputRef.current?.click()}
             onReferenceImageChange={handleReferenceImageChange}
             onRemoveReferenceImage={handleRemoveReferenceImage}
@@ -2165,6 +2365,12 @@ function ImagePageContent({
         open={lightboxOpen}
         onOpenChange={setLightboxOpen}
         onIndexChange={setLightboxIndex}
+      />
+
+      <ImagePromptMarket
+        open={isPromptMarketOpen}
+        onOpenChange={setIsPromptMarketOpen}
+        onApplyPrompt={handleApplyMarketPrompt}
       />
 
       {deleteConfirm ? (

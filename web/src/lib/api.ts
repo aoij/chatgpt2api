@@ -467,6 +467,13 @@ export async function deleteAccounts(tokens: string[]) {
   });
 }
 
+export async function removeAbnormalAccounts() {
+  return httpRequest<AccountMutationResponse & { summary?: AccountSummaryResponse }>("/api/accounts/remove-abnormal", {
+    method: "POST",
+    body: {},
+  });
+}
+
 export async function refreshAccounts(accessTokens: string[]) {
   return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
     method: "POST",
@@ -626,6 +633,16 @@ export async function deleteManagedImages(body: { paths?: string[]; start_date?:
 export async function downloadManagedImage(path: string) {
   const params = new URLSearchParams({ path });
   return httpBlobRequest(`/api/images/download?${params.toString()}`);
+}
+
+export function buildManagedImageDownloadParams(path: string) {
+  return { path };
+}
+
+export function buildManagedImagesDownloadParams(
+  input: string[] | { paths?: string[]; start_date?: string; end_date?: string; uploader?: string; all_matching?: boolean },
+) {
+  return Array.isArray(input) ? { paths: input } : input;
 }
 
 export async function downloadManagedImages(

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, ConfigDict
 
 from api.support import (
@@ -17,7 +17,7 @@ from api.support import (
 from services.backup_service import BackupError, backup_service
 from services.auth_service import auth_service
 from services.config import config
-from services.image_service import add_log_image_thumbnails, build_image_download, build_images_zip, delete_images, list_images
+from services.image_service import add_log_image_thumbnails, build_image_download, build_images_zip, delete_images, list_images, warm_image_download_cache
 from services.image_task_service import image_task_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import log_service
@@ -30,6 +30,11 @@ class SettingsUpdateRequest(BaseModel):
 
 class ProxyTestRequest(BaseModel):
     url: str = ""
+
+
+class ProxyUpdateRequest(BaseModel):
+    enabled: bool | None = None
+    url: str | None = None
 
 
 class ImageDeleteRequest(BaseModel):
@@ -68,8 +73,31 @@ def _effective_image_uploader(identity: dict[str, object], uploader: str = "") -
     return str(identity.get("id") or identity.get("subject_id") or "").strip()
 
 
+def _require_download_identity(authorization: str | None, download_token: str = "") -> dict[str, object]:
+    """Allow direct browser downloads without buffering blobs in the web UI.
+
+    Normal API calls still use the Authorization header.  Direct `<a download>`
+    clicks cannot attach headers, so the front end can pass the current token as
+    a short-lived same-origin download query parameter.
+    """
+    token = str(download_token or "").strip()
+    return require_identity(authorization or (f"Bearer {token}" if token else None))
+
+
 def _download_response(payload: dict[str, object]) -> Response:
     filename = str(payload.get("filename") or "download")
+    file_path = payload.get("file_path")
+    if file_path:
+        return FileResponse(
+            path=str(file_path),
+            media_type=str(payload.get("media_type") or "application/octet-stream"),
+            filename=filename,
+            headers={
+                "Content-Disposition": f"attachment; filename=\"{filename}\"; filename*=UTF-8''{quote(filename)}",
+                "Cache-Control": "private, max-age=300",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     content = payload.get("content") or b""
     if not isinstance(content, bytes):
         content = bytes(content)
@@ -185,14 +213,35 @@ def create_router(app_version: str) -> APIRouter:
         )
 
     @router.get("/api/images/download")
-    async def download_image(path: str = "", authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        payload = build_image_download(
-            path,
-            uploader=_effective_image_uploader(identity),
-        )
+    async def download_image(
+        background_tasks: BackgroundTasks,
+        path: str = "",
+        paths: list[str] = Query(default=[]),
+        start_date: str = "",
+        end_date: str = "",
+        uploader: str = "",
+        all_matching: bool = False,
+        download_token: str = "",
+        authorization: str | None = Header(default=None),
+    ):
+        identity = _require_download_identity(authorization, download_token)
+        effective_uploader = _effective_image_uploader(identity, uploader)
+        if paths or all_matching:
+            payload = build_images_zip(
+                paths,
+                uploader=effective_uploader,
+                start_date=start_date.strip(),
+                end_date=end_date.strip(),
+                all_matching=all_matching,
+            )
+        else:
+            payload = build_image_download(
+                path,
+                uploader=effective_uploader,
+            )
         if payload is None:
-            raise HTTPException(status_code=404, detail={"error": "image not found"})
+            raise HTTPException(status_code=404, detail={"error": "images not found"})
+        background_tasks.add_task(warm_image_download_cache, paths or ([path] if path else []))
         return _download_response(payload)
 
     @router.post("/api/images/download")
@@ -226,6 +275,23 @@ def create_router(app_version: str) -> APIRouter:
         if not candidate:
             raise HTTPException(status_code=400, detail={"error": "proxy url is required"})
         return {"result": await run_in_threadpool(test_proxy, candidate)}
+
+    @router.get("/api/proxy")
+    async def get_proxy_endpoint(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        proxy = config.get_proxy_settings()
+        return {"proxy": {"enabled": bool(proxy), "url": proxy}}
+
+    @router.post("/api/proxy")
+    async def update_proxy_endpoint(body: ProxyUpdateRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        current = config.get_proxy_settings()
+        enabled = bool(body.enabled) if body.enabled is not None else bool(current)
+        url = str(body.url if body.url is not None else current).strip()
+        next_proxy = url if enabled else ""
+        updated = config.update({"proxy": next_proxy})
+        proxy = str(updated.get("proxy") or "").strip()
+        return {"proxy": {"enabled": bool(proxy), "url": proxy}}
 
     @router.get("/api/storage/info")
     async def get_storage_info(authorization: str | None = Header(default=None)):

@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, Store, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type RefObject } from "react";
 
 import { ImageLightbox } from "@/components/image-lightbox";
@@ -35,6 +35,7 @@ type ImageComposerProps = {
   onImageCountChange: (value: string) => void;
   onImageSizeChange: (value: string) => void;
   onSubmit: () => void | Promise<void>;
+  onOpenPromptMarket: () => void;
   onPickReferenceImage: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
   onRemoveReferenceImage: (index: number) => void;
@@ -75,6 +76,7 @@ export function ImageComposer({
   onImageCountChange,
   onImageSizeChange,
   onSubmit,
+  onOpenPromptMarket,
   onPickReferenceImage,
   onReferenceImageChange,
   onRemoveReferenceImage,
@@ -84,7 +86,8 @@ export function ImageComposer({
   const [isSizeMenuOpen, setIsSizeMenuOpen] = useState(false);
   const [isMobilePanelExpanded, setIsMobilePanelExpanded] = useState(false);
   const [isMobileViewport, setIsMobileViewport] = useState(false);
-  const [sizeMenuPos, setSizeMenuPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const [isDesktopComposerCollapsed, setIsDesktopComposerCollapsed] = useState(false);
+  const [sizeMenuPos, setSizeMenuPos] = useState<{ top: number; left: number; width: number }>({ top: 0, left: 0, width: 210 });
   const sizeMenuRef = useRef<HTMLDivElement>(null);
   const sizeMenuBtnRef = useRef<HTMLButtonElement>(null);
   const composerBodyRef = useRef<HTMLDivElement>(null);
@@ -149,6 +152,7 @@ export function ImageComposer({
 
   useEffect(() => {
     if (referenceImages.length > 0) {
+      setIsDesktopComposerCollapsed(false);
       setIsMobilePanelExpanded(true);
       focusPromptTextarea(true);
     }
@@ -165,6 +169,7 @@ export function ImageComposer({
     if (!expandSignal) {
       return;
     }
+    setIsDesktopComposerCollapsed(false);
     setIsMobilePanelExpanded(true);
     setIsSizeMenuOpen(false);
     focusPromptTextarea(true);
@@ -176,18 +181,48 @@ export function ImageComposer({
     }
   }, [isMobileViewport]);
 
+  const updateSizeMenuPosition = () => {
+    if (typeof window === "undefined" || !sizeMenuBtnRef.current) {
+      return;
+    }
+    const rect = sizeMenuBtnRef.current.getBoundingClientRect();
+    const menuWidth = isMobileViewport ? Math.max(260, window.innerWidth - 32) : Math.min(210, window.innerWidth - 32);
+    const left = isMobileViewport
+      ? 16
+      : Math.max(16, Math.min(rect.left, window.innerWidth - menuWidth - 16));
+    const menuHeight = isMobileViewport ? 280 : Math.min(320, Math.max(180, window.innerHeight * 0.45));
+    const top = Math.max(12, rect.top - menuHeight - 10);
+    setSizeMenuPos({ top, left, width: menuWidth });
+  };
+
+  useEffect(() => {
+    if (!isSizeMenuOpen || isMobileViewport) {
+      return;
+    }
+    updateSizeMenuPosition();
+    window.addEventListener("resize", updateSizeMenuPosition);
+    window.visualViewport?.addEventListener("resize", updateSizeMenuPosition);
+    window.visualViewport?.addEventListener("scroll", updateSizeMenuPosition);
+    return () => {
+      window.removeEventListener("resize", updateSizeMenuPosition);
+      window.visualViewport?.removeEventListener("resize", updateSizeMenuPosition);
+      window.visualViewport?.removeEventListener("scroll", updateSizeMenuPosition);
+    };
+  }, [isSizeMenuOpen, isMobileViewport]);
+
   useEffect(() => {
     if (!isSizeMenuOpen) {
       return;
     }
-    const handlePointerDown = (event: MouseEvent) => {
-      if (!sizeMenuRef.current?.contains(event.target as Node)) {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!sizeMenuRef.current?.contains(target) && !sizeMenuBtnRef.current?.contains(target)) {
         setIsSizeMenuOpen(false);
       }
     };
-    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("pointerdown", handlePointerDown);
     return () => {
-      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("pointerdown", handlePointerDown);
     };
   }, [isSizeMenuOpen]);
 
@@ -200,6 +235,24 @@ export function ImageComposer({
     event.preventDefault();
     void onReferenceImageChange(imageFiles);
   };
+
+  if (isDesktopComposerCollapsed && !isMobileViewport) {
+    return (
+      <button
+        type="button"
+        className="fixed bottom-6 right-6 z-40 hidden h-12 items-center gap-2 rounded-full border border-stone-200 bg-white/95 px-5 text-sm font-medium text-stone-700 shadow-[0_18px_65px_-34px_rgba(15,23,42,0.35)] backdrop-blur transition hover:border-stone-300 hover:bg-white hover:text-stone-950 sm:inline-flex"
+        onClick={() => {
+          setIsDesktopComposerCollapsed(false);
+          setIsSizeMenuOpen(false);
+          focusPromptTextarea(false);
+        }}
+        aria-label="打开创作区"
+      >
+        打开创作区
+        <ArrowUp className="size-4" />
+      </button>
+    );
+  }
 
   return (
     <div
@@ -285,7 +338,7 @@ export function ImageComposer({
                 展开
               </span>
             </button>
-            <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+            <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_auto] gap-2">
               <Button
                 type="button"
                 variant="outline"
@@ -297,6 +350,16 @@ export function ImageComposer({
               >
                 <ImagePlus className="size-4" />
                 上传图片
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-10 rounded-2xl border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 shadow-none"
+                onClick={onOpenPromptMarket}
+                aria-label="打开提示词市场"
+              >
+                <Store className="size-4" />
+                <span className="sr-only">市场</span>
               </Button>
               <button
                 type="button"
@@ -422,6 +485,17 @@ export function ImageComposer({
                     <ImagePlus className="size-4" />
                     <span>{referenceImages.length > 0 ? "添加参考图" : "上传图片"}</span>
                   </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-11 justify-start rounded-2xl border-stone-200 bg-white px-4 text-sm font-medium text-stone-700 shadow-none sm:h-10 sm:w-auto sm:justify-center sm:rounded-full sm:px-4 sm:text-sm"
+                    onClick={onOpenPromptMarket}
+                    aria-label="打开提示词市场"
+                    title="提示词市场"
+                  >
+                    <Store className="size-4" />
+                    <span>市场</span>
+                  </Button>
 
                   <div className="hidden shrink-0 rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600 sm:block">
                     剩余额度 {availableQuota}
@@ -476,12 +550,10 @@ export function ImageComposer({
                         ref={sizeMenuBtnRef}
                         type="button"
                         className="flex h-11 w-full items-center justify-between rounded-2xl border border-stone-200 bg-white px-3 text-left shadow-none sm:h-10 sm:rounded-full"
-                        onClick={() => {
-                          if (!isSizeMenuOpen && sizeMenuBtnRef.current) {
-                            const rect = sizeMenuBtnRef.current.getBoundingClientRect();
-                            const menuWidth = Math.min(210, window.innerWidth - 32);
-                            const left = Math.max(16, Math.min(rect.left, window.innerWidth - menuWidth - 16));
-                            setSizeMenuPos({ top: rect.top - 8, left });
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          if (!isSizeMenuOpen && !isMobileViewport) {
+                            updateSizeMenuPosition();
                           }
                           setIsSizeMenuOpen((open) => !open);
                         }}
@@ -493,41 +565,119 @@ export function ImageComposer({
                         <ChevronDown className={cn("size-4 shrink-0 opacity-60 transition", isSizeMenuOpen && "rotate-180")} />
                       </button>
                       {isSizeMenuOpen ? (
-                        <div
-                          ref={sizeMenuRef}
-                          className="fixed z-[80] max-h-[45dvh] overflow-y-auto rounded-3xl border border-white/80 bg-white p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)]"
-                          style={{
-                            top: sizeMenuPos.top,
-                            left: sizeMenuPos.left,
-                            transform: "translateY(-100%)",
-                            width: "min(210px, calc(100vw - 2rem))",
-                          }}
-                        >
-                          {imageSizeOptions.map((option) => {
-                            const active = option.value === imageSize;
-                            return (
-                              <button
-                                key={option.label}
-                                type="button"
-                                className={cn(
-                                  "flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm text-stone-700 transition hover:bg-stone-100",
-                                  active && "bg-stone-100 font-medium text-stone-950",
-                                )}
-                                onClick={() => {
-                                  onImageSizeChange(option.value);
-                                  setIsSizeMenuOpen(false);
-                                }}
-                              >
-                                <span>{option.label}</span>
-                                {active ? <Check className="size-4" /> : null}
-                              </button>
-                            );
-                          })}
-                        </div>
+                        isMobileViewport ? (
+                          <div
+                            className="fixed inset-0 z-[120] flex min-h-[100svh] items-center justify-center bg-stone-950/35 px-4 py-8 backdrop-blur-[2px]"
+                            onClick={() => setIsSizeMenuOpen(false)}
+                          >
+                            <div
+                              ref={sizeMenuRef}
+                              role="dialog"
+                              aria-modal="true"
+                              aria-label="选择图片比例"
+                              className="w-full max-w-[360px] rounded-[30px] border border-white/80 bg-white p-3 shadow-[0_30px_100px_-40px_rgba(15,23,42,0.55)]"
+                              onClick={(event) => event.stopPropagation()}
+                              onMouseDown={(event) => event.stopPropagation()}
+                            >
+                              <div className="mb-2 flex items-center justify-between gap-3 px-2 py-1">
+                                <div>
+                                  <div className="text-base font-semibold text-stone-950">选择图片比例</div>
+                                  <div className="mt-0.5 text-xs text-stone-500">手机端使用弹窗选择，避免被底部工具栏遮挡</div>
+                                </div>
+                                <button
+                                  type="button"
+                                  className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-stone-100 text-stone-500"
+                                  onClick={() => setIsSizeMenuOpen(false)}
+                                  aria-label="关闭尺寸选择"
+                                >
+                                  <X className="size-4" />
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                {imageSizeOptions.map((option) => {
+                                  const active = option.value === imageSize;
+                                  return (
+                                    <button
+                                      key={option.label}
+                                      type="button"
+                                      className={cn(
+                                        "flex min-h-16 items-center justify-between gap-2 rounded-3xl border px-4 py-3 text-left transition",
+                                        active
+                                          ? "border-stone-950 bg-stone-950 text-white shadow-[0_16px_40px_-24px_rgba(15,23,42,0.7)]"
+                                          : "border-stone-200 bg-stone-50 text-stone-800 active:bg-stone-100",
+                                      )}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        onImageSizeChange(option.value);
+                                        setIsSizeMenuOpen(false);
+                                      }}
+                                    >
+                                      <span>
+                                        <span className="block text-sm font-semibold">{option.value || "默认"}</span>
+                                        <span className={cn("mt-1 block text-[11px]", active ? "text-white/70" : "text-stone-500")}>
+                                          {option.label.replace(option.value || "未指定", "").replace(/[（）]/g, "") || "不指定比例"}
+                                        </span>
+                                      </span>
+                                      {active ? <Check className="size-5 shrink-0" /> : null}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        ) : (
+                          <div
+                            ref={sizeMenuRef}
+                            className="fixed z-[90] max-h-[45dvh] overflow-y-auto rounded-3xl border border-white/80 bg-white p-2 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.35)]"
+                            style={{
+                              top: sizeMenuPos.top,
+                              left: sizeMenuPos.left,
+                              width: "min(210px, calc(100vw - 2rem))",
+                            }}
+                            onClick={(event) => event.stopPropagation()}
+                            onMouseDown={(event) => event.stopPropagation()}
+                          >
+                            {imageSizeOptions.map((option) => {
+                              const active = option.value === imageSize;
+                              return (
+                                <button
+                                  key={option.label}
+                                  type="button"
+                                  className={cn(
+                                    "flex w-full items-center justify-between rounded-2xl px-3 py-2 text-left text-sm text-stone-700 transition hover:bg-stone-100",
+                                    active && "bg-stone-100 font-medium text-stone-950",
+                                  )}
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onImageSizeChange(option.value);
+                                    setIsSizeMenuOpen(false);
+                                  }}
+                                >
+                                  <span>{option.label}</span>
+                                  {active ? <Check className="size-4" /> : null}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )
                       ) : null}
                     </div>
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsSizeMenuOpen(false);
+                    setIsDesktopComposerCollapsed(true);
+                  }}
+                  className="hidden h-11 shrink-0 items-center justify-center rounded-full border border-stone-200 bg-white px-4 text-sm font-medium text-stone-600 transition hover:border-stone-300 hover:text-stone-950 sm:inline-flex"
+                  aria-label="收起创作区"
+                >
+                  收起创作区
+                  <ChevronDown className="ml-1 size-4" />
+                </button>
 
                 <button
                   type="button"

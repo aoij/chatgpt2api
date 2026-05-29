@@ -168,6 +168,22 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def _persistable_task(task: dict[str, Any]) -> dict[str, Any]:
+    item = dict(task)
+    if item.get("status") in TERMINAL_STATUSES:
+        item.pop("payload", None)
+    return item
+
+
+def _requeue_payload_for_task(mode: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    if mode == "generate":
+        return dict(payload)
+    # Edit tasks carry in-memory file bytes.  Keeping those bytes in SQLite/JSON would
+    # make persistence fail and can grow the database very quickly.  The browser keeps
+    # reference images and can resubmit edit tasks when a missing placeholder is found.
+    return None
+
+
 def _compact_image_data(data: object) -> object:
     if not isinstance(data, list):
         return data
@@ -259,6 +275,9 @@ def _normalize_task_item(item: object) -> dict[str, Any] | None:
             "completed": int(persist_summary.get("completed") or 0),
             "failed": int(persist_summary.get("failed") or 0),
         }
+    payload = item.get("payload")
+    if status not in TERMINAL_STATUSES and isinstance(payload, dict):
+        task["payload"] = payload
     error = _clean(item.get("error"))
     if error:
         task["error"] = error
@@ -472,6 +491,8 @@ class ImageTaskService:
             changed = self._cleanup_if_due_locked() or changed
             if changed:
                 self._save_locked()
+        self._drain_task_queue()
+        with self._lock:
             items = []
             missing_ids = []
             for task_id in requested_ids:
@@ -594,6 +615,7 @@ class ImageTaskService:
                 reserved_quota = auth_service.reserve_image_quota(identity, 1)
             except ImageQuotaExceeded:
                 raise
+            persisted_payload = _requeue_payload_for_task(mode, payload)
             task = {
                 "id": task_id,
                 "owner_id": owner,
@@ -608,6 +630,8 @@ class ImageTaskService:
                 "created_at": now,
                 "updated_at": now,
             }
+            if persisted_payload is not None:
+                task["payload"] = persisted_payload
             self._tasks[key] = task
             self._dirty = True
             self._save_locked()
@@ -644,6 +668,26 @@ class ImageTaskService:
 
     def _ensure_persist_threads(self) -> None:
         self._drain_persist_queue()
+
+    def _requeue_task_locked(self, key: str, task: dict[str, Any]) -> bool:
+        """Re-enqueue a queued task that exists in storage but not in the memory queue."""
+        mode = _clean(task.get("mode")) or "generate"
+        payload = task.get("payload")
+        if mode not in {"generate", "edit"} or not isinstance(payload, dict):
+            self._fail_unfinished_task_locked(
+                task,
+                "图片任务缺少运行参数，已自动失败并返还额度，请重新提交",
+            )
+            return False
+        queued_keys = {_queue_item_key(item) for item in list(getattr(self._queue, "queue", []))}
+        running_keys = {item[0] for item in self._active_worker_tasks.values() if item and item[0]}
+        if key in queued_keys or key in running_keys:
+            return False
+        self._queue.put((key, mode, dict(payload)))
+        task["updated_at"] = _now_iso()
+        task["last_requeued_at"] = task["updated_at"]
+        self._dirty = True
+        return True
 
     def _worker_enabled(self, worker_index: int) -> bool:
         return worker_index <= self._worker_count
@@ -1153,6 +1197,8 @@ class ImageTaskService:
             if task is None:
                 return
             task.update(updates)
+            if task.get("status") in TERMINAL_STATUSES:
+                task.pop("payload", None)
             task["updated_at"] = _now_iso()
             self._dirty = True
             self._save_locked()
@@ -1293,7 +1339,11 @@ class ImageTaskService:
     def _save_locked(self) -> None:
         if not self._dirty:
             return
-        items = sorted(self._tasks.values(), key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+        items = sorted(
+            (_persistable_task(item) for item in self._tasks.values()),
+            key=lambda item: str(item.get("updated_at") or ""),
+            reverse=True,
+        )
         if self._db_available:
             try:
                 self._save_to_db_locked(items)
@@ -1312,6 +1362,7 @@ class ImageTaskService:
             task["reserved_quota"] = 0
         task["status"] = TASK_STATUS_ERROR
         task["error"] = message
+        task.pop("payload", None)
         task["updated_at"] = _now_iso()
         self._dirty = True
 
@@ -1339,6 +1390,10 @@ class ImageTaskService:
                     self._release_upstream_slot()
                     changed = True
                     continue
+                if task.get("status") == TASK_STATUS_QUEUED:
+                    if self._requeue_task_locked(key, task):
+                        changed = True
+                        continue
                 updated_at = _timestamp(task.get("updated_at")) or _timestamp(task.get("created_at"))
                 if updated_at > 0 and updated_at <= now and now - updated_at < self._running_task_timeout_seconds:
                     continue
@@ -1347,7 +1402,11 @@ class ImageTaskService:
         return changed
 
     def _recover_unfinished_locked(self) -> bool:
-        return self._recover_stale_unfinished_locked()
+        changed = self._recover_stale_unfinished_locked()
+        if changed:
+            self._save_locked()
+        self._drain_task_queue()
+        return False
 
     def _cleanup_locked(self) -> bool:
         try:

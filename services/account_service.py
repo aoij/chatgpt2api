@@ -661,6 +661,22 @@ class AccountService:
                    and (token := self._clean_token(item.get("access_token")))
             ]
 
+    def remove_marked_invalid_accounts(self, *, event: str = "invalid_account_sweeper") -> dict[str, Any]:
+        if not config.auto_remove_invalid_accounts:
+            return {"removed": 0, "items": self.list_accounts(compact=True)}
+        with self._lock:
+            tokens = [
+                token
+                for item in self._accounts
+                if item.get("status") == "异常"
+                   and (token := self._clean_token(item.get("access_token")))
+            ]
+        result = self.delete_accounts(tokens)
+        removed = int(result.get("removed") or 0)
+        if removed:
+            log_service.add(LOG_TYPE_ACCOUNT, "自动移除历史异常账号", {"source": event, "removed": removed})
+        return result
+
     def add_accounts(self, tokens: list[str]) -> dict:
         cleaned_tokens = self._clean_tokens(tokens)
         if not cleaned_tokens:

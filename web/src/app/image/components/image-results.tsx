@@ -1,13 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { memo, useDeferredValue, useMemo } from "react";
 import { Clock3, Download, LoaderCircle, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import { ImageThumbnail, getImageThumbnailUrl } from "@/components/image-thumbnail";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { downloadManagedImage, getManagedImagePathFromUrl, type PublicConfig } from "@/lib/api";
-import { defaultImageDownloadName, saveBlobAsFile } from "@/lib/download";
+import { buildManagedImageDownloadParams, getManagedImagePathFromUrl, type PublicConfig } from "@/lib/api";
+import { defaultImageDownloadName, openDirectDownload, openUrlDownload, saveBlobAsFile } from "@/lib/download";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
 
 export type ImageLightboxItem = {
@@ -65,14 +65,11 @@ async function downloadStoredImage(image: StoredImage, index: number) {
   if (image.url) {
     const managedPath = getManagedImagePathFromUrl(image.url);
     if (managedPath) {
-      const data = await downloadManagedImage(managedPath);
-      saveBlobAsFile(data.blob, data.filename || `${image.id}.jpg`);
+      await openDirectDownload("/api/images/download", buildManagedImageDownloadParams(managedPath));
       return;
     }
 
-    const response = await fetch(image.url);
-    const blob = await response.blob();
-    saveBlobAsFile(blob, defaultImageDownloadName(image.id || `image-${index + 1}`, "jpg"));
+    openUrlDownload(image.url, defaultImageDownloadName(image.id || `image-${index + 1}`, "jpg"));
     return;
   }
 
@@ -99,19 +96,9 @@ export function ImageResults({
   formatConversationTime,
   publicConfig,
 }: ImageResultsProps) {
-  const [imageDimensions, setImageDimensions] = useState<Record<string, string>>({});
+  const deferredConversation = useDeferredValue(selectedConversation);
 
-  const updateImageDimensions = (id: string, width: number, height: number) => {
-    const dimensions = formatImageDimensions(width, height);
-    setImageDimensions((current) => {
-      if (current[id] === dimensions) {
-        return current;
-      }
-      return { ...current, [id]: dimensions };
-    });
-  };
-
-  if (!selectedConversation) {
+  if (!deferredConversation) {
     if (isLoadingConversationDetail) {
       return (
         <div className="flex h-full min-h-[260px] items-center justify-center text-center sm:min-h-[420px]">
@@ -148,29 +135,75 @@ export function ImageResults({
 
   return (
     <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5 sm:gap-8">
-      {selectedConversation.turns.map((turn, turnIndex) => {
-        const referenceLightboxImages = turn.referenceImages.map((image, index) => ({
-          id: `${turn.id}-reference-${index}`,
-          src: image.dataUrl,
-        }));
-        const successfulTurnImages = turn.images.flatMap((image) => {
-          const src = image.status === "success" ? getStoredImageSrc(image) : "";
-          return src
-            ? [
-                {
-                  id: image.id,
-                  src,
-                  sizeLabel: image.b64_json ? formatBase64ImageSize(image.b64_json) : undefined,
-                  dimensions: imageDimensions[image.id],
-                  downloadPath: image.url ? getManagedImagePathFromUrl(image.url) : undefined,
-                  filename: image.url ? `${image.id}.jpg` : undefined,
-                },
-              ]
-            : [];
-        });
+      {deferredConversation.turns.map((turn, turnIndex) => (
+        <ImageTurnBlock
+          key={turn.id}
+          conversationId={deferredConversation.id}
+          turn={turn}
+          turnIndex={turnIndex}
+          onOpenLightbox={onOpenLightbox}
+          onContinueEdit={onContinueEdit}
+          onDeletePrompt={onDeletePrompt}
+          onDeleteResults={onDeleteResults}
+          onReuseTurnConfig={onReuseTurnConfig}
+          onRegenerateTurn={onRegenerateTurn}
+          onRetryImage={onRetryImage}
+          formatConversationTime={formatConversationTime}
+        />
+      ))}
+    </div>
+  );
+}
 
-        return (
-          <div key={turn.id} className="flex flex-col gap-3 sm:gap-4">
+type ImageTurnBlockProps = {
+  conversationId: string;
+  turn: ImageConversation["turns"][number];
+  turnIndex: number;
+  onOpenLightbox: (images: ImageLightboxItem[], index: number) => void;
+  onContinueEdit: (conversationId: string, image: StoredImage | StoredReferenceImage) => void;
+  onDeletePrompt?: (conversationId: string, turnId: string) => void;
+  onDeleteResults?: (conversationId: string, turnId: string) => void;
+  onReuseTurnConfig?: (conversationId: string, turnId: string) => void | Promise<void>;
+  onRegenerateTurn?: (conversationId: string, turnId: string) => void | Promise<void>;
+  onRetryImage?: (conversationId: string, turnId: string, imageId: string) => void | Promise<void>;
+  formatConversationTime: (value: string) => string;
+};
+
+const ImageTurnBlock = memo(function ImageTurnBlock({
+  conversationId,
+  turn,
+  turnIndex,
+  onOpenLightbox,
+  onContinueEdit,
+  onDeletePrompt,
+  onDeleteResults,
+  onReuseTurnConfig,
+  onRegenerateTurn,
+  onRetryImage,
+  formatConversationTime,
+}: ImageTurnBlockProps) {
+  const referenceLightboxImages = useMemo(() => turn.referenceImages.map((image, index) => ({
+    id: `${turn.id}-reference-${index}`,
+    src: image.dataUrl,
+  })), [turn.id, turn.referenceImages]);
+
+  const successfulTurnImages = useMemo(() => turn.images.flatMap((image) => {
+    const src = image.status === "success" ? getStoredImageSrc(image) : "";
+    return src
+      ? [
+          {
+            id: image.id,
+            src,
+            sizeLabel: image.b64_json ? formatBase64ImageSize(image.b64_json) : undefined,
+            downloadPath: image.url ? getManagedImagePathFromUrl(image.url) : undefined,
+            filename: image.url ? `${image.id}.jpg` : undefined,
+          },
+        ]
+      : [];
+  }), [turn.images]);
+
+  return (
+          <div className="flex flex-col gap-3 [contain-intrinsic-size:720px] [content-visibility:auto] sm:gap-4">
             {!turn.promptDeleted ? (
               <div className="flex justify-end">
                 <div className="max-w-[90%] px-1 py-1 text-[14px] leading-6 text-stone-900 sm:max-w-[82%] sm:text-[15px] sm:leading-7">
@@ -185,7 +218,7 @@ export function ImageResults({
                     {onReuseTurnConfig ? (
                       <button
                         type="button"
-                        onClick={() => void onReuseTurnConfig(selectedConversation.id, turn.id)}
+                        onClick={() => void onReuseTurnConfig(conversationId, turn.id)}
                         className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-medium text-stone-600 transition hover:bg-stone-200 hover:text-stone-900"
                       >
                         复用配置
@@ -194,7 +227,7 @@ export function ImageResults({
                     {onDeletePrompt ? (
                       <button
                         type="button"
-                        onClick={() => onDeletePrompt(selectedConversation.id, turn.id)}
+                        onClick={() => onDeletePrompt(conversationId, turn.id)}
                         className="inline-flex size-6 items-center justify-center rounded-full text-stone-300 transition hover:bg-rose-50 hover:text-rose-500"
                         aria-label="删除提示词记录"
                       >
@@ -231,7 +264,7 @@ export function ImageResults({
                               variant="outline"
                               size="sm"
                               className="rounded-full border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
-                              onClick={() => onContinueEdit(selectedConversation.id, image)}
+                              onClick={() => onContinueEdit(conversationId, image)}
                             >
                               <Sparkles className="size-4" />
                               加入编辑
@@ -257,8 +290,7 @@ export function ImageResults({
                       if (image.status === "success" && imageSrc) {
                         const currentIndex = successfulTurnImages.findIndex((item) => item.id === image.id);
                         const sizeLabel = image.b64_json ? formatBase64ImageSize(image.b64_json) : "";
-                        const dimensions = imageDimensions[image.id];
-                        const imageMeta = [sizeLabel, dimensions].filter(Boolean).join(" · ");
+                        const imageMeta = [sizeLabel].filter(Boolean).join(" · ");
 
                         return (
                           <div
@@ -279,13 +311,6 @@ export function ImageResults({
                                 imgProps={{
                                   loading: "lazy",
                                   decoding: "async",
-                                  onLoad: (event) => {
-                                    updateImageDimensions(
-                                      image.id,
-                                      event.currentTarget.naturalWidth,
-                                      event.currentTarget.naturalHeight,
-                                    );
-                                  },
                                 }}
                               />
                             </button>
@@ -299,7 +324,7 @@ export function ImageResults({
                                   variant="outline"
                                   size="sm"
                                   className="h-7 w-7 rounded-full border-stone-200 bg-white px-0 text-[10px] text-stone-700 hover:bg-stone-50 sm:h-8 sm:w-fit sm:px-3 sm:text-xs"
-                                  onClick={() => onContinueEdit(selectedConversation.id, image)}
+                                  onClick={() => onContinueEdit(conversationId, image)}
                                   aria-label="加入编辑"
                                 >
                                   <Sparkles className="size-3 sm:size-4" />
@@ -341,7 +366,7 @@ export function ImageResults({
                               {onRetryImage ? (
                                 <button
                                   type="button"
-                                  onClick={() => void onRetryImage(selectedConversation.id, turn.id, image.id)}
+                                  onClick={() => void onRetryImage(conversationId, turn.id, image.id)}
                                   className="rounded-full bg-white px-2 py-1 text-[10px] font-medium text-rose-600 shadow-sm transition hover:bg-rose-100 sm:px-3 sm:text-xs"
                                 >
                                   重新生成这一张
@@ -391,7 +416,7 @@ export function ImageResults({
                       {onRegenerateTurn ? (
                         <button
                           type="button"
-                          onClick={() => void onRegenerateTurn(selectedConversation.id, turn.id)}
+                          onClick={() => void onRegenerateTurn(conversationId, turn.id)}
                           className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2.5 py-1 font-medium text-stone-500 transition hover:bg-stone-200 hover:text-stone-900"
                         >
                           <RotateCcw className="size-3" />
@@ -401,7 +426,7 @@ export function ImageResults({
                       {onDeleteResults ? (
                         <button
                           type="button"
-                          onClick={() => onDeleteResults(selectedConversation.id, turn.id)}
+                          onClick={() => onDeleteResults(conversationId, turn.id)}
                           className="inline-flex size-6 items-center justify-center rounded-full text-stone-300 transition hover:bg-rose-50 hover:text-rose-500"
                           aria-label="删除生成结果"
                         >
@@ -414,11 +439,8 @@ export function ImageResults({
               </div>
             ) : null}
           </div>
-        );
-      })}
-    </div>
   );
-}
+});
 
 function getTurnStatusLabel(status: ImageTurnStatus) {
   if (status === "queued") {
@@ -445,8 +467,4 @@ function formatBase64ImageSize(base64: string) {
     return `${(bytes / 1024).toFixed(1)} KB`;
   }
   return `${bytes} B`;
-}
-
-function formatImageDimensions(width: number, height: number) {
-  return `${width} × ${height}`;
 }

@@ -11,10 +11,11 @@ type ImageThumbnailProps = {
   alt?: string;
   className?: string;
   imageClassName?: string;
+  fallbackToOriginal?: boolean;
   imgProps?: ImgHTMLAttributes<HTMLImageElement>;
 };
 
-const MAX_IMAGE_RETRY_COUNT = 5;
+const MAX_IMAGE_RETRY_COUNT = 2;
 
 function appendImageRetryQuery(src: string, retry: number) {
   if (!src || src.startsWith("data:") || src.startsWith("blob:")) {
@@ -56,7 +57,7 @@ export function getImageThumbnailUrl(src: string) {
   return `${src.slice(0, index)}/image-thumbs/${thumbPath}${query}`;
 }
 
-export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageClassName, imgProps }: ImageThumbnailProps) {
+export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageClassName, fallbackToOriginal = false, imgProps }: ImageThumbnailProps) {
   const initialSrc = useMemo(() => thumbnailSrc || getImageThumbnailUrl(src), [src, thumbnailSrc]);
   const [currentSrc, setCurrentSrc] = useState(initialSrc);
   const retryCountRef = useRef(0);
@@ -98,21 +99,25 @@ export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageCl
         }}
         onError={(event) => {
           externalOnError?.(event);
-          if (stripImageRetryQuery(currentSrc) !== stripImageRetryQuery(src)) {
+          const cleanCurrent = stripImageRetryQuery(currentSrc);
+          const cleanInitial = stripImageRetryQuery(initialSrc);
+          const cleanOriginal = stripImageRetryQuery(src);
+          if (fallbackToOriginal && cleanCurrent === cleanInitial && cleanCurrent !== cleanOriginal) {
             retryCountRef.current = 0;
             setCurrentSrc(src);
             return;
           }
+          const retrySource = cleanCurrent === cleanOriginal ? src : initialSrc;
           if (retryCountRef.current < MAX_IMAGE_RETRY_COUNT) {
             retryCountRef.current += 1;
             const retry = retryCountRef.current;
-            const delay = Math.min(4000, 400 * 2 ** (retry - 1));
+            const delay = Math.min(2000, 500 * 2 ** (retry - 1));
             if (retryTimerRef.current != null) {
               window.clearTimeout(retryTimerRef.current);
             }
             retryTimerRef.current = window.setTimeout(() => {
               retryTimerRef.current = null;
-              setCurrentSrc(appendImageRetryQuery(src, retry));
+              setCurrentSrc(appendImageRetryQuery(retrySource, retry));
             }, delay);
           }
         }}

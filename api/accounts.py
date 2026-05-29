@@ -215,6 +215,12 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": "tokens or ids is required"})
         return {**result, "items": compact_items()}
 
+    @router.post("/api/accounts/remove-abnormal")
+    async def remove_abnormal_accounts(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        result = account_service.remove_marked_invalid_accounts(event="manual-remove-abnormal")
+        return {**result, "items": compact_items(), "summary": account_service.account_summary()}
+
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)

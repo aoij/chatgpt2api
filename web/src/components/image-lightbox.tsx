@@ -5,8 +5,8 @@ import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { ChevronLeft, ChevronRight, Download, RotateCcw, RotateCw, X } from "lucide-react";
 import { toast } from "sonner";
 
-import { downloadManagedImage } from "@/lib/api";
-import { defaultImageDownloadName, saveBlobAsFile } from "@/lib/download";
+import { buildManagedImageDownloadParams } from "@/lib/api";
+import { defaultImageDownloadName, openDirectDownload, openUrlDownload, saveBlobAsFile } from "@/lib/download";
 import { cn } from "@/lib/utils";
 
 type LightboxImage = {
@@ -104,8 +104,10 @@ export function ImageLightbox({
   const current = images[currentIndex];
   const [rotation, setRotation] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [naturalDimensions, setNaturalDimensions] = useState("");
   const hasPrev = currentIndex > 0;
   const hasNext = currentIndex < images.length - 1;
+  const displayDimensions = naturalDimensions || current?.dimensions || "";
 
   const cancelScheduledTransform = useCallback(() => {
     if (rafRef.current != null) {
@@ -157,7 +159,8 @@ export function ImageLightbox({
 
   useEffect(() => {
     resetTransform();
-  }, [current?.id, open, resetTransform]);
+    setNaturalDimensions(current?.dimensions || "");
+  }, [current?.id, current?.dimensions, open, resetTransform]);
 
   useEffect(() => {
     return () => {
@@ -194,9 +197,8 @@ export function ImageLightbox({
     setIsDownloading(true);
     try {
       if (current.downloadPath) {
-        const data = await downloadManagedImage(current.downloadPath);
-        saveBlobAsFile(data.blob, data.filename || current.filename || defaultImageDownloadName(current.id, "jpg"));
-        toast.success("已下载 JPG 图片");
+        await openDirectDownload("/api/images/download", buildManagedImageDownloadParams(current.downloadPath));
+        toast.success("已开始下载 JPG 图片");
         return;
       }
 
@@ -208,13 +210,7 @@ export function ImageLightbox({
         return;
       }
 
-      const link = document.createElement("a");
-      link.href = current.src;
-      link.download = current.filename || defaultImageDownloadName(current.id, "jpg");
-      link.rel = "noopener";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      openUrlDownload(current.src, current.filename || defaultImageDownloadName(current.id, "jpg"));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "下载图片失败");
     } finally {
@@ -386,9 +382,9 @@ export function ImageLightbox({
           </DialogPrimitive.Title>
 
           <div className="absolute top-[calc(env(safe-area-inset-top)+1rem)] right-4 z-10 flex items-center gap-2">
-            {current.sizeLabel || current.dimensions ? (
+            {current.sizeLabel || displayDimensions ? (
               <span className="rounded-full bg-black/50 px-3 py-1.5 text-xs font-medium text-white/90">
-                {[current.sizeLabel, current.dimensions].filter(Boolean).join(" · ")}
+                {[current.sizeLabel, displayDimensions].filter(Boolean).join(" · ")}
               </span>
             ) : null}
             {images.length > 1 && (
@@ -456,6 +452,12 @@ export function ImageLightbox({
               )}
               style={{
                 transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale}) rotate(${rotation}deg)`,
+              }}
+              onLoad={(event) => {
+                const { naturalWidth, naturalHeight } = event.currentTarget;
+                if (naturalWidth > 0 && naturalHeight > 0) {
+                  setNaturalDimensions(`${naturalWidth} × ${naturalHeight}`);
+                }
               }}
               onClick={(e) => e.stopPropagation()}
               onDoubleClick={(e) => {
