@@ -2191,8 +2191,8 @@ function ImagePageContent({
 
   return (
     <>
-      <section className={cn("mx-auto grid min-h-0 w-full max-w-[1380px] grid-cols-1 gap-2 px-0 pb-[calc(env(safe-area-inset-bottom)+0.35rem)] sm:h-[calc(100dvh-5rem)] sm:gap-3 sm:px-3 sm:pb-6 lg:grid-cols-[240px_minmax(0,1fr)]", isCompactUserView ? "h-[calc(100dvh-5rem)]" : "h-[calc(100dvh-6.75rem)]")}>
-        <div className="hidden h-full min-h-0 border-r border-stone-200/70 pr-3 lg:block">
+      <section className={cn("image-page-shell mx-auto grid min-h-0 w-full max-w-[1380px] grid-cols-1 gap-2 px-0 pb-[calc(env(safe-area-inset-bottom)+0.35rem)] sm:h-[calc(100dvh-5rem)] sm:gap-3 sm:px-3 sm:pb-6", isCompactUserView ? "h-[calc(100dvh-5rem)]" : "h-[calc(100dvh-6.75rem)]")}>
+        <div className="image-page-desktop-sidebar hidden h-full min-h-0 border-r border-stone-200/70 pr-3">
           <ImageSidebar
             conversations={conversationSummaries}
             isLoadingHistory={isLoadingHistory}
@@ -2270,7 +2270,7 @@ function ImagePageContent({
         </Dialog>
 
         <div className="flex min-h-0 flex-col gap-2 sm:gap-4">
-          <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-2 px-1 lg:hidden">
+          <div className="image-page-mobile-actions grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-2 px-1">
             <Button
               variant="outline"
               className="h-10 min-w-0 rounded-2xl border-stone-200 bg-white/90 px-3 text-stone-700 shadow-sm"

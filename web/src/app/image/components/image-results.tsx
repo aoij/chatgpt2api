@@ -118,7 +118,7 @@ export function ImageResults({
               fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
             }}
           >
-            {publicConfig?.image_page_title || "Turn ideas into images"}
+            {publicConfig?.image_page_title || "AI 图片创作"}
           </h1>
           <p
             className="mx-auto mt-3 max-w-[300px] text-sm italic tracking-[0.01em] text-stone-500 sm:mt-4 sm:max-w-none sm:text-[15px]"
@@ -126,7 +126,7 @@ export function ImageResults({
               fontFamily: '"Palatino Linotype","Book Antiqua","URW Palladio L","Times New Roman",serif',
             }}
           >
-            {publicConfig?.image_page_subtitle || "在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。"}
+            {publicConfig?.image_page_subtitle || "输入提示词即可生成图片，也可以上传参考图继续编辑。"}
           </p>
         </div>
       </div>

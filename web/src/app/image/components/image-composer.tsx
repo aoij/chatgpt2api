@@ -357,6 +357,7 @@ export function ImageComposer({
                 className="h-10 rounded-2xl border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 shadow-none"
                 onClick={onOpenPromptMarket}
                 aria-label="打开提示词市场"
+                title="提示词市场"
               >
                 <Store className="size-4" />
                 <span className="sr-only">市场</span>
@@ -672,10 +673,10 @@ export function ImageComposer({
                     setIsSizeMenuOpen(false);
                     setIsDesktopComposerCollapsed(true);
                   }}
-                  className="hidden h-11 shrink-0 items-center justify-center rounded-full border border-stone-200 bg-white px-4 text-sm font-medium text-stone-600 transition hover:border-stone-300 hover:text-stone-950 sm:inline-flex"
-                  aria-label="收起创作区"
+                  className="hidden h-10 shrink-0 items-center justify-center rounded-full border border-stone-200 bg-white px-3 text-xs font-medium text-stone-500 transition hover:border-stone-300 hover:text-stone-900 sm:inline-flex"
+                  aria-label="收起"
                 >
-                  收起创作区
+                  收起
                   <ChevronDown className="ml-1 size-4" />
                 </button>
 

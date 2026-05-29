@@ -386,14 +386,17 @@ class ConfigStore:
 
     @property
     def image_page_title(self) -> str:
-        return self._display_text(self.data.get("image_page_title"), "Turn ideas into images")
+        title = self._display_text(self.data.get("image_page_title"), "")
+        if not title or title == "Turn ideas into images":
+            return "AI 图片创作"
+        return title
 
     @property
     def image_page_subtitle(self) -> str:
-        return self._display_text(
-            self.data.get("image_page_subtitle"),
-            "在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。",
-        )
+        subtitle = self._display_text(self.data.get("image_page_subtitle"), "")
+        if not subtitle or subtitle == "在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。":
+            return "输入提示词即可生成图片，也可以上传参考图继续编辑。"
+        return subtitle
 
     @property
     def app_version(self) -> str:
