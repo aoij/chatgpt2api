@@ -2,7 +2,7 @@ import { httpBlobRequest, httpRequest } from "@/lib/request";
 
 export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
-export type ImageModel = "gpt-image-2" | "codex-gpt-image-2";
+export type ImageModel = "gpt-image-2" | "codex-gpt-image-2" | "plus-codex-gpt-image-2" | "team-codex-gpt-image-2" | "pro-codex-gpt-image-2";
 export type AuthRole = "admin" | "user";
 
 export type Account = {
@@ -15,6 +15,9 @@ export type Account = {
   image_quota_unknown?: boolean;
   email?: string | null;
   user_id?: string | null;
+  source_type?: string | null;
+  export_type?: string | null;
+  account_id?: string | null;
   limits_progress?: Array<{
     feature_name?: string;
     remaining?: number;
@@ -56,6 +59,15 @@ type AccountMutationResponse = {
   removed?: number;
   refreshed?: number;
   errors?: Array<{ access_token: string; error: string }>;
+};
+
+export type AccountImportPayload = {
+  access_token: string;
+  accessToken?: string;
+  type?: string;
+  export_type?: string;
+  source_type?: string;
+  [key: string]: unknown;
 };
 
 type AccountRefreshResponse = {
@@ -453,10 +465,31 @@ export async function fetchAccountTokens(ids: string[] = []) {
   return httpRequest<AccountTokenListResponse>(`/api/accounts/tokens${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
-export async function createAccounts(tokens: string[]) {
+export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "POST",
-    body: { tokens },
+    body: { tokens, accounts },
+  });
+}
+
+export type OAuthLoginStartResponse = {
+  session_id: string;
+  authorize_url: string;
+  expires_in: string;
+  redirect_uri_prefix: string;
+};
+
+export async function startOAuthLogin(emailHint?: string) {
+  return httpRequest<OAuthLoginStartResponse>("/api/accounts/oauth/start", {
+    method: "POST",
+    body: { email_hint: emailHint ?? "" },
+  });
+}
+
+export async function finishOAuthLogin(sessionId: string, callback: string) {
+  return httpRequest<AccountMutationResponse>("/api/accounts/oauth/finish", {
+    method: "POST",
+    body: { session_id: sessionId, callback },
   });
 }
 

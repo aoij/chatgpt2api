@@ -25,6 +25,7 @@ class ImageGenerationTaskRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     model: str = "gpt-image-2"
     size: str | None = None
+    quality: str = "auto"
 
 
 class ImageConversationSaveRequest(BaseModel):
@@ -375,6 +376,7 @@ def create_router() -> APIRouter:
                 prompt=body.prompt,
                 model=body.model,
                 size=body.size,
+                quality=body.quality,
                 base_url=resolve_image_base_url(request),
             )
         except ImageQuotaExceeded as exc:
@@ -404,6 +406,7 @@ def create_router() -> APIRouter:
                 prompt=prompt,
                 model=model,
                 size=payload["size"],
+                quality=payload["quality"],
                 base_url=resolve_image_base_url(request),
                 images=images,
             )

@@ -443,13 +443,15 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
-        base_url: str,
+        quality: str = "auto",
+        base_url: str = "",
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
             "model": model,
             "n": 1,
             "size": size,
+            "quality": quality,
             "response_format": "url",
             "defer_local_save": True,
             "base_url": base_url,
@@ -466,7 +468,8 @@ class ImageTaskService:
         prompt: str,
         model: str,
         size: str | None,
-        base_url: str,
+        quality: str = "auto",
+        base_url: str = "",
         images: list[tuple[bytes, str, str]],
     ) -> dict[str, Any]:
         payload = {
@@ -475,6 +478,7 @@ class ImageTaskService:
             "model": model,
             "n": 1,
             "size": size,
+            "quality": quality,
             "response_format": "url",
             "defer_local_save": True,
             "base_url": base_url,
@@ -625,6 +629,7 @@ class ImageTaskService:
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
+                "quality": _clean(payload.get("quality"), "auto"),
                 "reserved_quota": reserved_quota,
                 "duration_ms": 0,
                 "created_at": now,
@@ -1115,6 +1120,7 @@ class ImageTaskService:
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
+                "quality": _clean(payload.get("quality"), "auto"),
                 "slot_wait_ms": slot_wait_ms,
                 "upstream_concurrency": self._upstream_concurrency,
             })

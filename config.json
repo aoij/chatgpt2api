@@ -48,5 +48,18 @@
   "image_account_concurrency": 3,
   "image_task_worker_count": 10,
   "image_upstream_concurrency": 3,
-  "image_per_account_concurrency": 1
+  "image_per_account_concurrency": 1,
+  "image_poll_timeout_secs": 120,
+  "image_poll_interval_secs": 10,
+  "image_poll_initial_wait_secs": 10,
+  "image_storage": {
+    "enabled": false,
+    "mode": "local",
+    "webdav_url": "",
+    "webdav_username": "",
+    "webdav_password": "",
+    "webdav_root_path": "chatgpt2api/images",
+    "public_base_url": ""
+  },
+  "image_min_free_mb": 500
 }

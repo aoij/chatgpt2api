@@ -91,8 +91,50 @@ class AccountService:
             return {}
         return data if isinstance(data, dict) else {}
 
+    @staticmethod
+    def _decode_jwt_payload(token: str) -> dict[str, Any]:
+        parts = str(token or "").strip().split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1]
+        payload += "=" * (-len(payload) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(payload.encode("utf-8"))
+            data = json.loads(decoded.decode("utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _normalize_source_type(value: object) -> str:
+        return str(value or "web").strip().lower() or "web"
+
+    @classmethod
+    def _account_matches_source_type(cls, account: dict, source_type: str | None = None) -> bool:
+        if not source_type:
+            return True
+        return cls._normalize_source_type(account.get("source_type")) == cls._normalize_source_type(source_type)
+
     def _normalize_account_type(self, value: Any) -> str | None:
         return self.ACCOUNT_TYPE_MAP.get(self._clean_token(value).lower())
+
+    def _account_matches_any_plan_type(self, account: dict, plan_types: set[str] | tuple[str, ...] | None = None) -> bool:
+        if not plan_types:
+            return True
+        normalized_account = self._normalize_account_type(account.get("type"))
+        normalized_plans = {
+            normalized
+            for plan_type in plan_types
+            if (normalized := self._normalize_account_type(plan_type))
+        }
+        return bool(normalized_account and normalized_account in normalized_plans)
+
+    def _account_matches_plan_type(self, account: dict, plan_type: str | None = None) -> bool:
+        if not plan_type:
+            return True
+        normalized_account = self._normalize_account_type(account.get("type"))
+        normalized_plan = self._normalize_account_type(plan_type)
+        return bool(normalized_account and normalized_plan and normalized_account == normalized_plan)
 
     def _search_account_type(self, value: Any) -> str | None:
         if isinstance(value, dict):
@@ -134,11 +176,19 @@ class AccountService:
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
-        access_token = self._clean_token(item.get("access_token"))
+        access_token = self._clean_token(item.get("access_token") or item.get("accessToken"))
         if not access_token:
             return None
         normalized = dict(item)
+        normalized.pop("accessToken", None)
         normalized["access_token"] = access_token
+        if self._clean_token(normalized.get("type")).lower() == "codex":
+            normalized["export_type"] = "codex"
+            normalized.pop("type", None)
+        source_type = normalized.get("source_type")
+        if not source_type and self._clean_token(normalized.get("export_type")).lower() == "codex":
+            source_type = "codex"
+        normalized["source_type"] = self._normalize_source_type(source_type)
         normalized["type"] = self._clean_token(normalized.get("type")) or "Free"
         normalized["status"] = self._clean_token(normalized.get("status")) or "正常"
         normalized["quota"] = int(normalized.get("quota") if normalized.get("quota") is not None else 0)
@@ -147,6 +197,8 @@ class AccountService:
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
         normalized["email"] = self._clean_token(normalized.get("email")) or None
         normalized["user_id"] = self._clean_token(normalized.get("user_id")) or None
+        normalized["account_id"] = self._clean_token(normalized.get("account_id")) or None
+        normalized["export_type"] = self._clean_token(normalized.get("export_type")) or None
         limits_progress = normalized.get("limits_progress")
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = self._clean_token(normalized.get("default_model_slug")) or None
@@ -257,6 +309,9 @@ class AccountService:
                 "imageQuotaUnknown": bool(account.get("image_quota_unknown")),
                 "email": account.get("email"),
                 "user_id": account.get("user_id"),
+                "source_type": account.get("source_type") or "web",
+                "export_type": account.get("export_type"),
+                "account_id": account.get("account_id"),
                 "limits_progress": account.get("limits_progress") or [],
                 "default_model_slug": account.get("default_model_slug"),
                 "restoreAt": account.get("restore_at"),
@@ -284,6 +339,9 @@ class AccountService:
                 "imageQuotaUnknown": bool(account.get("image_quota_unknown")),
                 "email": account.get("email"),
                 "user_id": account.get("user_id"),
+                "source_type": account.get("source_type") or "web",
+                "export_type": account.get("export_type"),
+                "account_id": account.get("account_id"),
                 "default_model_slug": account.get("default_model_slug"),
                 "restoreAt": account.get("restore_at"),
                 "success": int(account.get("success") or 0),
@@ -374,12 +432,23 @@ class AccountService:
             group = 3
         return (group, last_used_at, -success_count, -checked_at, token)
 
-    def _list_ready_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+    def _list_ready_candidate_tokens(
+        self,
+        excluded_tokens: set[str] | None = None,
+        plan_type: str | None = None,
+        source_type: str | None = None,
+        plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> list[str]:
         excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
         now = time.time()
         candidates: list[tuple[tuple[int, float, int, float, str], str]] = []
         for item in self._accounts:
-            if not self._is_image_account_available(item):
+            if (
+                not self._is_image_account_available(item)
+                or not self._account_matches_plan_type(item, plan_type)
+                or not self._account_matches_any_plan_type(item, plan_types)
+                or not self._account_matches_source_type(item, source_type)
+            ):
                 continue
             token = self._clean_token(item.get("access_token"))
             if (
@@ -393,22 +462,37 @@ class AccountService:
         candidates.sort(key=lambda row: row[0])
         return [token for _, token in candidates]
 
-    def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+    def _list_available_candidate_tokens(
+        self,
+        excluded_tokens: set[str] | None = None,
+        plan_type: str | None = None,
+        source_type: str | None = None,
+        plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> list[str]:
         max_concurrency = max(1, int(getattr(config, "image_per_account_concurrency", 1) or 1))
         return [
             token
-            for token in self._list_ready_candidate_tokens(excluded_tokens)
+            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
-    def _pick_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def _pick_next_candidate_token(
+        self,
+        excluded_tokens: set[str] | None = None,
+        plan_type: str | None = None,
+        source_type: str | None = None,
+        plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> str:
         excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
         wait_started = time.time()
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded):
-                    raise RuntimeError("no available image quota")
-                tokens = self._list_available_candidate_tokens(excluded)
+                if not self._list_ready_candidate_tokens(excluded, plan_type, source_type, plan_types):
+                    raise RuntimeError(
+                        f"no available {plan_type or source_type or ''} image quota".replace("  ", " ").strip()
+                        if plan_type or source_type else "no available image quota"
+                    )
+                tokens = self._list_available_candidate_tokens(excluded, plan_type, source_type, plan_types)
                 if tokens:
                     access_token = tokens[0]
                     self._index += 1
@@ -520,14 +604,29 @@ class AccountService:
             },
         )
 
-    def get_available_access_token(self) -> str:
+    def get_available_access_token(
+        self,
+        plan_type: str | None = None,
+        source_type: str | None = None,
+        plan_types: set[str] | tuple[str, ...] | None = None,
+    ) -> str:
         attempted_tokens: set[str] = set()
         while True:
-            access_token = self._pick_next_candidate_token(excluded_tokens=attempted_tokens)
+            access_token = self._pick_next_candidate_token(
+                excluded_tokens=attempted_tokens,
+                plan_type=plan_type,
+                source_type=source_type,
+                plan_types=plan_types,
+            )
             attempted_tokens.add(access_token)
             token_ref = anonymize_token(access_token)
             account = self.refresh_account_state(access_token)
-            if self._is_image_account_available(account or {}):
+            if (
+                self._is_image_account_available(account or {})
+                and self._account_matches_plan_type(account or {}, plan_type)
+                and self._account_matches_any_plan_type(account or {}, plan_types)
+                and self._account_matches_source_type(account or {}, source_type)
+            ):
                 return access_token
             self.release_image_slot(access_token)
             self.cooldown_image_token(access_token, "remote account refresh failed", seconds=60)
@@ -677,7 +776,65 @@ class AccountService:
             log_service.add(LOG_TYPE_ACCOUNT, "自动移除历史异常账号", {"source": event, "removed": removed})
         return result
 
-    def add_accounts(self, tokens: list[str]) -> dict:
+    def _account_payload_token(self, item: dict[str, Any]) -> str:
+        return self._clean_token(item.get("access_token") or item.get("accessToken"))
+
+    def _prepare_account_payload(self, item: dict[str, Any]) -> dict | None:
+        if not isinstance(item, dict):
+            return None
+        access_token = self._account_payload_token(item)
+        if not access_token:
+            return None
+        payload = dict(item)
+        payload.pop("accessToken", None)
+        payload["access_token"] = access_token
+        if self._clean_token(payload.get("type")).lower() == "codex":
+            payload["export_type"] = "codex"
+            payload["source_type"] = "codex"
+            payload.pop("type", None)
+        if self._clean_token(payload.get("export_type")).lower() == "codex":
+            payload["source_type"] = "codex"
+        if payload.get("plan_type") and not payload.get("type"):
+            payload["type"] = self._clean_token(payload.get("plan_type"))
+        payload["source_type"] = self._normalize_source_type(payload.get("source_type"))
+        return payload
+
+    def add_account_items(self, items: list[dict]) -> dict:
+        payloads = [
+            payload
+            for item in items
+            if (payload := self._prepare_account_payload(item)) is not None
+        ]
+        if not payloads:
+            return {"added": 0, "skipped": 0, "items": self.list_accounts(compact=True)}
+        with self._lock:
+            indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
+            added = 0
+            skipped = 0
+            invalid_cache_changed = False
+            for payload in payloads:
+                access_token = self._account_payload_token(payload)
+                if access_token in self._invalid_tokens:
+                    self._invalid_tokens.discard(access_token)
+                    invalid_cache_changed = True
+                current = indexed.get(access_token)
+                if current is None:
+                    added += 1
+                    current = {}
+                else:
+                    skipped += 1
+                account = self._normalize_account({**current, **payload, "access_token": access_token})
+                if account is not None:
+                    indexed[access_token] = account
+            self._accounts = list(indexed.values())
+            if invalid_cache_changed:
+                self._save_invalid_tokens_locked()
+            self._save_accounts()
+            items_out = self._public_items_compact(self._accounts)
+            log_service.add(LOG_TYPE_ACCOUNT, f"导入 {added} 个账号，跳过 {skipped} 个", {"added": added, "skipped": skipped})
+        return {"added": added, "skipped": skipped, "items": items_out}
+
+    def add_accounts(self, tokens: list[str], source_type: str = "web") -> dict:
         cleaned_tokens = self._clean_tokens(tokens)
         if not cleaned_tokens:
             return {"added": 0, "skipped": 0, "items": self.list_accounts(compact=True)}
@@ -701,6 +858,7 @@ class AccountService:
                     {
                         **current,
                         "access_token": access_token,
+                        "source_type": current.get("source_type") or self._normalize_source_type(source_type),
                         "type": str(current.get("type") or "Free"),
                     }
                 )

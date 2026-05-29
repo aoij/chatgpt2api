@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from fastapi.staticfiles import StaticFiles
 
 from api import accounts, ai, image_tasks, register, system
+from api.errors import install_exception_handlers
 from api.support import resolve_web_asset, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
@@ -36,14 +37,17 @@ def create_app() -> FastAPI:
     async def lifespan(_: FastAPI):
         stop_event = Event()
         account_watcher_thread = start_limited_account_watcher(stop_event)
+        backup_service.start()
         cleanup_expired_images()
         try:
             yield
         finally:
             stop_event.set()
             account_watcher_thread.join(timeout=1)
+            backup_service.stop()
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
+    install_exception_handlers(app)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
     app.add_middleware(
         CORSMiddleware,

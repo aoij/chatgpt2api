@@ -13,8 +13,17 @@ import tiktoken
 
 from services.account_service import account_service
 from services.config import config
+from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
-from utils.helper import IMAGE_MODELS, extract_image_from_message_content
+from utils.helper import (
+    IMAGE_MODELS,
+    CODEX_IMAGE_MODEL,
+    extract_image_from_message_content,
+    is_codex_image_model,
+    is_supported_image_model,
+    split_image_model,
+)
+from utils.image_tokens import count_image_content_tokens
 from utils.log import logger
 
 
@@ -26,12 +35,14 @@ class ImageGenerationError(Exception):
         error_type: str = "server_error",
         code: str | None = "upstream_error",
         param: str | None = None,
+        account_email: str = "",
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
         self.code = code
         self.param = param
+        self.account_email = account_email
 
     def to_openai_error(self) -> dict[str, Any]:
         return {
@@ -180,19 +191,22 @@ def assistant_history_messages(messages: list[dict[str, Any]]) -> list[str]:
     return [str(item.get("content") or "") for item in messages if item.get("role") == "assistant" and item.get("content")]
 
 
-def build_image_prompt(prompt: str, size: str | None) -> str:
-    if not size:
-        return prompt
-    if size not in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
-        return f"{prompt.strip()}\n\n输出图片，宽高比为 {size}。"
-    hint = {
-        "1:1": "输出为 1:1 正方形构图，主体居中，适合正方形画幅。",
-        "16:9": "输出为 16:9 横屏构图，适合宽画幅展示。",
-        "9:16": "输出为 9:16 竖屏构图，适合竖版画幅展示。",
-        "4:3": "输出为 4:3 比例，兼顾宽度与高度，适合展示画面细节。",
-        "3:4": "输出为 3:4 比例，纵向构图，适合人物肖像或竖向场景。",
-    }[size]
-    return f"{prompt.strip()}\n\n{hint}"
+def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> str:
+    hints: list[str] = []
+    if size:
+        if size in {"1:1", "16:9", "9:16", "4:3", "3:4"}:
+            hints.append({
+                "1:1": "输出为 1:1 正方形构图，主体居中，适合正方形画幅。",
+                "16:9": "输出为 16:9 横屏构图，适合宽画幅展示。",
+                "9:16": "输出为 9:16 竖屏构图，适合竖版画幅展示。",
+                "4:3": "输出为 4:3 比例，兼顾宽度与高度，适合展示画面细节。",
+                "3:4": "输出为 3:4 比例，纵向构图，适合人物肖像或竖向场景。",
+            }[size])
+        else:
+            hints.append(f"输出图片尺寸为 {size}。")
+    if quality:
+        hints.append(f"输出图片质量为 {quality}。")
+    return f"{prompt.strip()}\n\n{''.join(hints)}" if hints else prompt
 
 
 def encoding_for_model(model: str):
@@ -273,6 +287,7 @@ class ConversationRequest:
     images: list[str] | None = None
     n: int = 1
     size: str | None = None
+    quality: str = "auto"
     response_format: str = "b64_json"
     base_url: str | None = None
     uploader: dict[str, Any] | None = None
@@ -302,6 +317,7 @@ class ImageOutput:
     upstream_event_type: str = ""
     data: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, int] = field(default_factory=dict)
+    account_email: str = ""
 
     def to_chunk(self) -> dict[str, Any]:
         chunk: dict[str, Any] = {
@@ -314,6 +330,8 @@ class ImageOutput:
             "upstream_event_type": self.upstream_event_type,
             "data": [],
         }
+        if self.account_email:
+            chunk["_account_email"] = self.account_email
         if self.kind == "message":
             chunk.update({
                 "object": "image.generation.message",
@@ -541,12 +559,13 @@ def conversation_events(
     prompt: str = "",
     images: list[str] | None = None,
     size: str | None = None,
+    quality: str = "auto",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
-    image_model = str(model or "").strip() in IMAGE_MODELS
+    image_model = is_supported_image_model(model)
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
-    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size)) if image_model else prompt
+    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality)) if image_model else prompt
     payloads = backend.stream_conversation(
         messages=normalized,
         model=model,
@@ -609,6 +628,7 @@ def stream_image_outputs(
             model=request.model,
             images=request.images or [],
             size=request.size,
+            quality=request.quality,
     ):
         last = event
         if event.get("type") == "conversation.delta":
@@ -728,16 +748,150 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
 
 
+
+def _codex_response_images(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        if value.get("type") == "image_generation_call" and isinstance(value.get("result"), str):
+            result = value["result"].strip()
+            if result:
+                return [result.split(",", 1)[1] if result.startswith("data:image/") else result]
+        images: list[str] = []
+        for item in value.values():
+            images.extend(_codex_response_images(item))
+        return images
+    if isinstance(value, list):
+        images: list[str] = []
+        for item in value:
+            images.extend(_codex_response_images(item))
+        return images
+    return []
+
+
+def _codex_response_error(value: Any) -> tuple[str, str]:
+    if not isinstance(value, dict):
+        return "", ""
+    error = value.get("error")
+    if not isinstance(error, dict):
+        response = value.get("response")
+        error = response.get("error") if isinstance(response, dict) and response.get("status") == "failed" else None
+    if not isinstance(error, dict):
+        return "", ""
+    message = str(error.get("message") or "").strip()
+    code = str(error.get("code") or error.get("type") or "server_error").strip()
+    return message or "Codex responses failed upstream.", code
+
+
+def stream_codex_image_outputs(
+        backend: OpenAIBackendAPI,
+        request: ConversationRequest,
+        index: int = 1,
+        total: int = 1,
+) -> Iterator[ImageOutput]:
+    text_parts: list[str] = []
+    event_count = 0
+    event_types: dict[str, int] = {}
+    for event in backend.iter_codex_image_response_events(
+            prompt=request.prompt,
+            images=request.images or [],
+            size=request.size,
+            quality=request.quality,
+    ):
+        event_type = str(event.get("type") or "")
+        event_count += 1
+        event_types[event_type or "<missing>"] = event_types.get(event_type or "<missing>", 0) + 1
+        upstream_error, upstream_code = _codex_response_error(event)
+        if upstream_error:
+            logger.warning({
+                "event": "codex_response_upstream_error",
+                "model": request.model,
+                "size": request.size,
+                "quality": request.quality,
+                "event_count": event_count,
+                "event_types": event_types,
+                "upstream_code": upstream_code,
+                "upstream_error": upstream_error,
+            })
+            raise ImageGenerationError(
+                upstream_error,
+                status_code=502,
+                error_type="server_error",
+                code=upstream_code or "server_error",
+            )
+        if event_type == "response.output_text.delta":
+            delta = str(event.get("delta") or "")
+            if delta:
+                text_parts.append(delta)
+                yield ImageOutput(
+                    kind="progress",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    text=delta,
+                    upstream_event_type=event_type,
+                )
+            continue
+        images = _codex_response_images(event)
+        if images:
+            logger.info({
+                "event": "codex_response_image_result_found",
+                "model": request.model,
+                "size": request.size,
+                "quality": request.quality,
+                "event_count": event_count,
+                "event_types": event_types,
+                "image_count": len(images),
+                "image_result_lengths": [len(item) for item in images[:10]],
+            })
+            data = format_image_result(
+                [{"b64_json": item, "revised_prompt": request.prompt} for item in images],
+                request.prompt,
+                request.response_format,
+                request.base_url,
+                int(time.time()),
+            )["data"]
+            if data:
+                yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
+                return
+        if event_type:
+            yield ImageOutput(
+                kind="progress",
+                model=request.model,
+                index=index,
+                total=total,
+                upstream_event_type=event_type,
+            )
+    message = "".join(text_parts).strip()
+    if message:
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
+        return
+    logger.warning({
+        "event": "codex_response_no_image_result",
+        "model": request.model,
+        "size": request.size,
+        "quality": request.quality,
+        "image_input_count": len(request.images or []),
+        "event_count": event_count,
+        "event_types": event_types,
+        "output_text_len": len("".join(text_parts)),
+    })
+    raise ImageGenerationError("No image result found in response")
+
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
-    if str(request.model or "").strip() not in IMAGE_MODELS:
-        raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(IMAGE_MODELS))
+    if not is_supported_image_model(request.model):
+        raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(IMAGE_MODELS)))
 
     emitted = False
     last_error = ""
     for index in range(1, request.n + 1):
         while True:
             try:
-                token = account_service.get_available_access_token()
+                plan_type, _ = split_image_model(request.model)
+                codex_model = is_codex_image_model(request.model)
+                token = account_service.get_available_access_token(
+                    plan_type=plan_type,
+                    source_type="codex" if codex_model else None,
+                    plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                )
             except RuntimeError as exc:
                 if emitted:
                     return
@@ -746,15 +900,21 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             emitted_for_token = False
             returned_message = False
             returned_result = False
+            account = account_service.get_account(token) or {}
+            account_email = str(account.get("email") or "").strip()
             try:
                 backend = OpenAIBackendAPI(access_token=token)
-                for output in stream_image_outputs(backend, request, index, request.n):
+                stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
+                for output in stream_fn(backend, request, index, request.n):
+                    if account_email and not output.account_email:
+                        output.account_email = account_email
                     if output.kind == "message" and request.message_as_error:
                         raise ImageGenerationError(
                             output.text or "Image generation was rejected by upstream policy.",
                             status_code=400,
                             error_type="invalid_request_error",
                             code="content_policy_violation",
+                            account_email=account_email,
                         )
                     emitted = True
                     emitted_for_token = True
@@ -766,23 +926,31 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     return
                 account_service.mark_image_result(token, True)
                 break
-            except ImagePollTimeoutError:
+            except ImagePollTimeoutError as exc:
                 account_service.mark_image_result(token, False)
                 account_service.cooldown_image_token(token, "image poll timeout")
+                if account_email and not getattr(exc, "account_email", ""):
+                    exc.account_email = account_email
                 raise
-            except ImageGenerationError:
+            except ImageGenerationError as exc:
                 account_service.mark_image_result(token, False)
                 account_service.cooldown_image_token(token, str(last_error or "image generation error"), seconds=0)
+                if account_email and not getattr(exc, "account_email", ""):
+                    exc.account_email = account_email
                 raise
             except Exception as exc:
                 account_service.mark_image_result(token, False)
                 last_error = str(exc)
                 account_service.cooldown_image_token(token, last_error)
-                logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
+                logger.warning({"event": "image_stream_fail", "request_token": token, "account_email": account_email, "error": last_error})
                 if not emitted_for_token and is_token_invalid_error(last_error):
+                    refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
+                    if refreshed_token and refreshed_token != token:
+                        token = refreshed_token
+                        continue
                     account_service.mark_invalid_image_token(token, "image_stream")
                     continue
-                raise ImageGenerationError(image_stream_error_message(last_error)) from exc
+                raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email) from exc
 
     if not emitted:
         if not last_error:
@@ -801,8 +969,11 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     message = ""
     progress_parts: list[str] = []
     metrics: dict[str, int] = {}
+    account_email = ""
     for output in outputs:
         created = created or output.created
+        if output.account_email and not account_email:
+            account_email = output.account_email
         if output.kind == "progress" and output.text:
             progress_parts.append(output.text)
         elif output.kind == "message":
@@ -823,4 +994,6 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
             result["message"] = text
     if metrics:
         result["metrics"] = metrics
+    if account_email:
+        result["_account_email"] = account_email
     return result

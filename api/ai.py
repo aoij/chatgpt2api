@@ -45,6 +45,7 @@ class ImageGenerationRequest(BaseModel):
     model: str = "gpt-image-2"
     n: int = Field(default=1, ge=1, le=4)
     size: str | None = None
+    quality: str = "auto"
     response_format: str = "b64_json"
     history_disabled: bool = True
     stream: bool | None = None
@@ -121,7 +122,8 @@ def create_router() -> APIRouter:
             reserved_quota = auth_service.reserve_image_quota(identity, body.n)
         except ImageQuotaExceeded as exc:
             raise_image_quota_error(exc)
-        call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图")
+        call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
+        await filter_or_log(call, body.prompt)
         try:
             result = await call.run(openai_v1_image_generations.handle, payload)
             if isinstance(result, dict):

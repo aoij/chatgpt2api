@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
+from typing import Any
 from pydantic import BaseModel, Field
 
 from services.auth_service import auth_service
@@ -16,6 +17,7 @@ from api.support import (
 )
 from services.account_service import account_service
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
+from services.oauth_login_service import OAuthLoginError, oauth_login_service
 from services.sub2api_service import (
     list_remote_accounts as sub2api_list_remote_accounts,
     list_remote_groups as sub2api_list_remote_groups,
@@ -39,6 +41,16 @@ class UserKeyUpdateRequest(BaseModel):
 
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
+    accounts: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class OAuthLoginStartRequest(BaseModel):
+    email_hint: str = ""
+
+
+class OAuthLoginFinishRequest(BaseModel):
+    session_id: str = ""
+    callback: str = ""
 
 
 class AccountDeleteRequest(BaseModel):
@@ -95,6 +107,13 @@ class Sub2APIServerUpdateRequest(BaseModel):
 
 class Sub2APIImportRequest(BaseModel):
     account_ids: list[str] = Field(default_factory=list)
+
+def _account_payload_token(item: dict[str, Any]) -> str:
+    return str(item.get("access_token") or item.get("accessToken") or "").strip()
+
+
+def _unique_tokens(tokens: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(token or "").strip() for token in tokens if str(token or "").strip()))
 
 
 def create_router() -> APIRouter:
@@ -190,13 +209,60 @@ def create_router() -> APIRouter:
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
+        account_payloads = [item for item in body.accounts if isinstance(item, dict)]
+        payload_tokens = [_account_payload_token(item) for item in account_payloads]
+        tokens = _unique_tokens([*body.tokens, *payload_tokens])
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        result = account_service.add_accounts(tokens)
+        if account_payloads:
+            result = account_service.add_account_items(account_payloads)
+            payload_token_set = set(_unique_tokens(payload_tokens))
+            extra_tokens = [token for token in tokens if token not in payload_token_set]
+            if extra_tokens:
+                extra_result = account_service.add_accounts(extra_tokens)
+                result["added"] = int(result.get("added") or 0) + int(extra_result.get("added") or 0)
+                result["skipped"] = int(result.get("skipped") or 0) + int(extra_result.get("skipped") or 0)
+        else:
+            result = account_service.add_accounts(tokens)
         refresh_result = account_service.refresh_accounts(tokens)
         return {
             **result,
+            "refreshed": refresh_result.get("refreshed", 0),
+            "errors": refresh_result.get("errors", []),
+            "items": compact_items(),
+        }
+
+    @router.post("/api/accounts/oauth/start")
+    async def start_oauth_login(
+            body: OAuthLoginStartRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            return await run_in_threadpool(oauth_login_service.start, body.email_hint)
+        except OAuthLoginError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.post("/api/accounts/oauth/finish")
+    async def finish_oauth_login(
+            body: OAuthLoginFinishRequest,
+            authorization: str | None = Header(default=None),
+    ):
+        require_admin(authorization)
+        try:
+            tokens = await run_in_threadpool(oauth_login_service.finish, body.session_id, body.callback)
+        except OAuthLoginError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        payload = {
+            "access_token": tokens["access_token"],
+            "refresh_token": tokens["refresh_token"],
+            "id_token": tokens["id_token"],
+            "source_type": "oauth_login",
+        }
+        add_result = await run_in_threadpool(account_service.add_account_items, [payload])
+        refresh_result = await run_in_threadpool(account_service.refresh_accounts, [tokens["access_token"]])
+        return {
+            **add_result,
             "refreshed": refresh_result.get("refreshed", 0),
             "errors": refresh_result.get("errors", []),
             "items": compact_items(),
