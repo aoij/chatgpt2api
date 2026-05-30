@@ -648,7 +648,7 @@ function ImageManagerContent({ session }: { session: StoredAuthSession }) {
             <Button variant="outline" className="rounded-xl" onClick={() => setDeleteMode(null)} disabled={isDeleting}>
               取消
             </Button>
-            <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmDelete()} disabled={isDeleting || selectedCount === 0}>
+            <Button className="danger-confirm-button rounded-xl" onClick={() => void confirmDelete()} disabled={isDeleting || selectedCount === 0}>
               {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : null}
               确认删除
             </Button>

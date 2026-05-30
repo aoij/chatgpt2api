@@ -566,7 +566,7 @@ export function UserKeysCard({ standalone = false }: { standalone?: boolean } = 
             </Button>
             <Button
               type="button"
-              className="h-10 rounded-xl bg-rose-600 px-5 text-white hover:bg-rose-700"
+              className="danger-confirm-button h-10 rounded-xl px-5"
               onClick={() => void handleDelete()}
               disabled={deletingItem ? pendingIds.has(deletingItem.id) : false}
             >
