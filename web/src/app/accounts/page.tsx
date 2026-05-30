@@ -655,7 +655,7 @@ function AccountsPageContent() {
               </div>
             </div>
 
-            <div className="divide-y divide-stone-100 md:hidden">
+            <div className="accounts-mobile-list divide-y divide-stone-100">
               {currentRows.map((account) => {
                 const status = statusMeta[account.status];
                 const StatusIcon = status.icon;
@@ -762,7 +762,7 @@ function AccountsPageContent() {
               ) : null}
             </div>
 
-            <div className="hidden overflow-x-auto md:block">
+            <div className="accounts-desktop-table overflow-x-auto">
               <table className="w-full min-w-[920px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>

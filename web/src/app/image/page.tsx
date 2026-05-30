@@ -2386,7 +2386,7 @@ function ImagePageContent({
               <Button variant="outline" onClick={() => setDeleteConfirm(null)}>
                 取消
               </Button>
-              <Button className="bg-rose-600 text-white hover:bg-rose-700" onClick={() => void handleConfirmDelete()}>
+              <Button className="danger-confirm-button" onClick={() => void handleConfirmDelete()}>
                 确认删除
               </Button>
             </DialogFooter>
