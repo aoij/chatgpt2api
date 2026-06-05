@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -14,6 +15,7 @@ from services.register import openai_register
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
+REGISTER_LAST_GOOD_FILE = DATA_DIR / "register.json.bak-last-good"
 
 
 def _now() -> str:
@@ -56,6 +58,32 @@ def _normalize(raw: dict) -> dict:
     return cfg
 
 
+def _read_json_object(path: Path) -> dict:
+    if not path.exists() or path.stat().st_size <= 0:
+        raise ValueError(f"{path.name} is empty")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path.name} must be a JSON object")
+    return raw
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
 class RegisterService:
     def __init__(self, store_file: Path):
         self._store_file = store_file
@@ -68,17 +96,47 @@ class RegisterService:
             self.start()
 
     def _load(self) -> dict:
+        raw: dict = {}
         try:
-            raw = json.loads(self._store_file.read_text(encoding="utf-8"))
+            raw = _read_json_object(self._store_file)
         except Exception:
-            raw = {}
+            candidates = [REGISTER_LAST_GOOD_FILE]
+            try:
+                candidates.extend(
+                    sorted(
+                        self._store_file.parent.glob(f"{self._store_file.name}.bak*"),
+                        key=lambda item: item.stat().st_mtime,
+                        reverse=True,
+                    ),
+                )
+            except Exception:
+                candidates = [REGISTER_LAST_GOOD_FILE]
+
+            seen: set[Path] = set()
+            for candidate in candidates:
+                try:
+                    resolved = candidate.resolve()
+                except Exception:
+                    resolved = candidate
+                if resolved in seen or candidate == self._store_file:
+                    continue
+                seen.add(resolved)
+                try:
+                    raw = _read_json_object(candidate)
+                    break
+                except Exception:
+                    continue
         self._logs = _normalize_logs(raw.get("logs") if isinstance(raw, dict) else None)
         return _normalize(raw if isinstance(raw, dict) else {})
 
     def _save(self) -> None:
-        self._store_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {**self._config, "logs": self._logs[-300:]}
-        self._store_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        _atomic_write_text(self._store_file, content)
+        try:
+            _atomic_write_text(REGISTER_LAST_GOOD_FILE, content)
+        except Exception:
+            pass
 
     def get(self) -> dict:
         with self._lock:
