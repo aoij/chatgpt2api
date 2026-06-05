@@ -46,6 +46,8 @@ class AccountService:
         self._image_remote_refresh_ttl_seconds = 600
         self._invalid_tokens_path = DATA_DIR / "invalid_image_tokens.json"
         self._invalid_tokens = self._load_invalid_tokens()
+        self._refresh_progress: dict[str, dict[str, Any]] = {}
+        self._refresh_progress_lock = Lock()
 
     @staticmethod
     def _clean_token(value: Any) -> str:
@@ -1155,14 +1157,65 @@ class AccountService:
         # duan's customized account refresh path.
         return {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
 
-    def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
+    def init_refresh_progress(self, progress_id: str, total: int) -> None:
+        with self._refresh_progress_lock:
+            self._refresh_progress[progress_id] = {
+                "total": max(0, int(total or 0)),
+                "processed": 0,
+                "done": False,
+                "error": None,
+                "status_counts": {"正常": 0, "限流": 0, "异常": 0, "禁用": 0},
+                "total_quota": 0,
+            }
+
+    def update_refresh_progress(self, progress_id: str, token: str) -> None:
+        account = self.get_account(token)
+        status = str((account or {}).get("status") or "正常").strip() or "正常"
+        quota = max(0, int((account or {}).get("quota") or 0))
+        with self._refresh_progress_lock:
+            progress = self._refresh_progress.get(progress_id)
+            if progress is None:
+                return
+            progress["processed"] = int(progress.get("processed") or 0) + 1
+            status_counts = progress.get("status_counts")
+            if not isinstance(status_counts, dict):
+                status_counts = {"正常": 0, "限流": 0, "异常": 0, "禁用": 0}
+                progress["status_counts"] = status_counts
+            status_counts[status] = int(status_counts.get(status) or 0) + 1
+            progress["total_quota"] = int(progress.get("total_quota") or 0) + quota
+
+    def finish_refresh_progress(self, progress_id: str, result: dict | None = None, error: str | None = None) -> None:
+        with self._refresh_progress_lock:
+            progress = self._refresh_progress.get(progress_id)
+            if progress is None:
+                return
+            progress["done"] = True
+            progress["result"] = result
+            if error:
+                progress["error"] = error
+
+    def get_refresh_progress(self, progress_id: str) -> dict | None:
+        with self._refresh_progress_lock:
+            progress = self._refresh_progress.get(progress_id)
+            return dict(progress) if progress else None
+
+    def clean_refresh_progress(self, progress_id: str) -> None:
+        with self._refresh_progress_lock:
+            self._refresh_progress.pop(progress_id, None)
+
+    def refresh_accounts(self, access_tokens: list[str], progress_id: str | None = None) -> dict[str, Any]:
         cleaned_tokens = self._clean_tokens(access_tokens)
         if not cleaned_tokens:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
+            result = {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
+            if progress_id:
+                self.finish_refresh_progress(progress_id, result)
+            return result
 
         refreshed = 0
         errors: list[dict[str, str]] = []
         max_workers = min(10, len(cleaned_tokens))
+        if progress_id:
+            self.init_refresh_progress(progress_id, len(cleaned_tokens))
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {executor.submit(self.fetch_remote_info, access_token): access_token for access_token in
@@ -1188,13 +1241,19 @@ class AccountService:
                             self.update_account(access_token, {"status": "异常", "quota": 0})
                         message = "检测到封号"
                     errors.append({"access_token": access_token, "error": message})
+                finally:
+                    if progress_id:
+                        self.update_refresh_progress(progress_id, access_token)
 
         print(f"[account-refresh] done refreshed={refreshed} errors={len(errors)} workers={max_workers}")
-        return {
+        result = {
             "refreshed": refreshed,
             "errors": errors,
             "items": self.list_accounts(compact=True),
         }
+        if progress_id:
+            self.finish_refresh_progress(progress_id, result)
+        return result
 
 
 account_service = AccountService(config.get_storage_backend())

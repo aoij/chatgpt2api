@@ -22,9 +22,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     size = body.get("size")
     quality = str(body.get("quality") or "auto")
     response_format = str(body.get("response_format") or "b64_json")
-    defer_local_save = bool(body.get("defer_local_save")) and response_format != "b64_json"
     base_url = str(body.get("base_url") or "") or None
-    uploader = body.get("uploader") if isinstance(body.get("uploader"), dict) else None
+    progress_callback = body.get("progress_callback")
     encoded_images = encode_images(images)
     if not encoded_images:
         raise ImageGenerationError("image is required")
@@ -36,10 +35,9 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         quality=quality,
         response_format=response_format,
         base_url=base_url,
-        uploader=uploader,
         images=encoded_images,
         message_as_error=True,
-        defer_local_save=defer_local_save,
+        progress_callback=progress_callback,
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

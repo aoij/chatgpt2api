@@ -76,6 +76,16 @@ type AccountRefreshResponse = {
   errors: Array<{ access_token: string; error: string }>;
 };
 
+export type RefreshProgressResponse = {
+  total: number;
+  processed: number;
+  done: boolean;
+  error?: string | null;
+  status_counts?: Record<string, number>;
+  total_quota?: number;
+  result?: AccountRefreshResponse;
+};
+
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
@@ -508,10 +518,14 @@ export async function removeAbnormalAccounts() {
 }
 
 export async function refreshAccounts(accessTokens: string[]) {
-  return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
+  return httpRequest<{ progress_id: string }>("/api/accounts/refresh", {
     method: "POST",
     body: { ids: accessTokens },
   });
+}
+
+export async function fetchRefreshProgress(progressId: string) {
+  return httpRequest<RefreshProgressResponse>(`/api/accounts/refresh/progress/${progressId}`);
 }
 
 export async function updateAccount(

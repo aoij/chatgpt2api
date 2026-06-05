@@ -8,8 +8,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import api.image_tasks as image_tasks_module
-
-
 AUTH_HEADERS = {"Authorization": "Bearer chatgpt2api"}
 PNG_BYTES = b"\x89PNG\r\n\x1a\n"
 DATA_IMAGE_URL = f"data:image/png;base64,{base64.b64encode(PNG_BYTES).decode('ascii')}"
@@ -82,6 +80,13 @@ class ImageTasksApiTests(unittest.TestCase):
         self.service_patcher = mock.patch.object(image_tasks_module, "image_task_service", self.fake_service)
         self.service_patcher.start()
         self.addCleanup(self.service_patcher.stop)
+        self.identity_patcher = mock.patch.object(
+            image_tasks_module,
+            "require_identity",
+            side_effect=lambda _authorization=None: {"id": "admin", "name": "admin", "role": "admin", "scope": "full"},
+        )
+        self.identity_patcher.start()
+        self.addCleanup(self.identity_patcher.stop)
         app = FastAPI()
         app.include_router(image_tasks_module.create_router())
         self.client = TestClient(app)

@@ -65,6 +65,8 @@ class AuthService:
         }
         if base_name.lower() not in used_names:
             return base_name
+        if self._clean(value):
+            raise ValueError("这个名称已经在使用中了")
         index = 2
         while True:
             candidate = f"{base_name} {index}"

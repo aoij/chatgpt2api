@@ -45,6 +45,7 @@ import {
   fetchAccounts,
   fetchAccountSummary,
   fetchAccountTokens,
+  fetchRefreshProgress,
   removeAbnormalAccounts,
   refreshAccounts,
   updateAccount,
@@ -330,7 +331,34 @@ function AccountsPageContent() {
 
     setIsRefreshing(true);
     try {
-      const data = await refreshAccounts(accessTokens);
+      const { progress_id } = await refreshAccounts(accessTokens);
+      const data = await new Promise<{
+        items: Account[];
+        refreshed: number;
+        errors: Array<{ access_token: string; error: string }>;
+      }>((resolve, reject) => {
+        const timer = window.setInterval(async () => {
+          try {
+            const progress = await fetchRefreshProgress(progress_id);
+            if (!progress.done) {
+              return;
+            }
+            window.clearInterval(timer);
+            if (progress.error) {
+              reject(new Error(progress.error));
+              return;
+            }
+            if (!progress.result) {
+              reject(new Error("刷新结果为空"));
+              return;
+            }
+            resolve(progress.result);
+          } catch (error) {
+            window.clearInterval(timer);
+            reject(error);
+          }
+        }, 300);
+      });
       await loadAccounts(true);
       await loadSummary();
       if (data.errors.length > 0) {

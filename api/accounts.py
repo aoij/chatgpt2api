@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import uuid
+
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
@@ -300,8 +303,31 @@ def create_router() -> APIRouter:
             access_tokens = account_service.list_tokens()
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens or ids is required"})
-        result = account_service.refresh_accounts(access_tokens)
-        return {**result, "items": compact_items()}
+        progress_id = str(uuid.uuid4())
+
+        async def _do_refresh():
+            try:
+                await run_in_threadpool(account_service.refresh_accounts, access_tokens, progress_id)
+            except Exception as exc:
+                account_service.finish_refresh_progress(progress_id, error=str(exc))
+
+        asyncio.create_task(_do_refresh())
+        return {"progress_id": progress_id}
+
+    @router.get("/api/accounts/refresh/progress/{progress_id}")
+    async def get_refresh_progress(progress_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        progress = account_service.get_refresh_progress(progress_id)
+        if progress is None:
+            raise HTTPException(status_code=404, detail={"error": "progress not found"})
+        result = progress.get("result")
+        if isinstance(result, dict):
+            progress = dict(progress)
+            progress["result"] = {
+                **result,
+                "items": compact_items(),
+            }
+        return progress
 
     @router.post("/api/accounts/update")
     async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):
