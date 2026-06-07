@@ -1,13 +1,17 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+import time
+from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.image_inputs import parse_image_edit_request, read_image_sources
-from api.support import raise_image_quota_error, require_admin, require_identity, resolve_image_base_url
+from api.support import raise_image_quota_error, require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_text
 from services.auth_service import ImageQuotaExceeded, auth_service
+from services.image_conversation_service import image_conversation_service
 from services.log_service import LoggedCall
 from services.protocol import (
     anthropic_v1_messages,
@@ -96,12 +100,94 @@ def _uploader_from_identity(identity: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _conversation_title(prompt: str) -> str:
+    text = " ".join(str(prompt or "").split()).strip()
+    return text[:28] or "API 生图"
+
+
+def _image_items_from_openai_result(result: object) -> list[dict[str, object]]:
+    if not isinstance(result, dict):
+        return []
+    data = result.get("data")
+    if not isinstance(data, list):
+        return []
+    images: list[dict[str, object]] = []
+    for index, item in enumerate(data, start=1):
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url") if isinstance(item.get("url"), str) else ""
+        b64_json = item.get("b64_json") if isinstance(item.get("b64_json"), str) else ""
+        if not url and not b64_json:
+            continue
+        image: dict[str, object] = {
+            "id": f"api-img-{uuid4().hex[:12]}",
+            "status": "success",
+        }
+        if url:
+            image["url"] = url
+        elif b64_json:
+            image["b64_json"] = b64_json
+        revised_prompt = item.get("revised_prompt")
+        if isinstance(revised_prompt, str) and revised_prompt:
+            image["revised_prompt"] = revised_prompt
+        images.append(image)
+    return images
+
+
+def _save_api_image_conversation(
+    identity: dict[str, object],
+    *,
+    prompt: str,
+    model: str,
+    mode: str,
+    count: int,
+    size: str | None = None,
+    quality: str | None = None,
+    result: object = None,
+    error: str = "",
+) -> None:
+    if identity.get("role") != "user":
+        return
+    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    images = _image_items_from_openai_result(result)
+    if error and not images:
+        images = [{
+            "id": f"api-img-{uuid4().hex[:12]}",
+            "status": "error",
+            "error": error,
+        }]
+    if not images:
+        return
+    status = "error" if error and not any(item.get("status") == "success" for item in images) else "success"
+    conversation = {
+        "id": f"api-{uuid4().hex[:12]}",
+        "title": _conversation_title(prompt),
+        "createdAt": now,
+        "updatedAt": now,
+        "turns": [{
+            "id": f"turn-{uuid4().hex[:12]}",
+            "prompt": prompt,
+            "model": model or "gpt-image-2",
+            "mode": "edit" if mode == "edit" else "generate",
+            "referenceImages": [],
+            "count": max(1, int(count or len(images) or 1)),
+            "size": size or "",
+            "quality": quality or "auto",
+            "images": images,
+            "createdAt": now,
+            "status": status,
+            **({"error": error} if error else {}),
+        }],
+    }
+    image_conversation_service.save(identity, conversation)
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/models")
     async def list_models(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
+        require_identity(authorization)
         try:
             return await run_in_threadpool(openai_v1_models.list_models)
         except Exception as exc:
@@ -127,6 +213,17 @@ def create_router() -> APIRouter:
         try:
             result = await call.run(openai_v1_image_generations.handle, payload)
             if isinstance(result, dict):
+                await run_in_threadpool(
+                    _save_api_image_conversation,
+                    identity,
+                    prompt=body.prompt,
+                    model=body.model,
+                    mode="generate",
+                    count=body.n,
+                    size=body.size,
+                    quality=body.quality,
+                    result=result,
+                )
                 _refund_unused_quota(identity, reserved_quota, _count_image_results(result))
             if reserved_quota and int(getattr(result, "status_code", 200) or 200) >= 400:
                 auth_service.refund_image_quota(identity, reserved_quota)
@@ -159,6 +256,17 @@ def create_router() -> APIRouter:
         try:
             result = await call.run(openai_v1_image_edit.handle, payload)
             if isinstance(result, dict):
+                await run_in_threadpool(
+                    _save_api_image_conversation,
+                    identity,
+                    prompt=prompt,
+                    model=model,
+                    mode="edit",
+                    count=n,
+                    size=str(payload.get("size") or ""),
+                    quality=str(payload.get("quality") or "auto"),
+                    result=result,
+                )
                 _refund_unused_quota(identity, reserved_quota, _count_image_results(result))
             if reserved_quota and int(getattr(result, "status_code", 200) or 200) >= 400:
                 auth_service.refund_image_quota(identity, reserved_quota)
@@ -170,7 +278,7 @@ def create_router() -> APIRouter:
 
     @router.post("/v1/chat/completions")
     async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
-        identity = require_admin(authorization)
+        identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         payload["uploader"] = _uploader_from_identity(identity)
         model = str(payload.get("model") or "auto")
@@ -181,7 +289,7 @@ def create_router() -> APIRouter:
 
     @router.post("/v1/responses")
     async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
-        identity = require_admin(authorization)
+        identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         payload["uploader"] = _uploader_from_identity(identity)
         model = str(payload.get("model") or "auto")
@@ -197,7 +305,7 @@ def create_router() -> APIRouter:
             x_api_key: str | None = Header(default=None, alias="x-api-key"),
             anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
     ):
-        identity = require_admin(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
+        identity = require_identity(authorization or (f"Bearer {x_api_key}" if x_api_key else None))
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("system"), payload.get("messages"), payload.get("tools"))

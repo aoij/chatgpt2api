@@ -754,6 +754,7 @@ function ImagePageContent({
   const forceAutoScrollRef = useRef(false);
   const previousSelectedConversationIdRef = useRef<string | null>(null);
   const selectedConversationIdRef = useRef<string | null>(null);
+  const loadingConversationDetailIdRef = useRef<string | null>(null);
   const draftModeRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -847,6 +848,7 @@ function ImagePageContent({
         return existing;
       }
       if (!options.silent) {
+        loadingConversationDetailIdRef.current = normalizedConversationId;
         setIsLoadingConversationDetail(true);
       }
       try {
@@ -868,7 +870,8 @@ function ImagePageContent({
         mergeConversationSummaries([item]);
         return item;
       } finally {
-        if (!options.silent) {
+        if (!options.silent && loadingConversationDetailIdRef.current === normalizedConversationId) {
+          loadingConversationDetailIdRef.current = null;
           setIsLoadingConversationDetail(false);
         }
       }
@@ -919,6 +922,18 @@ function ImagePageContent({
     persistActiveConversationSelection(normalizedConversationId, isDraft);
   }, [persistActiveConversationSelection]);
 
+  const handleSelectConversation = useCallback(
+    (conversationId: string) => {
+      const normalizedConversationId = String(conversationId || "").trim();
+      if (!normalizedConversationId) {
+        return;
+      }
+      setConversationSelection(normalizedConversationId);
+      void ensureConversationDetailLoaded(normalizedConversationId);
+    },
+    [ensureConversationDetailLoaded, setConversationSelection],
+  );
+
   const applyConversationSummaries = useCallback(
     (items: ImageConversationSummary[], options: { background?: boolean } = {}) => {
       conversationSummariesRef.current = items;
@@ -949,7 +964,7 @@ function ImagePageContent({
     setIsLoadingHistory(true);
     try {
       const items = await listImageConversations({ forceRemote: true });
-      applyConversationSummaries(items);
+      applyConversationSummaries(items, { background: true });
       const activeId = selectedConversationIdRef.current;
       if (activeId && items.some((item) => item.id === activeId)) {
         await ensureConversationDetailLoaded(activeId, { silent: true });
@@ -993,6 +1008,7 @@ function ImagePageContent({
 
   useEffect(() => {
     if (!selectedConversationId || draftModeRef.current) {
+      loadingConversationDetailIdRef.current = null;
       setIsLoadingConversationDetail(false);
       return;
     }
@@ -1227,10 +1243,16 @@ function ImagePageContent({
     if (draftModeRef.current) {
       return;
     }
-    if (selectedConversationId && !conversations.some((conversation) => conversation.id === selectedConversationId)) {
+    if (
+      selectedConversationId &&
+      !conversations.some((conversation) => conversation.id === selectedConversationId) &&
+      !conversationSummaries.some((conversation) => conversation.id === selectedConversationId) &&
+      !isLoadingConversationDetail &&
+      loadingConversationDetailIdRef.current !== selectedConversationId
+    ) {
       setConversationSelection(pickFallbackConversationId(conversations));
     }
-  }, [conversations, selectedConversationId, setConversationSelection]);
+  }, [conversationSummaries, conversations, isLoadingConversationDetail, selectedConversationId, setConversationSelection]);
 
   const persistConversation = async (conversation: ImageConversation) => {
     const nextConversations = sortImageConversations([
@@ -2200,7 +2222,7 @@ function ImagePageContent({
             onCreateDraft={handleCreateDraft}
             onClearHistory={openClearHistoryConfirm}
             onRefreshConversations={handleRefreshConversations}
-            onSelectConversation={setConversationSelection}
+            onSelectConversation={handleSelectConversation}
             onDeleteConversation={openDeleteConversationConfirm}
             onRenameConversation={handleRenameConversation}
             formatConversationTime={formatConversationTime}
@@ -2257,7 +2279,7 @@ function ImagePageContent({
                 onClearHistory={openClearHistoryConfirm}
                 onRefreshConversations={handleRefreshConversations}
                 onSelectConversation={(id) => {
-                  setConversationSelection(id);
+                  handleSelectConversation(id);
                   setIsHistoryOpen(false);
                 }}
                 onDeleteConversation={openDeleteConversationConfirm}
@@ -2311,6 +2333,7 @@ function ImagePageContent({
             className="hide-scrollbar min-h-0 flex-1 overscroll-contain overflow-y-auto px-1 py-2 sm:px-4 sm:py-4"
           >
             <ImageResults
+              selectedConversationId={selectedConversationId}
               selectedConversation={selectedConversation}
               isLoadingConversationDetail={Boolean(selectedConversationId && !selectedConversation && isLoadingConversationDetail)}
               onOpenLightbox={openLightbox}

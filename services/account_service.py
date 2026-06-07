@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from copy import deepcopy
 import base64
 import hashlib
 import json
@@ -48,6 +49,8 @@ class AccountService:
         self._invalid_tokens = self._load_invalid_tokens()
         self._refresh_progress: dict[str, dict[str, Any]] = {}
         self._refresh_progress_lock = Lock()
+        self._active_refresh_progress_id: str | None = None
+        self._refresh_execution_lock = Lock()
 
     @staticmethod
     def _clean_token(value: Any) -> str:
@@ -162,7 +165,7 @@ class AccountService:
         token_payload = self._decode_access_token_payload(access_token)
 
         auth_payload = token_payload.get("https://api.openai.com/auth")
-        print("检测账户类型响应", auth_payload)
+        # 账号池批量刷新时这里会被调用上千次，避免输出整段 JWT payload 拖慢服务。
         if isinstance(auth_payload, dict):
             matched = self._normalize_account_type(auth_payload.get("chatgpt_plan_type"))
             if matched:
@@ -501,7 +504,7 @@ class AccountService:
                     )
                 tokens = self._list_available_candidate_tokens(excluded, plan_type, source_type, plan_types)
                 if tokens:
-                    access_token = tokens[0]
+                    access_token = tokens[self._index % len(tokens)]
                     self._index += 1
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
@@ -616,8 +619,13 @@ class AccountService:
         plan_type: str | None = None,
         source_type: str | None = None,
         plan_types: set[str] | tuple[str, ...] | None = None,
+        excluded_tokens: set[str] | None = None,
     ) -> str:
-        attempted_tokens: set[str] = set()
+        attempted_tokens: set[str] = {
+            self._clean_token(token)
+            for token in (excluded_tokens or set())
+            if self._clean_token(token)
+        }
         while True:
             access_token = self._pick_next_candidate_token(
                 excluded_tokens=attempted_tokens,
@@ -643,13 +651,49 @@ class AccountService:
                 f"status={account.get('status') if account else 'unknown'}"
             )
 
-    def get_text_access_token(self) -> str:
+    def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+        excluded = {self._clean_token(token) for token in (excluded_tokens or set()) if self._clean_token(token)}
+        now = int(time.time())
         with self._lock:
-            for account in self._accounts:
+            candidates: list[tuple[tuple[int, float, int, float, str], int, str]] = []
+            for index, account in enumerate(self._accounts):
                 status = self._clean_token(account.get("status"))
-                if status not in {"禁用", "异常"}:
-                    return self._clean_token(account.get("access_token"))
+                token = self._clean_token(account.get("access_token"))
+                if (
+                    not token
+                    or token in excluded
+                    or token in self._invalid_tokens
+                    or status in {"禁用", "异常"}
+                ):
+                    continue
+                exp = self._jwt_exp(token)
+                if exp > 0 and exp <= now + 60:
+                    continue
+                candidates.append((self._candidate_account_sort_key(account, float(now)), index, token))
+            if not candidates:
+                return ""
+            candidates.sort(key=lambda row: row[0])
+            selected_index, selected_token = candidates[self._index % len(candidates)][1:]
+            self._index = selected_index + 1
+            return selected_token
         return ""
+
+    def mark_text_used(self, access_token: str) -> dict | None:
+        access_token = self._clean_token(access_token)
+        if not access_token:
+            return None
+        with self._lock:
+            index = self._find_account_index(access_token)
+            if index < 0:
+                return None
+            next_item = dict(self._accounts[index])
+            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            account = self._normalize_account(next_item)
+            if account is None:
+                return None
+            self._accounts[index] = account
+            self._save_account(account)
+            return dict(account)
 
     def remove_invalid_token(self, access_token: str, event: str) -> bool:
         if not config.auto_remove_invalid_accounts:
@@ -1005,63 +1049,60 @@ class AccountService:
         if not access_token:
             raise ValueError("access_token is required")
 
+        exp = self._jwt_exp(access_token)
+        if exp > 0 and exp <= int(time.time()):
+            raise RuntimeError("/backend-api/me failed: HTTP 401 (expired access token)")
+
         headers, impersonate = self._build_remote_headers(access_token)
         token_ref = anonymize_token(access_token)
         print(f"[account-refresh] start {token_ref}")
         session = Session(**proxy_settings.build_session_kwargs(impersonate=impersonate, verify=True))
         session.headers.update(headers)
         try:
-            with ThreadPoolExecutor(max_workers=3) as executor:
-                me_future = executor.submit(
-                    session.get,
-                    "https://chatgpt.com/backend-api/me",
-                    headers={
-                        "x-openai-target-path": "/backend-api/me",
-                        "x-openai-target-route": "/backend-api/me",
-                    },
-                    timeout=20,
-                )
-                init_future = executor.submit(
-                    session.post,
-                    "https://chatgpt.com/backend-api/conversation/init",
-                    json={
-                        "gizmo_id": None,
-                        "requested_default_model": None,
-                        "conversation_id": None,
-                        "timezone_offset_min": -480,
-                    },
-                    timeout=20,
-                )
-                account_future = executor.submit(
-                    session.get,
-                    "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
-                    headers={
-                        "x-openai-target-path": "/backend-api/accounts/check/v4-2023-04-27",
-                        "x-openai-target-route": "/backend-api/accounts/check/v4-2023-04-27",
-                    },
-                    timeout=20,
-                )
-
-                me_response = me_future.result()
-                init_response = init_future.result()
-                account_response = account_future.result()
-
+            # 先校验 /me。旧实现对每个账号同时打 3 个上游请求，遇到大量 401/失效账号时
+            # 会把代理、线程和 SQLite 写入一起打满；顺序请求可以让无效账号快速失败。
+            me_response = session.get(
+                "https://chatgpt.com/backend-api/me",
+                headers={
+                    "x-openai-target-path": "/backend-api/me",
+                    "x-openai-target-route": "/backend-api/me",
+                },
+                timeout=15,
+            )
             if me_response.status_code != 200:
                 raise RuntimeError(f"/backend-api/me failed: HTTP {me_response.status_code}")
             me_payload = me_response.json()
 
+            init_response = session.post(
+                "https://chatgpt.com/backend-api/conversation/init",
+                json={
+                    "gizmo_id": None,
+                    "requested_default_model": None,
+                    "conversation_id": None,
+                    "timezone_offset_min": -480,
+                },
+                timeout=15,
+            )
             if init_response.status_code != 200:
                 raise RuntimeError(f"/backend-api/conversation/init failed: HTTP {init_response.status_code}")
             init_payload = init_response.json()
 
             account_payload: dict[str, Any] = {}
-            if account_response.status_code == 200:
-                try:
+            try:
+                account_response = session.get(
+                    "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
+                    headers={
+                        "x-openai-target-path": "/backend-api/accounts/check/v4-2023-04-27",
+                        "x-openai-target-route": "/backend-api/accounts/check/v4-2023-04-27",
+                    },
+                    timeout=15,
+                )
+                if account_response.status_code == 200:
                     raw_account_payload = account_response.json()
                     if isinstance(raw_account_payload, dict):
                         account_payload = raw_account_payload
-                except Exception:
-                    account_payload = {}
+            except Exception as exc:
+                print(f"[account-refresh] optional account check failed {token_ref} {exc}")
 
             limits_progress = init_payload.get("limits_progress")
             if not isinstance(limits_progress, list):
@@ -1157,16 +1198,76 @@ class AccountService:
         # duan's customized account refresh path.
         return {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
 
-    def init_refresh_progress(self, progress_id: str, total: int) -> None:
+    @staticmethod
+    def _refresh_progress_snapshot(total: int) -> dict[str, Any]:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        safe_total = max(0, int(total or 0))
+        return {
+            "total": safe_total,
+            "started": 0,
+            "processed": 0,
+            "running": 0,
+            "queued": safe_total,
+            "done": False,
+            "error": None,
+            "status_counts": {"正常": 0, "限流": 0, "异常": 0, "禁用": 0},
+            "total_quota": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    @staticmethod
+    def _recalculate_refresh_progress(progress: dict[str, Any]) -> None:
+        total = max(0, int(progress.get("total") or 0))
+        started = min(total, max(0, int(progress.get("started") or 0)))
+        processed = min(started, max(0, int(progress.get("processed") or 0)))
+        progress["started"] = started
+        progress["processed"] = processed
+        progress["running"] = max(0, started - processed)
+        progress["queued"] = max(0, total - started)
+        progress["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def init_refresh_progress(self, progress_id: str, total: int, overwrite: bool = True) -> None:
         with self._refresh_progress_lock:
-            self._refresh_progress[progress_id] = {
-                "total": max(0, int(total or 0)),
-                "processed": 0,
-                "done": False,
-                "error": None,
-                "status_counts": {"正常": 0, "限流": 0, "异常": 0, "禁用": 0},
-                "total_quota": 0,
-            }
+            if not overwrite and progress_id in self._refresh_progress:
+                progress = self._refresh_progress[progress_id]
+                progress["total"] = max(0, int(total or 0))
+                self._recalculate_refresh_progress(progress)
+                return
+            self._refresh_progress[progress_id] = self._refresh_progress_snapshot(total)
+
+    def begin_refresh_progress(self, progress_id: str, total: int) -> tuple[str, bool]:
+        with self._refresh_progress_lock:
+            active_id = self._active_refresh_progress_id
+            if active_id:
+                active_progress = self._refresh_progress.get(active_id)
+                if active_progress and not active_progress.get("done"):
+                    return active_id, False
+                self._active_refresh_progress_id = None
+
+            self._active_refresh_progress_id = progress_id
+            self._refresh_progress[progress_id] = self._refresh_progress_snapshot(total)
+            return progress_id, True
+
+    def get_active_refresh_progress_id(self) -> str | None:
+        with self._refresh_progress_lock:
+            active_id = self._active_refresh_progress_id
+            if not active_id:
+                return None
+            progress = self._refresh_progress.get(active_id)
+            if progress and not progress.get("done"):
+                return active_id
+            self._active_refresh_progress_id = None
+            return None
+
+    def mark_refresh_progress_started(self, progress_id: str, token: str) -> None:
+        with self._refresh_progress_lock:
+            progress = self._refresh_progress.get(progress_id)
+            if progress is None:
+                return
+            progress["started"] = int(progress.get("started") or 0) + 1
+            progress["last_started_token"] = anonymize_token(token)
+            self._recalculate_refresh_progress(progress)
 
     def update_refresh_progress(self, progress_id: str, token: str) -> None:
         account = self.get_account(token)
@@ -1183,6 +1284,8 @@ class AccountService:
                 progress["status_counts"] = status_counts
             status_counts[status] = int(status_counts.get(status) or 0) + 1
             progress["total_quota"] = int(progress.get("total_quota") or 0) + quota
+            progress["last_finished_token"] = anonymize_token(token)
+            self._recalculate_refresh_progress(progress)
 
     def finish_refresh_progress(self, progress_id: str, result: dict | None = None, error: str | None = None) -> None:
         with self._refresh_progress_lock:
@@ -1190,66 +1293,121 @@ class AccountService:
             if progress is None:
                 return
             progress["done"] = True
+            progress["running"] = 0
+            progress["queued"] = 0
             progress["result"] = result
+            progress["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            progress["finished_at"] = progress["updated_at"]
             if error:
                 progress["error"] = error
+            if self._active_refresh_progress_id == progress_id:
+                self._active_refresh_progress_id = None
 
     def get_refresh_progress(self, progress_id: str) -> dict | None:
         with self._refresh_progress_lock:
             progress = self._refresh_progress.get(progress_id)
-            return dict(progress) if progress else None
+            return deepcopy(progress) if progress else None
 
     def clean_refresh_progress(self, progress_id: str) -> None:
         with self._refresh_progress_lock:
             self._refresh_progress.pop(progress_id, None)
 
+    def _refresh_remote_info_with_progress(self, access_token: str, progress_id: str | None = None) -> dict[str, Any]:
+        if progress_id:
+            self.mark_refresh_progress_started(progress_id, access_token)
+        return self.fetch_remote_info(access_token)
+
     def refresh_accounts(self, access_tokens: list[str], progress_id: str | None = None) -> dict[str, Any]:
         cleaned_tokens = self._clean_tokens(access_tokens)
         if not cleaned_tokens:
-            result = {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
+            result = {"refreshed": 0, "errors": [], "error_count": 0, "items": []}
             if progress_id:
                 self.finish_refresh_progress(progress_id, result)
             return result
 
+        if not self._refresh_execution_lock.acquire(blocking=False):
+            result = {
+                "refreshed": 0,
+                "errors": [{"access_token": "", "error": "已有账号刷新任务正在运行，请稍后再试"}],
+                "error_count": 1,
+                "items": [],
+            }
+            if progress_id:
+                self.finish_refresh_progress(progress_id, result, error="已有账号刷新任务正在运行，请稍后再试")
+            return result
+
         refreshed = 0
         errors: list[dict[str, str]] = []
-        max_workers = min(10, len(cleaned_tokens))
+        error_count = 0
+        max_errors = 200
+        max_workers = min(3, len(cleaned_tokens))
+        max_inflight = max_workers * 2
         if progress_id:
-            self.init_refresh_progress(progress_id, len(cleaned_tokens))
+            self.init_refresh_progress(progress_id, len(cleaned_tokens), overwrite=False)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(self.fetch_remote_info, access_token): access_token for access_token in
-                          cleaned_tokens}
-            for future in as_completed(future_map):
-                access_token = future_map[future]
-                try:
-                    remote_info = future.result()
-                    if self.update_account(
-                        access_token,
-                        {
-                            **remote_info,
-                            "last_remote_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        },
-                    ) is not None:
-                        refreshed += 1
-                except Exception as exc:
-                    message = str(exc)
-                    print(f"[account-refresh] fail {anonymize_token(access_token)} {message}")
-                    if "/backend-api/me failed: HTTP 401" in message:
-                        self.mark_invalid_image_token(access_token, "refresh_accounts")
-                        if not config.auto_remove_invalid_accounts:
-                            self.update_account(access_token, {"status": "异常", "quota": 0})
-                        message = "检测到封号"
-                    errors.append({"access_token": access_token, "error": message})
-                finally:
-                    if progress_id:
-                        self.update_refresh_progress(progress_id, access_token)
+        def record_error(access_token: str, message: str) -> None:
+            nonlocal error_count
+            error_count += 1
+            if len(errors) < max_errors:
+                errors.append({"access_token": anonymize_token(access_token), "error": message})
 
-        print(f"[account-refresh] done refreshed={refreshed} errors={len(errors)} workers={max_workers}")
+        try:
+            token_iter = iter(cleaned_tokens)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {}
+
+                def submit_next() -> bool:
+                    try:
+                        token = next(token_iter)
+                    except StopIteration:
+                        return False
+                    future_map[executor.submit(self._refresh_remote_info_with_progress, token, progress_id)] = token
+                    return True
+
+                for _ in range(min(max_inflight, len(cleaned_tokens))):
+                    if not submit_next():
+                        break
+
+                while future_map:
+                    done, _ = wait(future_map.keys(), return_when=FIRST_COMPLETED)
+                    for future in done:
+                        access_token = future_map.pop(future)
+                        try:
+                            remote_info = future.result()
+                            if self.update_account(
+                                access_token,
+                                {
+                                    **remote_info,
+                                    "last_remote_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                },
+                            ) is not None:
+                                refreshed += 1
+                        except Exception as exc:
+                            message = str(exc)
+                            print(f"[account-refresh] fail {anonymize_token(access_token)} {message}")
+                            if "/backend-api/me failed: HTTP 401" in message:
+                                self.mark_invalid_image_token(access_token, "refresh_accounts")
+                                if not config.auto_remove_invalid_accounts:
+                                    self.update_account(access_token, {"status": "异常", "quota": 0})
+                                message = "检测到封号"
+                            record_error(access_token, message)
+                        finally:
+                            if progress_id:
+                                self.update_refresh_progress(progress_id, access_token)
+                            submit_next()
+        finally:
+            self._refresh_execution_lock.release()
+
+        print(
+            f"[account-refresh] done refreshed={refreshed} errors={error_count} "
+            f"workers={max_workers} inflight={max_inflight}"
+        )
         result = {
             "refreshed": refreshed,
             "errors": errors,
-            "items": self.list_accounts(compact=True),
+            "error_count": error_count,
+            "errors_truncated": error_count > len(errors),
+            "items": [],
         }
         if progress_id:
             self.finish_refresh_progress(progress_id, result)

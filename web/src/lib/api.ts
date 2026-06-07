@@ -303,6 +303,7 @@ export type UserKey = {
   role: "user";
   enabled: boolean;
   quota: number | null;
+  key?: string | null;
   link_token?: string | null;
   created_at: string | null;
   last_used_at: string | null;

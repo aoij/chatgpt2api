@@ -12,6 +12,7 @@ import tiktoken
 
 from services.account_service import account_service
 from services.config import config
+from services.image_service import record_image_metadata
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
@@ -71,8 +72,14 @@ def is_token_invalid_error(message: str) -> bool:
     return (
         "token_invalidated" in text
         or "token_revoked" in text
+        or "token_expired" in text
         or "authentication token has been invalidated" in text
+        or "provided authentication token is expired" in text
         or "invalidated oauth token" in text
+        or "invalid access token" in text
+        or "status=401" in text
+        or "http 401" in text
+        or " 401" in text and ("auth" in text or "token" in text or "unauthorized" in text)
     )
 
 
@@ -147,8 +154,18 @@ def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
 
-def save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
-    return image_storage_service.save(image_data, base_url).url
+def _managed_image_rel_from_url(url: str) -> str:
+    marker = "/images/"
+    if marker not in str(url or ""):
+        return ""
+    return str(url or "").split(marker, 1)[1].split("?", 1)[0].split("#", 1)[0].lstrip("/")
+
+
+def save_image_bytes(image_data: bytes, base_url: str | None = None, uploader: object = None) -> str:
+    stored = image_storage_service.save(image_data, base_url)
+    if uploader:
+        record_image_metadata(stored.rel, uploader=uploader, source="api")
+    return stored.url
 
 
 def message_text(content: Any) -> str:
@@ -268,6 +285,7 @@ def format_image_result(
     base_url: str | None = None,
     created: int | None = None,
     message: str = "",
+    uploader: object = None,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     for item in items:
@@ -278,12 +296,12 @@ def format_image_result(
         if response_format == "b64_json":
             data.append({
                 "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": save_image_bytes(base64.b64decode(b64_json), base_url, uploader),
                 "revised_prompt": revised_prompt,
             })
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": save_image_bytes(base64.b64decode(b64_json), base_url, uploader),
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
@@ -303,6 +321,7 @@ class ConversationRequest:
     quality: str = "auto"
     response_format: str = "b64_json"
     base_url: str | None = None
+    uploader: object = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
 
@@ -676,14 +695,17 @@ def text_backend() -> OpenAIBackendAPI:
 
 
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
+    max_attempts = 10
     attempted_tokens: set[str] = set()
-    token = getattr(backend, "access_token", "")
-    emitted = False
-    while True:
-        if token and token in attempted_tokens:
-            raise RuntimeError("no available text account")
-        if token:
-            attempted_tokens.add(token)
+    token = getattr(backend, "access_token", "") or account_service.get_text_access_token()
+    last_error: Exception | None = None
+    while len(attempted_tokens) < max_attempts:
+        if not token or token in attempted_tokens:
+            token = account_service.get_text_access_token(attempted_tokens)
+        if not token:
+            break
+        attempted_tokens.add(token)
+        emitted = False
         try:
             active_backend = OpenAIBackendAPI(access_token=token)
             for event in conversation_events(active_backend, messages=request.messages, model=request.model, prompt=request.prompt):
@@ -696,17 +718,18 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             account_service.mark_text_used(token)
             return
         except Exception as exc:
+            last_error = exc
             error_message = str(exc)
-            if token and not emitted and is_token_invalid_error(error_message):
-                refreshed_token = account_service.refresh_access_token(token, force=True, event="text_stream")
-                if refreshed_token and refreshed_token != token and refreshed_token not in attempted_tokens:
-                    token = refreshed_token
-                else:
-                    account_service.remove_invalid_token(token, "text_stream")
-                    token = account_service.get_text_access_token(attempted_tokens)
-                if token:
-                    continue
-            raise
+            if emitted:
+                raise
+            if is_token_invalid_error(error_message):
+                account_service.mark_invalid_image_token(token, "text_stream")
+            token = account_service.get_text_access_token(attempted_tokens)
+            if token:
+                continue
+    if last_error is not None:
+        raise RuntimeError(f"text generation failed after {len(attempted_tokens)} account attempts: {last_error}") from last_error
+    raise RuntimeError("no available text account")
 
 
 def collect_text(backend: OpenAIBackendAPI, request: ConversationRequest) -> str:
@@ -936,6 +959,7 @@ def stream_image_outputs(
             request.response_format,
             request.base_url,
             int(time.time()),
+            uploader=request.uploader,
         )["data"]
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1033,6 +1057,7 @@ def stream_image_outputs(
                         request.response_format,
                         request.base_url,
                         int(time.time()),
+                        uploader=request.uploader,
                     )["data"]
                     if data:
                         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1145,6 +1170,7 @@ def stream_image_outputs(
                     request.response_format,
                     request.base_url,
                     int(time.time()),
+                    uploader=request.uploader,
                 )["data"]
                 if data:
                     yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1205,6 +1231,7 @@ def stream_codex_image_outputs(
         request.response_format,
         request.base_url,
         int(time.time()),
+        uploader=request.uploader,
     )["data"]
     if data:
         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
@@ -1230,14 +1257,24 @@ def _generate_single_image(
     MAX_CONN_TIMEOUT_RETRIES = 3
     # 轮询超时错误最大重试次数（换账号重试）
     MAX_POLL_TIMEOUT_RETRIES = 4
+    # 单张图片最多轮询 10 个账号，避免一个坏号拖住后续任务
+    MAX_ACCOUNT_ATTEMPTS = 10
 
     text_reply_retry_count = 0
     tls_retry_count = 0
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
+    account_attempts = 0
+    attempted_tokens: set[str] = set()
     account_email = ""
+    last_error = ""
 
     while True:
+        if account_attempts >= MAX_ACCOUNT_ATTEMPTS:
+            raise ImageGenerationError(
+                image_stream_error_message(last_error) if last_error else "image generation failed after 10 account attempts",
+                account_email=account_email,
+            )
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1247,9 +1284,12 @@ def _generate_single_image(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                excluded_tokens=attempted_tokens,
             )
         except RuntimeError as exc:
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
+        attempted_tokens.add(token)
+        account_attempts += 1
 
         emitted_for_token = False
         returned_message = False
@@ -1261,6 +1301,8 @@ def _generate_single_image(
             "token_prefix": token[:12] + "..." if len(token) > 12 else token,
             "account_email": account_email,
             "account_found": bool(account),
+            "account_attempt": account_attempts,
+            "max_account_attempts": MAX_ACCOUNT_ATTEMPTS,
             "index": index,
         })
         try:
@@ -1316,6 +1358,7 @@ def _generate_single_image(
                         "request_token": token,
                         "account_email": account_email,
                         "retry_count": poll_timeout_retry_count,
+                        "account_attempt": account_attempts,
                         "index": index,
                         "error": str(exc)[:200],
                     })
@@ -1351,6 +1394,7 @@ def _generate_single_image(
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
             error_text = str(exc)
+            last_error = error_text
             # 如果是模型返回文本而非图片，尝试换账号重试
             if is_model_text_reply_instead_of_image(error_text) and not emitted_for_token:
                 text_reply_retry_count += 1
@@ -1360,6 +1404,7 @@ def _generate_single_image(
                         "request_token": token,
                         "account_email": account_email,
                         "retry_count": text_reply_retry_count,
+                        "account_attempt": account_attempts,
                         "index": index,
                         "error": error_text[:200],
                     })
@@ -1380,6 +1425,17 @@ def _generate_single_image(
                     account_email=account_email,
                     conversation_id=getattr(exc, "conversation_id", ""),
                 ) from exc
+            if not emitted_for_token and account_attempts < MAX_ACCOUNT_ATTEMPTS:
+                logger.warning({
+                    "event": "image_generation_error_retry_next_account",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "account_attempt": account_attempts,
+                    "max_account_attempts": MAX_ACCOUNT_ATTEMPTS,
+                    "index": index,
+                    "error": error_text[:200],
+                })
+                continue
             logger.warning({
                 "event": "image_stream_generation_error",
                 "request_token": token,
@@ -1399,11 +1455,7 @@ def _generate_single_image(
                 "index": index,
             })
             if not emitted_for_token and is_token_invalid_error(last_error):
-                refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
-                if refreshed_token and refreshed_token != token:
-                    token = refreshed_token
-                    continue
-                account_service.remove_invalid_token(token, "image_stream")
+                account_service.mark_invalid_image_token(token, "image_stream")
                 continue
             # TLS/SSL 连接错误：自动重试
             if not emitted_for_token and is_tls_connection_error(last_error):
@@ -1414,12 +1466,13 @@ def _generate_single_image(
                         "request_token": token,
                         "account_email": account_email,
                         "retry_count": tls_retry_count,
+                        "account_attempt": account_attempts,
                         "index": index,
                         "error": last_error[:200],
                     })
                     time.sleep(min(2.0 * tls_retry_count, 10.0))
                     continue
-            # 连接超时错误（curl 28）：同账号短等待重试，不切换账号
+            # 连接超时错误（curl 28）：短等待后换下一个账号，避免单账号卡住队列
             if not emitted_for_token and is_connection_timeout_error(last_error):
                 conn_timeout_retry_count += 1
                 if conn_timeout_retry_count <= MAX_CONN_TIMEOUT_RETRIES:
@@ -1429,12 +1482,24 @@ def _generate_single_image(
                         "request_token": token,
                         "account_email": account_email,
                         "retry_count": conn_timeout_retry_count,
+                        "account_attempt": account_attempts,
                         "index": index,
                         "wait_secs": wait_secs,
                         "error": last_error[:200],
                     })
                     time.sleep(wait_secs)
                     continue
+            if not emitted_for_token and account_attempts < MAX_ACCOUNT_ATTEMPTS:
+                logger.warning({
+                    "event": "image_stream_retry_next_account",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "account_attempt": account_attempts,
+                    "max_account_attempts": MAX_ACCOUNT_ATTEMPTS,
+                    "index": index,
+                    "error": last_error[:200],
+                })
+                continue
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
 
 

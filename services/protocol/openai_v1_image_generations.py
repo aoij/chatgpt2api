@@ -29,6 +29,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         quality=quality,
         response_format=response_format,
         base_url=base_url,
+        uploader=body.get("uploader"),
         message_as_error=True,
         progress_callback=progress_callback,
     ))

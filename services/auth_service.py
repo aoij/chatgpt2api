@@ -93,11 +93,13 @@ class AuthService:
             link_token = f"lk-{secrets.token_urlsafe(24)}"
             self._needs_save = True
         recharge_out_trade_no = self._clean(raw.get("recharge_out_trade_no"))
+        raw_key = self._clean(raw.get("raw_key"))
         return {
             "id": item_id,
             "name": name,
             "role": role,
             "key_hash": key_hash,
+            **({"raw_key": raw_key} if raw_key else {}),
             "enabled": bool(raw.get("enabled", True)),
             "quota": quota,
             "link_token": link_token,
@@ -135,6 +137,7 @@ class AuthService:
             "role": item.get("role"),
             "enabled": bool(item.get("enabled", True)),
             "quota": item.get("quota"),
+            "key": item.get("raw_key") if item.get("raw_key") else None,
             "link_token": item.get("link_token") if item.get("role") == "user" else None,
             "recharge_out_trade_no": item.get("recharge_out_trade_no") if item.get("role") == "user" else None,
             "created_at": item.get("created_at"),
@@ -174,6 +177,7 @@ class AuthService:
             "name": "",
             "role": role,
             "key_hash": _hash_key(raw_key),
+            "raw_key": raw_key,
             "enabled": True,
             "quota": normalized_quota,
             "link_token": f"lk-{secrets.token_urlsafe(24)}" if role == "user" else "",
@@ -226,6 +230,7 @@ class AuthService:
                     if not next_key:
                         raise ValueError("新的专用密钥不能为空")
                     next_item["key_hash"] = _hash_key(next_key)
+                    next_item["raw_key"] = next_key
                 self._items[index] = next_item
                 self._save_item(next_item)
                 return self._public_item(next_item)

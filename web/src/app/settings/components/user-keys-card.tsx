@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Ban, CheckCircle2, Copy, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, Search, Trash2, UsersRound } from "lucide-react";
+import { Ban, CheckCircle2, Copy, KeyRound, LoaderCircle, Pencil, Plus, RefreshCw, RotateCcwKey, Search, Trash2, UsersRound } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +22,13 @@ import { createUserKey, deleteUserKey, fetchUserKeys, updateUserKey, type UserKe
 const PAGE_SIZE_OPTIONS = [20, 50, 100, 200] as const;
 
 type StatusFilter = "all" | "enabled" | "disabled" | "empty";
+
+function createRandomUserKey() {
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  const token = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return `sk-${token}`;
+}
 
 function formatDateTime(value?: string | null) {
   if (!value) {
@@ -218,6 +225,10 @@ export function UserKeysCard({ standalone = false }: { standalone?: boolean } = 
         ...(trimmedKey ? { key: trimmedKey } : {}),
       });
       setItems(data.items);
+      if (trimmedKey) {
+        setRevealedKey(trimmedKey);
+        setRevealedLinkToken(String(item.link_token || ""));
+      }
       setEditingItem(null);
       setEditKey("");
       toast.success(trimmedKey ? "用户密钥已更新" : "用户名称已更新");
@@ -234,6 +245,23 @@ export function UserKeysCard({ standalone = false }: { standalone?: boolean } = 
       toast.success("已复制到剪贴板");
     } catch {
       toast.error("复制失败，请手动复制");
+    }
+  };
+
+  const handleResetAndCopyKey = async (item: UserKey) => {
+    const nextKey = createRandomUserKey();
+    setItemPending(item.id, true);
+    try {
+      const data = await updateUserKey(item.id, { key: nextKey });
+      setItems(data.items);
+      await handleCopy(nextKey);
+      setRevealedKey(nextKey);
+      setRevealedLinkToken(String(item.link_token || ""));
+      toast.success("已重置并复制新的 API Key，旧 Key 已失效");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "重置 API Key 失败");
+    } finally {
+      setItemPending(item.id, false);
     }
   };
 
@@ -414,6 +442,27 @@ export function UserKeysCard({ standalone = false }: { standalone?: boolean } = 
                           }}
                         />
                       </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                        onClick={() => item.key ? void handleCopy(item.key) : void handleResetAndCopyKey(item)}
+                        disabled={isPending}
+                      >
+                        {isPending ? <LoaderCircle className="size-4 animate-spin" /> : <Copy className="size-4" />}
+                        复制 Key
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="h-9 rounded-xl border-stone-200 bg-white px-4 text-stone-700"
+                        onClick={() => void handleResetAndCopyKey(item)}
+                        disabled={isPending}
+                        title="重新生成 API Key；旧 Key 会立即失效"
+                      >
+                        {isPending ? <LoaderCircle className="size-4 animate-spin" /> : <RotateCcwKey className="size-4" />}
+                        重置 Key
+                      </Button>
                       <Button
                         type="button"
                         variant="outline"

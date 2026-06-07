@@ -304,6 +304,9 @@ def create_router() -> APIRouter:
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens or ids is required"})
         progress_id = str(uuid.uuid4())
+        progress_id, should_start = account_service.begin_refresh_progress(progress_id, len(access_tokens))
+        if not should_start:
+            return {"progress_id": progress_id, "reused": True}
 
         async def _do_refresh():
             try:
@@ -312,7 +315,7 @@ def create_router() -> APIRouter:
                 account_service.finish_refresh_progress(progress_id, error=str(exc))
 
         asyncio.create_task(_do_refresh())
-        return {"progress_id": progress_id}
+        return {"progress_id": progress_id, "reused": False}
 
     @router.get("/api/accounts/refresh/progress/{progress_id}")
     async def get_refresh_progress(progress_id: str, authorization: str | None = Header(default=None)):
@@ -321,12 +324,9 @@ def create_router() -> APIRouter:
         if progress is None:
             raise HTTPException(status_code=404, detail={"error": "progress not found"})
         result = progress.get("result")
-        if isinstance(result, dict):
+        if isinstance(result, dict) and "items" in result:
             progress = dict(progress)
-            progress["result"] = {
-                **result,
-                "items": compact_items(),
-            }
+            progress["result"] = {**result, "items": []}
         return progress
 
     @router.post("/api/accounts/update")
