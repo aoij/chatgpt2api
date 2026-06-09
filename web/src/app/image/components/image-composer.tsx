@@ -2,6 +2,7 @@
 
 import { ArrowUp, Check, ChevronDown, ImagePlus, LoaderCircle, Store, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type RefObject } from "react";
+import { createPortal } from "react-dom";
 
 import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
@@ -225,6 +226,21 @@ export function ImageComposer({
       window.removeEventListener("pointerdown", handlePointerDown);
     };
   }, [isSizeMenuOpen]);
+
+  useEffect(() => {
+    if (typeof document === "undefined" || !isMobileViewport || !isSizeMenuOpen) {
+      return;
+    }
+    const { body } = document;
+    const previousOverflow = body.style.overflow;
+    const previousOverscrollBehavior = body.style.overscrollBehavior;
+    body.style.overflow = "hidden";
+    body.style.overscrollBehavior = "contain";
+    return () => {
+      body.style.overflow = previousOverflow;
+      body.style.overscrollBehavior = previousOverscrollBehavior;
+    };
+  }, [isMobileViewport, isSizeMenuOpen]);
 
   const handleTextareaPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
@@ -567,65 +583,76 @@ export function ImageComposer({
                       </button>
                       {isSizeMenuOpen ? (
                         isMobileViewport ? (
-                          <div
-                            className="fixed inset-0 z-[120] flex min-h-[100svh] items-center justify-center bg-stone-950/35 px-4 py-8 backdrop-blur-[2px]"
-                            onClick={() => setIsSizeMenuOpen(false)}
-                          >
-                            <div
-                              ref={sizeMenuRef}
-                              role="dialog"
-                              aria-modal="true"
-                              aria-label="选择图片比例"
-                              className="w-full max-w-[360px] rounded-[30px] border border-white/80 bg-white p-3 shadow-[0_30px_100px_-40px_rgba(15,23,42,0.55)]"
-                              onClick={(event) => event.stopPropagation()}
-                              onMouseDown={(event) => event.stopPropagation()}
-                            >
-                              <div className="mb-2 flex items-center justify-between gap-3 px-2 py-1">
-                                <div>
-                                  <div className="text-base font-semibold text-stone-950">选择图片比例</div>
-                                  <div className="mt-0.5 text-xs text-stone-500">手机端使用弹窗选择，避免被底部工具栏遮挡</div>
-                                </div>
-                                <button
-                                  type="button"
-                                  className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-stone-100 text-stone-500"
+                          typeof document !== "undefined"
+                            ? createPortal(
+                                <div
+                                  className="fixed inset-0 z-[120] flex items-end justify-center bg-stone-950/35 px-3 pt-8 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] backdrop-blur-[2px]"
                                   onClick={() => setIsSizeMenuOpen(false)}
-                                  aria-label="关闭尺寸选择"
                                 >
-                                  <X className="size-4" />
-                                </button>
-                              </div>
-                              <div className="grid grid-cols-2 gap-2">
-                                {imageSizeOptions.map((option) => {
-                                  const active = option.value === imageSize;
-                                  return (
-                                    <button
-                                      key={option.label}
-                                      type="button"
-                                      className={cn(
-                                        "flex min-h-16 items-center justify-between gap-2 rounded-3xl border px-4 py-3 text-left transition",
-                                        active
-                                          ? "border-stone-950 bg-stone-950 text-white shadow-[0_16px_40px_-24px_rgba(15,23,42,0.7)]"
-                                          : "border-stone-200 bg-stone-50 text-stone-800 active:bg-stone-100",
-                                      )}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        onImageSizeChange(option.value);
-                                        setIsSizeMenuOpen(false);
-                                      }}
-                                    >
-                                      <span>
-                                        <span className="block text-sm font-semibold">{option.value || "默认"}</span>
-                                        <span className={cn("mt-1 block text-[11px]", active ? "text-white/70" : "text-stone-500")}>
-                                          {option.label.replace(option.value || "未指定", "").replace(/[（）]/g, "") || "不指定比例"}
-                                        </span>
-                                      </span>
-                                      {active ? <Check className="size-5 shrink-0" /> : null}
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          </div>
+                                  <div
+                                    ref={sizeMenuRef}
+                                    role="dialog"
+                                    aria-modal="true"
+                                    aria-label="选择图片比例"
+                                    className="flex max-h-[min(72dvh,560px)] w-full max-w-[420px] flex-col overflow-hidden rounded-[28px] border border-white/80 bg-white shadow-[0_30px_100px_-40px_rgba(15,23,42,0.55)]"
+                                    onClick={(event) => event.stopPropagation()}
+                                    onMouseDown={(event) => event.stopPropagation()}
+                                  >
+                                    <div className="shrink-0 border-b border-stone-100 px-4 pb-3 pt-4">
+                                      <div className="flex items-start justify-between gap-3">
+                                        <div className="min-w-0">
+                                          <div className="text-base font-semibold text-stone-950">选择图片比例</div>
+                                          <div className="mt-0.5 text-xs leading-5 text-stone-500">
+                                            手机端改为底部弹层，可上下滚动查看全部比例，不会再被底部工具栏遮挡
+                                          </div>
+                                        </div>
+                                        <button
+                                          type="button"
+                                          className="inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-stone-100 text-stone-500"
+                                          onClick={() => setIsSizeMenuOpen(false)}
+                                          aria-label="关闭尺寸选择"
+                                        >
+                                          <X className="size-4" />
+                                        </button>
+                                      </div>
+                                    </div>
+                                    <div className="min-h-0 overflow-y-auto px-3 py-3">
+                                      <div className="grid grid-cols-2 gap-2 pb-[calc(env(safe-area-inset-bottom)+0.25rem)]">
+                                        {imageSizeOptions.map((option) => {
+                                          const active = option.value === imageSize;
+                                          return (
+                                            <button
+                                              key={option.label}
+                                              type="button"
+                                              className={cn(
+                                                "flex min-h-[76px] items-center justify-between gap-2 rounded-3xl border px-4 py-3 text-left transition",
+                                                active
+                                                  ? "border-stone-950 bg-stone-950 text-white shadow-[0_16px_40px_-24px_rgba(15,23,42,0.7)]"
+                                                  : "border-stone-200 bg-stone-50 text-stone-800 active:bg-stone-100",
+                                              )}
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                onImageSizeChange(option.value);
+                                                setIsSizeMenuOpen(false);
+                                              }}
+                                            >
+                                              <span>
+                                                <span className="block text-sm font-semibold">{option.value || "默认"}</span>
+                                                <span className={cn("mt-1 block text-[11px]", active ? "text-white/70" : "text-stone-500")}>
+                                                  {option.label.replace(option.value || "未指定", "").replace(/[（）]/g, "") || "不指定比例"}
+                                                </span>
+                                              </span>
+                                              {active ? <Check className="size-5 shrink-0" /> : null}
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>,
+                                document.body,
+                              )
+                            : null
                         ) : (
                           <div
                             ref={sizeMenuRef}
