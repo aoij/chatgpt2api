@@ -1,8 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
+import json
+import os
 import time
+from threading import Thread
 from typing import Any
+from urllib import request as urllib_request
+from urllib.error import URLError
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
@@ -91,6 +96,66 @@ def _friendly_image_task_error(error: object) -> str:
 
 def _is_managed_image_url(value: object) -> bool:
     return isinstance(value, str) and "/images/" in value
+
+
+def _resolve_turing_sync_url(kind: str) -> str:
+    explicit_env = "CHATGPT2API_TURING_CONVERSATION_SYNC_URL" if kind == "conversation" else "CHATGPT2API_TURING_SYNC_URL"
+    explicit = str(os.getenv(explicit_env) or "").strip()
+    if explicit and kind == "conversation":
+        return explicit
+    base_url = str(os.getenv("CHATGPT2API_TURING_SYNC_URL") or "").strip()
+    if kind == "conversation":
+        if base_url.endswith("/delete-sync"):
+            return base_url[: -len("/delete-sync")] + "/conversation-sync"
+        if base_url.endswith("/user-sync"):
+            return base_url[: -len("/user-sync")] + "/conversation-sync"
+    return explicit or base_url
+
+
+def _post_turing_sync(sync_url: str, sync_key: str, payload: dict[str, Any], event: str) -> None:
+    try:
+        req = urllib_request.Request(
+            sync_url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "X-Admin-Key": sync_key,
+            },
+            method="POST",
+        )
+        with urllib_request.urlopen(req, timeout=3) as resp:
+            resp.read()
+    except (OSError, URLError, TimeoutError) as exc:
+        print(f"[turing-{event}] failed: {exc}")
+
+
+def _notify_turing_conversation_sync(identity: dict[str, object], conversation: dict[str, Any]) -> None:
+    if not isinstance(identity, dict) or identity.get("role") != "user" or not isinstance(conversation, dict):
+        return
+    sync_url = _resolve_turing_sync_url("conversation")
+    sync_key = str(os.getenv("CHATGPT2API_TURING_SYNC_KEY") or "").strip()
+    if not sync_url or not sync_key:
+        return
+    key_id = str(identity.get("id") or identity.get("subject_id") or "").strip()
+    if not key_id:
+        return
+    conversation_id = str(conversation.get("id") or "").strip()
+    if not conversation_id:
+        return
+    payload = {
+        "chatgptKeyId": key_id,
+        "conversationId": conversation_id,
+        "conversation": conversation,
+    }
+    Thread(target=_post_turing_sync, args=(sync_url, sync_key, payload, "conversation-sync"), daemon=True).start()
+
+
+def _notify_turing_delete_sync(payload: dict[str, Any]) -> None:
+    sync_url = _resolve_turing_sync_url("delete")
+    sync_key = str(os.getenv("CHATGPT2API_TURING_SYNC_KEY") or "").strip()
+    if not sync_url or not sync_key:
+        return
+    _post_turing_sync(sync_url, sync_key, payload, "delete-sync")
 
 
 def _sync_conversations_with_tasks(identity: dict[str, object], items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
@@ -246,7 +311,10 @@ def _sync_conversations_with_tasks(identity: dict[str, object], items: list[dict
 def _sync_and_save_conversations(identity: dict[str, object], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     synced_items, changed = _sync_conversations_with_tasks(identity, items)
     if changed:
-        return image_conversation_service.save_many(identity, synced_items)
+        saved_items = image_conversation_service.save_many(identity, synced_items)
+        for item in saved_items[:MAX_RECENT_CONVERSATION_SYNC_ITEMS]:
+            _notify_turing_conversation_sync(identity, item)
+        return saved_items
     return synced_items
 
 
@@ -262,6 +330,7 @@ def _sync_single_conversation(identity: dict[str, object], conversation_id: str)
         return None
     if changed:
         image_conversation_service.save(identity, synced)
+        _notify_turing_conversation_sync(identity, synced)
     return synced
 
 
@@ -322,6 +391,8 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         def _save_many() -> list[dict[str, Any]]:
             items = _sync_and_save_conversations(identity, image_conversation_service.save_many(identity, body.items))
+            for item in items[:MAX_RECENT_CONVERSATION_SYNC_ITEMS]:
+                _notify_turing_conversation_sync(identity, item)
             return image_conversation_service.summarize_items(items)
 
         return {"items": await run_in_threadpool(_save_many)}
@@ -340,6 +411,7 @@ def create_router() -> APIRouter:
             item = _sync_single_conversation(identity, conversation["id"])
             if item is None:
                 raise HTTPException(status_code=404, detail={"error": "conversation not found"})
+            _notify_turing_conversation_sync(identity, item)
             summary = image_conversation_service.summarize_items([item])
             return {"item": item, "summary": summary[0] if summary else None}
 
@@ -350,6 +422,10 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         def _delete() -> list[dict[str, Any]]:
             items = image_conversation_service.delete(identity, conversation_id)
+            _notify_turing_delete_sync({
+                "conversationId": conversation_id,
+                "paths": [],
+            })
             return image_conversation_service.summarize_items(items)
 
         return {"items": await run_in_threadpool(_delete)}
@@ -357,7 +433,14 @@ def create_router() -> APIRouter:
     @router.delete("/api/image-conversations")
     async def clear_image_conversations(authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
+        existing_items = await run_in_threadpool(image_conversation_service.list, identity)
         await run_in_threadpool(image_conversation_service.clear, identity)
+        for item in existing_items:
+            if isinstance(item, dict) and item.get("id"):
+                await run_in_threadpool(_notify_turing_delete_sync, {
+                    "conversationId": str(item.get("id") or ""),
+                    "paths": [],
+                })
         return {"items": []}
 
     @router.post("/api/image-tasks/generations")

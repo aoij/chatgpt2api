@@ -67,6 +67,25 @@ class LoginRequest(BaseModel):
     password: str = ""
 
 
+def _session_payload(identity: dict[str, object]) -> dict[str, object]:
+    item = auth_service.get_public_key(str(identity.get("id") or ""))
+    if item is None:
+        item = identity
+    return {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "username": item.get("username"),
+        "role": item.get("role"),
+        "enabled": item.get("enabled", True),
+        "quota": item.get("quota"),
+        "open_id": item.get("open_id"),
+        "avatar_url": item.get("avatar_url"),
+        "selected_account_id": item.get("selected_account_id"),
+        "auth_mode": identity.get("auth_mode", "key"),
+        "scope": identity.get("scope", "full"),
+    }
+
+
 def _effective_image_uploader(identity: dict[str, object], uploader: str = "") -> str:
     if identity.get("role") == "admin":
         return uploader.strip()
@@ -119,10 +138,18 @@ def create_router(app_version: str) -> APIRouter:
     async def login(body: LoginRequest | None = None, authorization: str | None = Header(default=None)):
         session_key = ""
         if body is not None and (body.username or body.password):
-            identity = authenticate_admin_password(body.username, body.password)
-            if identity is None:
-                raise HTTPException(status_code=401, detail={"error": "username or password is invalid"})
-            session_key = create_admin_session_token(str(identity.get("name") or body.username))
+            candidate_username = str(body.username or "").strip()
+            expected_admin_username = str(config.admin_username or "").strip()
+            if expected_admin_username and candidate_username == expected_admin_username:
+                identity = authenticate_admin_password(candidate_username, body.password)
+                if identity is None:
+                    raise HTTPException(status_code=401, detail={"error": "username or password is invalid"})
+                session_key = create_admin_session_token(str(identity.get("name") or candidate_username))
+            else:
+                identity = auth_service.authenticate_password(candidate_username, str(body.password or ""))
+                if identity is None:
+                    raise HTTPException(status_code=401, detail={"error": "username or password is invalid"})
+                session_key = str(identity.get("link_token") or identity.get("key") or "").strip()
         else:
             identity = require_identity(authorization)
         result = {
@@ -139,21 +166,15 @@ def create_router(app_version: str) -> APIRouter:
             result["key"] = session_key
         return result
 
+    @router.get("/auth/session")
+    async def get_session(authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        return _session_payload(identity)
+
     @router.get("/api/auth/me")
     async def get_me(authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        item = auth_service.get_public_key(str(identity.get("id") or ""))
-        if item is None:
-            item = identity
-        return {
-            "id": item.get("id"),
-            "name": item.get("name"),
-            "role": item.get("role"),
-            "enabled": item.get("enabled", True),
-            "quota": item.get("quota"),
-            "auth_mode": identity.get("auth_mode", "key"),
-            "scope": identity.get("scope", "full"),
-        }
+        return _session_payload(identity)
 
     @router.get("/api/public/config")
     async def get_public_config():
@@ -204,13 +225,20 @@ def create_router(app_version: str) -> APIRouter:
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        return delete_images(
+        result = delete_images(
             body.paths,
             start_date=body.start_date.strip(),
             end_date=body.end_date.strip(),
             uploader=_effective_image_uploader(identity, body.uploader),
             all_matching=body.all_matching,
         )
+        if body.paths:
+            try:
+                from api.image_tasks import _notify_turing_delete_sync
+                await run_in_threadpool(_notify_turing_delete_sync, {"paths": body.paths})
+            except Exception:
+                pass
+        return result
 
     @router.get("/api/images/download")
     async def download_image(

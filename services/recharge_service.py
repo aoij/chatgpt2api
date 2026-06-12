@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from services.auth_service import auth_service
 from services.config import DATA_DIR, config
+from services.state_store import load_json_state, save_json_state
 
 
 PAY_TYPE_LABELS = {
@@ -84,20 +85,12 @@ def _money_text(value: Decimal) -> str:
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = load_json_state("recharge_orders", {})
     return data if isinstance(data, dict) else {}
 
 
 def _write_json_object(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp_path, path)
+    save_json_state("recharge_orders", data)
 
 
 def generate_epay_sign(params: dict[str, object], key: str) -> str:

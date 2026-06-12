@@ -68,6 +68,7 @@ docker-compose up -d
 - `json` - 本地 JSON 文件（默认）
 - `sqlite` - 本地 SQLite 数据库
 - `postgres` - 外部 PostgreSQL（需配置 `DATABASE_URL`）
+- `mysql` - 外部 MySQL（需配置 `DATABASE_URL`，推荐 `mysql+pymysql://...`）
 - `git` - Git 私有仓库（需配置 `GIT_REPO_URL` 和 `GIT_TOKEN`）
 
 示例：使用 PostgreSQL
@@ -77,6 +78,30 @@ environment:
   - STORAGE_BACKEND=postgres
   - DATABASE_URL=postgresql://user:password@host:5432/dbname
 ```
+
+示例：使用 MySQL
+
+```yaml
+environment:
+  - STORAGE_BACKEND=mysql
+  - DATABASE_URL=mysql+pymysql://root:password@host.docker.internal:5019/chatgpt2api_aoij
+```
+
+如果服务跑在 Docker 容器里，而 MySQL 跑在宿主机 Docker 映射端口上，不要把 `DATABASE_URL` 写成容器内的 `127.0.0.1:5019`；
+应优先使用 `host.docker.internal:5019`（或宿主机 IP + 端口）。
+
+### 全量迁移到 MySQL
+
+项目提供了全量迁移脚本，可把账号、鉴权密钥、图片会话、图片任务、配置类 JSON 文档和日志统一迁移到 MySQL：
+
+```bash
+python scripts/migrate_all_to_mysql.py \
+  --data-dir ./data \
+  --database-url mysql+pymysql://root:password@127.0.0.1:5019/chatgpt2api_aoij \
+  --create-database
+```
+
+迁移前会默认打包 `data/` 备份到 `backup/mysql-migrations/`。
 
 ## 功能
 

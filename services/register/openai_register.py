@@ -25,6 +25,7 @@ from services.config import config as app_config
 from services.cpa_service import sync_registered_account_to_pools
 from services.sub2api_service import sync_registered_account_to_sub2api
 from services.register import mail_provider
+from services.state_store import load_json_state
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_dir = Path(__file__).resolve().parent
@@ -41,7 +42,7 @@ config = {
 }
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
-    saved_config = json.loads(register_config_file.read_text(encoding="utf-8"))
+    saved_config = load_json_state("register_config", {})
     config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads") if key in saved_config})
 except Exception:
     pass

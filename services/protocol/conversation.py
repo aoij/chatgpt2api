@@ -301,6 +301,7 @@ class ConversationRequest:
     response_format: str = "b64_json"
     base_url: str | None = None
     uploader: dict[str, Any] | None = None
+    selected_account_id: str = ""
     message_as_error: bool = False
     defer_local_save: bool = False
 
@@ -897,7 +898,11 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             try:
                 plan_type, _ = split_image_model(request.model)
                 codex_model = is_codex_image_model(request.model)
-                token = account_service.get_available_access_token(
+                selected_account_id = str(request.selected_account_id or "").strip()
+                selected_tokens = account_service.tokens_for_ids([selected_account_id]) if selected_account_id else []
+                if selected_account_id and not selected_tokens:
+                    raise RuntimeError(f"selected image account not found: {selected_account_id}")
+                token = selected_tokens[0] if selected_tokens else account_service.get_available_access_token(
                     plan_type=plan_type,
                     source_type="codex" if codex_model else None,
                     plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,

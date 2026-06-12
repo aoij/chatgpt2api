@@ -16,6 +16,7 @@ type ImageThumbnailProps = {
 };
 
 const MAX_IMAGE_RETRY_COUNT = 2;
+const THUMBNAIL_FALLBACK_DELAY_MS = 2500;
 
 function appendImageRetryQuery(src: string, retry: number) {
   if (!src || src.startsWith("data:") || src.startsWith("blob:")) {
@@ -62,21 +63,38 @@ export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageCl
   const [currentSrc, setCurrentSrc] = useState(initialSrc);
   const retryCountRef = useRef(0);
   const retryTimerRef = useRef<number | null>(null);
+  const fallbackTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    retryCountRef.current = 0;
-    if (retryTimerRef.current != null) {
-      window.clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = null;
-    }
-    setCurrentSrc(initialSrc);
-    return () => {
+    const clearRetryTimer = () => {
       if (retryTimerRef.current != null) {
         window.clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
     };
-  }, [initialSrc]);
+    const clearFallbackTimer = () => {
+      if (fallbackTimerRef.current != null) {
+        window.clearTimeout(fallbackTimerRef.current);
+        fallbackTimerRef.current = null;
+      }
+    };
+    retryCountRef.current = 0;
+    clearRetryTimer();
+    clearFallbackTimer();
+    setCurrentSrc(initialSrc);
+    const cleanInitial = stripImageRetryQuery(initialSrc);
+    const cleanOriginal = stripImageRetryQuery(src);
+    if (fallbackToOriginal && cleanInitial !== cleanOriginal) {
+      fallbackTimerRef.current = window.setTimeout(() => {
+        fallbackTimerRef.current = null;
+        setCurrentSrc(src);
+      }, THUMBNAIL_FALLBACK_DELAY_MS);
+    }
+    return () => {
+      clearRetryTimer();
+      clearFallbackTimer();
+    };
+  }, [fallbackToOriginal, initialSrc, src]);
 
   const { onError: externalOnError, onLoad: externalOnLoad, ...restImgProps } = imgProps || {};
 
@@ -90,15 +108,35 @@ export function ImageThumbnail({ src, thumbnailSrc, alt = "", className, imageCl
         decoding="async"
         {...restImgProps}
         onLoad={(event) => {
+          const cleanCurrent = stripImageRetryQuery(currentSrc);
+          const cleanInitial = stripImageRetryQuery(initialSrc);
+          const cleanOriginal = stripImageRetryQuery(src);
+          if (
+            fallbackToOriginal
+            && cleanCurrent === cleanInitial
+            && cleanCurrent !== cleanOriginal
+            && (event.currentTarget.naturalWidth <= 0 || event.currentTarget.naturalHeight <= 0)
+          ) {
+            setCurrentSrc(src);
+            return;
+          }
           retryCountRef.current = 0;
           if (retryTimerRef.current != null) {
             window.clearTimeout(retryTimerRef.current);
             retryTimerRef.current = null;
           }
+          if (fallbackTimerRef.current != null) {
+            window.clearTimeout(fallbackTimerRef.current);
+            fallbackTimerRef.current = null;
+          }
           externalOnLoad?.(event);
         }}
         onError={(event) => {
           externalOnError?.(event);
+          if (fallbackTimerRef.current != null) {
+            window.clearTimeout(fallbackTimerRef.current);
+            fallbackTimerRef.current = null;
+          }
           const cleanCurrent = stripImageRetryQuery(currentSrc);
           const cleanInitial = stripImageRetryQuery(initialSrc);
           const cleanOriginal = stripImageRetryQuery(src);

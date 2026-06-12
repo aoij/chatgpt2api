@@ -58,7 +58,9 @@ function isImageScopeRoute(pathname: string) {
     return pathname === "/image"
         || pathname.startsWith("/image/")
         || pathname === "/image-manager"
-        || pathname.startsWith("/image-manager/");
+        || pathname.startsWith("/image-manager/")
+        || pathname === "/profile"
+        || pathname.startsWith("/profile/");
 }
 
 export async function consumeShareKeyFromUrl() {

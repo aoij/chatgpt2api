@@ -69,6 +69,12 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
     def test_delete_images_only_removes_matching_uploader_when_paths_are_selected(self) -> None:
         root = make_test_dir("image-delete-permission")
         deleted_paths: list[Path] = []
+        metadata_store = {
+            "images": {
+                "2026/04/30/user-1.png": {"uploader_id": "user-1", "uploader_name": "Alice"},
+                "2026/04/30/user-2.png": {"uploader_id": "user-2", "uploader_name": "Bob"},
+            }
+        }
 
         def fake_unlink(path: Path) -> None:
             deleted_paths.append(path.resolve())
@@ -84,14 +90,6 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
             image_one.write_bytes(b"one")
             image_two.write_bytes(b"two")
 
-            metadata_path = root / "image_metadata.json"
-            metadata_path.write_text(json.dumps({
-                "images": {
-                    "2026/04/30/user-1.png": {"uploader_id": "user-1", "uploader_name": "Alice"},
-                    "2026/04/30/user-2.png": {"uploader_id": "user-2", "uploader_name": "Bob"},
-                }
-            }, ensure_ascii=False), encoding="utf-8")
-
             fake_config = SimpleNamespace(
                 images_dir=images_dir,
                 cleanup_old_images=lambda: None,
@@ -99,7 +97,8 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
 
             with (
                 mock.patch.object(image_service_module, "config", fake_config),
-                mock.patch.object(image_service_module, "_METADATA_FILE", metadata_path),
+                mock.patch.object(image_service_module, "load_json_state", side_effect=lambda doc_key, default: json.loads(json.dumps(metadata_store)) if doc_key == "image_metadata" else default),
+                mock.patch.object(image_service_module, "save_json_state", side_effect=lambda doc_key, payload: metadata_store.update(payload if isinstance(payload, dict) else {})),
             ):
                 result = image_service_module.delete_images(
                     paths=["2026/04/30/user-1.png", "2026/04/30/user-2.png"],
@@ -114,6 +113,12 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
     def test_download_images_respects_uploader_and_returns_full_size_jpeg_zip(self) -> None:
         root = make_test_dir("image-download-permission")
         zip_cache_path = root / "image_downloads" / "_zips" / "test-cache.zip"
+        metadata_store = {
+            "images": {
+                "2026/04/30/user-1.png": {"uploader_id": "user-1", "uploader_name": "Alice"},
+                "2026/04/30/user-2.png": {"uploader_id": "user-2", "uploader_name": "Bob"},
+            }
+        }
         with mock.patch.object(image_service_module, "_cleanup_empty_dirs", lambda _root: None):
             images_dir = root / "images"
             image_one = images_dir / "2026" / "04" / "30" / "user-1.png"
@@ -121,14 +126,6 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
             image_one.parent.mkdir(parents=True, exist_ok=True)
             Image.new("RGB", (16, 16), (255, 0, 0)).save(image_one)
             Image.new("RGB", (16, 16), (0, 0, 255)).save(image_two)
-
-            metadata_path = root / "image_metadata.json"
-            metadata_path.write_text(json.dumps({
-                "images": {
-                    "2026/04/30/user-1.png": {"uploader_id": "user-1", "uploader_name": "Alice"},
-                    "2026/04/30/user-2.png": {"uploader_id": "user-2", "uploader_name": "Bob"},
-                }
-            }, ensure_ascii=False), encoding="utf-8")
 
             fake_config = SimpleNamespace(
                 images_dir=images_dir,
@@ -138,8 +135,10 @@ class ImageServiceDeletePermissionTests(unittest.TestCase):
 
             with (
                 mock.patch.object(image_service_module, "config", fake_config),
-                mock.patch.object(image_service_module, "_METADATA_FILE", metadata_path),
+                mock.patch.object(image_service_module, "load_json_state", side_effect=lambda doc_key, default: json.loads(json.dumps(metadata_store)) if doc_key == "image_metadata" else default),
+                mock.patch.object(image_service_module, "save_json_state", side_effect=lambda doc_key, payload: metadata_store.update(payload if isinstance(payload, dict) else {})),
                 mock.patch.object(image_service_module, "_download_zip_path_for", return_value=zip_cache_path),
+                mock.patch.object(image_service_module, "cleanup_expired_images_if_due", return_value={"removed": 0, "thumbnails_removed": 0, "download_cache_removed": 0, "metadata_removed": 0}),
             ):
                 single = image_service_module.build_image_download("2026/04/30/user-1.png", uploader="user-1")
                 denied = image_service_module.build_image_download("2026/04/30/user-2.png", uploader="user-1")

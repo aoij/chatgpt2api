@@ -18,6 +18,7 @@ from services.log_service import (
 )
 from services.proxy_service import proxy_settings
 from services.storage.base import StorageBackend
+from services.state_store import load_json_state, save_json_state
 from utils.helper import anonymize_token
 
 
@@ -239,10 +240,7 @@ class AccountService:
         self._public_compact_cache = None
 
     def _load_invalid_tokens(self) -> set[str]:
-        try:
-            raw = json.loads(self._invalid_tokens_path.read_text(encoding="utf-8"))
-        except Exception:
-            return set()
+        raw = load_json_state("invalid_image_tokens", {})
         items = raw.get("tokens") if isinstance(raw, dict) else raw
         if not isinstance(items, list):
             return set()
@@ -250,11 +248,7 @@ class AccountService:
 
     def _save_invalid_tokens_locked(self) -> None:
         try:
-            self._invalid_tokens_path.parent.mkdir(parents=True, exist_ok=True)
-            self._invalid_tokens_path.write_text(
-                json.dumps({"tokens": sorted(self._invalid_tokens)}, ensure_ascii=False, separators=(",", ":")) + "\n",
-                encoding="utf-8",
-            )
+            save_json_state("invalid_image_tokens", {"tokens": sorted(self._invalid_tokens)})
         except Exception as exc:
             print(f"[account-invalid-cache] save failed: {exc}")
 

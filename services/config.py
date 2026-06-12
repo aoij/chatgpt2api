@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 
 from services.storage.base import StorageBackend
+from services.state_store import load_json_state, save_json_state
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
@@ -470,12 +471,12 @@ class ConfigStore:
 
 
 def load_backup_state() -> dict[str, object]:
-    return _normalize_backup_state(_read_json_object(BACKUP_STATE_FILE, name="backup_state.json"))
+    return _normalize_backup_state(load_json_state("backup_state", {}))
 
 
 def save_backup_state(state: dict[str, object]) -> dict[str, object]:
     normalized = _normalize_backup_state(state)
-    BACKUP_STATE_FILE.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    save_json_state("backup_state", normalized)
     return normalized
 
 

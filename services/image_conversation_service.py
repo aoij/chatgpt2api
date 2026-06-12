@@ -15,6 +15,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool, StaticPool
 
 from services.config import DATA_DIR
+from services.state_store import load_json_state, save_json_state
 from services.storage.database_storage import Base, ImageConversationModel
 
 MAX_CONVERSATIONS_PER_OWNER = 80
@@ -394,12 +395,7 @@ class ImageConversationService:
         return result
 
     def _load_deleted_from_disk(self) -> dict[str, dict[str, float]]:
-        if not self.deleted_path.exists():
-            return {}
-        try:
-            data = json.loads(self.deleted_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+        data = load_json_state("image_conversation_deletions", {})
         owners = data.get("owners") if isinstance(data, dict) else data
         if not isinstance(owners, dict):
             return {}
@@ -423,13 +419,7 @@ class ImageConversationService:
         return result
 
     def _save_deleted_locked(self) -> None:
-        self.deleted_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.deleted_path.with_suffix(self.deleted_path.suffix + ".tmp")
-        tmp_path.write_text(
-            json.dumps({"owners": self._deleted}, ensure_ascii=False, separators=(",", ":")) + "\n",
-            encoding="utf-8",
-        )
-        tmp_path.replace(self.deleted_path)
+        save_json_state("image_conversation_deletions", {"owners": self._deleted})
 
     def _mark_deleted_locked(self, owner: str, conversation_ids: list[str]) -> None:
         ids = [_clean(conversation_id) for conversation_id in conversation_ids if _clean(conversation_id)]

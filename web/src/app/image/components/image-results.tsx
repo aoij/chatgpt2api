@@ -306,6 +306,7 @@ const ImageTurnBlock = memo(function ImageTurnBlock({
                                 src={imageSrc}
                                 thumbnailSrc={image.url ? imagePreviewSrc : undefined}
                                 alt={`Generated result ${index + 1}`}
+                                fallbackToOriginal={Boolean(image.url)}
                                 className="block h-full w-full bg-stone-50 sm:h-auto"
                                 imageClassName="block h-full w-full object-cover transition duration-200 group-hover:brightness-90 sm:h-auto sm:object-contain"
                                 imgProps={{

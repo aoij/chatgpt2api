@@ -47,6 +47,12 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode((value + padding).encode("ascii"))
 
 
+def _safe_compare_text(left: object, right: object) -> bool:
+    left_text = str(left or "")
+    right_text = str(right or "")
+    return hmac.compare_digest(left_text.encode("utf-8"), right_text.encode("utf-8"))
+
+
 def authenticate_admin_password(username: str, password: str) -> dict[str, object] | None:
     expected_username = str(config.admin_username or "").strip()
     expected_password = str(config.admin_password or "").strip()
@@ -54,9 +60,9 @@ def authenticate_admin_password(username: str, password: str) -> dict[str, objec
     candidate_password = str(password or "").strip()
     if not expected_username or not expected_password:
         return None
-    if not hmac.compare_digest(candidate_username, expected_username):
+    if not _safe_compare_text(candidate_username, expected_username):
         return None
-    if not hmac.compare_digest(candidate_password, expected_password):
+    if not _safe_compare_text(candidate_password, expected_password):
         return None
     return {"id": "admin", "name": expected_username, "role": "admin", "auth_mode": "password", "scope": "full"}
 
@@ -105,7 +111,7 @@ def _admin_session_identity(token: str) -> dict[str, object] | None:
         expires_at = 0
     if expires_at < int(time.time()):
         return None
-    if not hmac.compare_digest(username, expected_username):
+    if not _safe_compare_text(username, expected_username):
         return None
     return {"id": "admin", "name": expected_username, "role": "admin", "auth_mode": "password_session", "scope": "full"}
 

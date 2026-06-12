@@ -23,6 +23,7 @@ const adminNavItems = [
 const userNavItems = [
   { href: "/image", label: "画图" },
   { href: "/image-manager", label: "图片管理" },
+  { href: "/profile", label: "API 使用" },
 ];
 
 export function TopNav() {

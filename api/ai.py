@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -96,6 +96,10 @@ def _uploader_from_identity(identity: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _selected_account_id(identity: dict[str, object]) -> str:
+    return str(identity.get("selected_account_id") or "").strip()
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -117,6 +121,7 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
         payload["uploader"] = _uploader_from_identity(identity)
+        payload["selected_account_id"] = _selected_account_id(identity)
         reserved_quota = 0
         try:
             reserved_quota = auth_service.reserve_image_quota(identity, body.n)
@@ -156,6 +161,7 @@ def create_router() -> APIRouter:
         payload["images"] = await read_image_sources(image_sources)
         payload["base_url"] = resolve_image_base_url(request)
         payload["uploader"] = _uploader_from_identity(identity)
+        payload["selected_account_id"] = _selected_account_id(identity)
         try:
             result = await call.run(openai_v1_image_edit.handle, payload)
             if isinstance(result, dict):

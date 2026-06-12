@@ -22,6 +22,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     defer_local_save = bool(body.get("defer_local_save")) and response_format != "b64_json"
     base_url = str(body.get("base_url") or "") or None
     uploader = body.get("uploader") if isinstance(body.get("uploader"), dict) else None
+    selected_account_id = str(body.get("selected_account_id") or "")
     outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
@@ -31,6 +32,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         response_format=response_format,
         base_url=base_url,
         uploader=uploader,
+        selected_account_id=selected_account_id,
         message_as_error=True,
         defer_local_save=defer_local_save,
     ))

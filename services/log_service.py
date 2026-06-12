@@ -14,6 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
+from services.config import config
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
@@ -65,10 +66,22 @@ class LogService:
             "summary": summary,
             "detail": detail or data,
         }
+        backend = config.get_storage_backend()
+        try:
+            backend.append_log(item)
+        except Exception:
+            pass
         with self.path.open("a", encoding="utf-8") as file:
             file.write(self._serialize_item(item) + "\n")
 
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        backend = config.get_storage_backend()
+        try:
+            items = backend.load_logs(type=type, start_date=start_date, end_date=end_date, limit=limit)
+            if items:
+                return items
+        except Exception:
+            pass
         if not self.path.exists():
             return []
         items: list[dict[str, Any]] = []
@@ -86,6 +99,13 @@ class LogService:
 
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
+        backend = config.get_storage_backend()
+        try:
+            removed = backend.delete_logs(list(target_ids))
+            if removed > 0:
+                return {"removed": removed}
+        except Exception:
+            pass
         if not self.path.exists() or not target_ids:
             return {"removed": 0}
         lines = self.path.read_text(encoding="utf-8").splitlines()
@@ -110,6 +130,13 @@ class LogService:
         normalized_key_id = str(key_id or "").strip()
         normalized_task_id = str(task_id or "").strip()
         normalized_urls = [str(url or "").strip() for url in urls if str(url or "").strip()]
+        backend = config.get_storage_backend()
+        try:
+            updated = backend.update_log_call_urls(normalized_key_id, normalized_task_id, normalized_urls)
+            if updated:
+                return True
+        except Exception:
+            pass
         if not self.path.exists() or not normalized_key_id or not normalized_task_id or not normalized_urls:
             return False
         lines = self.path.read_text(encoding="utf-8").splitlines()

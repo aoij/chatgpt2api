@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import uuid
+
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
@@ -30,6 +33,12 @@ from services.sub2api_service import (
 class UserKeyCreateRequest(BaseModel):
     name: str = ""
     quota: int | None = 0
+    key: str = ""
+    open_id: str = ""
+    avatar_url: str = ""
+    selected_account_id: str = ""
+    username: str = ""
+    password: str = ""
 
 
 class UserKeyUpdateRequest(BaseModel):
@@ -37,6 +46,34 @@ class UserKeyUpdateRequest(BaseModel):
     enabled: bool | None = None
     quota: int | None = None
     key: str | None = None
+    open_id: str | None = None
+    avatar_url: str | None = None
+    selected_account_id: str | None = None
+    username: str | None = None
+    password: str | None = None
+
+
+class MiniAppBindRequest(BaseModel):
+    name: str = ""
+    quota: int | None = 0
+    open_id: str = ""
+    avatar_url: str = ""
+    enabled: bool | None = True
+    selected_account_id: str = ""
+    username: str = ""
+    password: str = ""
+
+
+class MiniAppUpdateRequest(BaseModel):
+    key_id: str = ""
+    name: str | None = None
+    enabled: bool | None = None
+    quota: int | None = None
+    open_id: str | None = None
+    avatar_url: str | None = None
+    selected_account_id: str | None = None
+    username: str | None = None
+    password: str | None = None
 
 
 class AccountCreateRequest(BaseModel):
@@ -116,6 +153,23 @@ def _unique_tokens(tokens: list[str]) -> list[str]:
     return list(dict.fromkeys(str(token or "").strip() for token in tokens if str(token or "").strip()))
 
 
+def _user_key_updates_from_body(body: UserKeyUpdateRequest | MiniAppBindRequest | MiniAppUpdateRequest) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in {
+            "name": getattr(body, "name", None),
+            "enabled": getattr(body, "enabled", None),
+            "quota": getattr(body, "quota", None),
+            "open_id": getattr(body, "open_id", None),
+            "avatar_url": getattr(body, "avatar_url", None),
+            "selected_account_id": getattr(body, "selected_account_id", None),
+            "username": getattr(body, "username", None),
+            "password": getattr(body, "password", None),
+        }.items()
+        if value is not None
+    }
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -130,7 +184,17 @@ def create_router() -> APIRouter:
     @router.post("/api/auth/users")
     async def create_user_key(body: UserKeyCreateRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        item, raw_key = auth_service.create_key(role="user", name=body.name, quota=body.quota)
+        item, raw_key = auth_service.create_key(
+            role="user",
+            name=body.name,
+            quota=body.quota,
+            key=body.key,
+            open_id=body.open_id,
+            avatar_url=body.avatar_url,
+            selected_account_id=body.selected_account_id,
+            username=body.username,
+            password=body.password,
+        )
         return {"item": item, "key": raw_key, "items": auth_service.list_keys(role="user")}
 
     @router.post("/api/auth/users/{key_id}")
@@ -147,6 +211,11 @@ def create_router() -> APIRouter:
                 "enabled": body.enabled,
                 "quota": body.quota,
                 "key": body.key,
+                "open_id": body.open_id,
+                "avatar_url": body.avatar_url,
+                "selected_account_id": body.selected_account_id,
+                "username": body.username,
+                "password": body.password,
             }.items()
             if value is not None
         }
@@ -166,6 +235,52 @@ def create_router() -> APIRouter:
         if not auth_service.delete_key(key_id, role="user"):
             raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
         return {"items": auth_service.list_keys(role="user")}
+
+    @router.post("/api/admin/miniapp/bind")
+    async def bind_miniapp_user_key(body: MiniAppBindRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        existing = auth_service.get_key_by_open_id(body.open_id)
+        if existing is not None:
+            try:
+                item = auth_service.update_key(str(existing.get("id") or ""), _user_key_updates_from_body(body), role="user")
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+            if item is None:
+                raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
+            return {"item": item, "key": item.get("link_token"), "items": auth_service.list_keys(role="user")}
+        try:
+            item, raw_key = auth_service.create_key(
+                role="user",
+                name=body.name,
+                quota=body.quota,
+                open_id=body.open_id,
+                avatar_url=body.avatar_url,
+                selected_account_id=body.selected_account_id,
+                username=body.username,
+                password=body.password,
+            )
+            if body.enabled is False:
+                item = auth_service.update_key(str(item.get("id") or ""), {"enabled": False}, role="user") or item
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        return {"item": item, "key": item.get("link_token") or raw_key, "items": auth_service.list_keys(role="user")}
+
+    @router.post("/api/admin/miniapp/update")
+    async def update_miniapp_user_key(body: MiniAppUpdateRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        key_id = str(body.key_id or "").strip()
+        if not key_id:
+            raise HTTPException(status_code=400, detail={"error": "key_id is required"})
+        updates = _user_key_updates_from_body(body)
+        if not updates:
+            raise HTTPException(status_code=400, detail={"error": "还没有检测到改动，请修改后再保存"})
+        try:
+            item = auth_service.update_key(key_id, updates, role="user")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        if item is None:
+            raise HTTPException(status_code=404, detail={"error": "这条用户密钥不存在，可能已经被删除"})
+        return {"item": item, "items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
     async def get_accounts(
@@ -300,8 +415,31 @@ def create_router() -> APIRouter:
             access_tokens = account_service.list_tokens()
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens or ids is required"})
-        result = account_service.refresh_accounts(access_tokens)
-        return {**result, "items": compact_items()}
+        progress_id = str(uuid.uuid4())
+        progress_id, should_start = account_service.begin_refresh_progress(progress_id, len(access_tokens))
+        if not should_start:
+            return {"progress_id": progress_id, "reused": True}
+
+        async def _do_refresh():
+            try:
+                await run_in_threadpool(account_service.refresh_accounts, access_tokens, progress_id)
+            except Exception as exc:
+                account_service.finish_refresh_progress(progress_id, error=str(exc))
+
+        asyncio.create_task(_do_refresh())
+        return {"progress_id": progress_id, "reused": False}
+
+    @router.get("/api/accounts/refresh/progress/{progress_id}")
+    async def get_refresh_progress(progress_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        progress = account_service.get_refresh_progress(progress_id)
+        if progress is None:
+            raise HTTPException(status_code=404, detail={"error": "progress not found"})
+        result = progress.get("result")
+        if isinstance(result, dict) and "items" in result:
+            progress = dict(progress)
+            progress["result"] = {**result, "items": []}
+        return progress
 
     @router.post("/api/accounts/update")
     async def update_account(body: AccountUpdateRequest, authorization: str | None = Header(default=None)):

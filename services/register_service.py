@@ -12,6 +12,7 @@ from pathlib import Path
 from services.account_service import account_service
 from services.config import DATA_DIR
 from services.register import openai_register
+from services.state_store import load_json_state, save_json_state
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
@@ -59,9 +60,12 @@ def _normalize(raw: dict) -> dict:
 
 
 def _read_json_object(path: Path) -> dict:
-    if not path.exists() or path.stat().st_size <= 0:
-        raise ValueError(f"{path.name} is empty")
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    if path == REGISTER_FILE:
+        raw = load_json_state("register_config", {})
+    else:
+        if not path.exists() or path.stat().st_size <= 0:
+            raise ValueError(f"{path.name} is empty")
+        raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError(f"{path.name} must be a JSON object")
     return raw
@@ -132,6 +136,7 @@ class RegisterService:
     def _save(self) -> None:
         payload = {**self._config, "logs": self._logs[-300:]}
         content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+        save_json_state("register_config", payload)
         _atomic_write_text(self._store_file, content)
         try:
             _atomic_write_text(REGISTER_LAST_GOOD_FILE, content)

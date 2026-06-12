@@ -76,6 +76,24 @@ type AccountRefreshResponse = {
   errors: Array<{ access_token: string; error: string }>;
 };
 
+export type RefreshProgressResponse = {
+  total: number;
+  started?: number;
+  processed: number;
+  running?: number;
+  queued?: number;
+  done: boolean;
+  error?: string | null;
+  status_counts?: Record<string, number>;
+  total_quota?: number;
+  created_at?: string;
+  updated_at?: string;
+  finished_at?: string | null;
+  last_started_token?: string;
+  last_finished_token?: string;
+  result?: AccountRefreshResponse;
+};
+
 type AccountUpdateResponse = {
   item: Account;
   items: Account[];
@@ -293,9 +311,26 @@ export type UserKey = {
   role: "user";
   enabled: boolean;
   quota: number | null;
+  key?: string | null;
   link_token?: string | null;
+  username?: string | null;
+  open_id?: string | null;
+  avatar_url?: string | null;
+  selected_account_id?: string | null;
   created_at: string | null;
   last_used_at: string | null;
+};
+
+export type UserKeyMutation = {
+  name?: string;
+  quota?: number;
+  enabled?: boolean;
+  key?: string;
+  username?: string;
+  password?: string;
+  open_id?: string;
+  avatar_url?: string;
+  selected_account_id?: string;
 };
 
 export type RegisterConfig = {
@@ -508,10 +543,14 @@ export async function removeAbnormalAccounts() {
 }
 
 export async function refreshAccounts(accessTokens: string[]) {
-  return httpRequest<AccountRefreshResponse>("/api/accounts/refresh", {
+  return httpRequest<{ progress_id: string }>("/api/accounts/refresh", {
     method: "POST",
     body: { ids: accessTokens },
   });
+}
+
+export async function fetchRefreshProgress(progressId: string) {
+  return httpRequest<RefreshProgressResponse>(`/api/accounts/refresh/progress/${progressId}`);
 }
 
 export async function updateAccount(
@@ -716,14 +755,15 @@ export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
 
-export async function createUserKey(name: string, quota: number) {
+export async function createUserKey(input: string | UserKeyMutation, quota?: number) {
+  const body = typeof input === "string" ? { name: input, quota } : input;
   return httpRequest<{ item: UserKey; key: string; items: UserKey[] }>("/api/auth/users", {
     method: "POST",
-    body: { name, quota },
+    body,
   });
 }
 
-export async function updateUserKey(keyId: string, updates: { enabled?: boolean; name?: string; quota?: number; key?: string }) {
+export async function updateUserKey(keyId: string, updates: UserKeyMutation) {
   return httpRequest<{ item: UserKey; items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "POST",
     body: updates,

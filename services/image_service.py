@@ -16,6 +16,7 @@ from zipfile import ZIP_STORED, ZipFile
 from PIL import Image, ImageOps
 
 from services.config import DATA_DIR, config
+from services.state_store import load_json_state, save_json_state
 
 THUMB_MAX_SIZE = (480, 480)
 THUMB_QUALITY = 74
@@ -254,12 +255,7 @@ def _metadata_file() -> Path:
 
 def _load_metadata() -> dict[str, dict[str, Any]]:
     path = _metadata_file()
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = load_json_state("image_metadata", {})
     if not isinstance(data, dict):
         return {}
     images = data.get("images") if "images" in data else data
@@ -274,10 +270,8 @@ def _load_metadata() -> dict[str, dict[str, Any]]:
 
 
 def _save_metadata(data: dict[str, dict[str, Any]]) -> None:
-    path = _metadata_file()
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps({"images": data}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    _metadata_file()
+    save_json_state("image_metadata", {"images": data})
 
 
 def _normalize_uploader(uploader: object) -> dict[str, str]:
@@ -429,6 +423,13 @@ def resolve_thumbnail_file(rel: str) -> Optional[Path]:
     source_candidates: list[Path] = []
     if rel_path.suffix:
         source_candidates.append((source_root / rel_path).resolve())
+        if rel_path.suffix.lower() == ".webp":
+            # Thumbnail URLs always end with .webp even when the original was png/jpg.
+            # Reverse-map the requested thumbnail path back to all supported originals.
+            for suffix in _IMAGE_SUFFIXES:
+                candidate = (source_root / rel_path).with_suffix(suffix).resolve()
+                if candidate not in source_candidates:
+                    source_candidates.append(candidate)
     else:
         for suffix in _IMAGE_SUFFIXES:
             source_candidates.append((source_root / rel_path).with_suffix(suffix).resolve())

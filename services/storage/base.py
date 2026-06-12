@@ -80,6 +80,57 @@ class StorageBackend(ABC):
         ]
         self.save_auth_keys(next_items)
 
+    def load_json_document(self, doc_key: str) -> Any | None:
+        """读取单个 JSON 文档；数据库后端可覆盖该方法。"""
+        return None
+
+    def save_json_document(self, doc_key: str, payload: Any) -> None:
+        """保存单个 JSON 文档；数据库后端可覆盖该方法。"""
+        raise NotImplementedError("json document storage is not supported by this backend")
+
+    def delete_json_document(self, doc_key: str) -> None:
+        """删除单个 JSON 文档；数据库后端可覆盖该方法。"""
+        return None
+
+    def append_log(self, item: dict[str, Any]) -> None:
+        """追加一条系统日志；数据库后端可覆盖该方法。"""
+        raise NotImplementedError("log storage is not supported by this backend")
+
+    def load_logs(
+        self,
+        *,
+        type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """读取系统日志；数据库后端可覆盖该方法。"""
+        return []
+
+    def delete_logs(self, ids: list[str]) -> int:
+        """删除系统日志；数据库后端可覆盖该方法。"""
+        return 0
+
+    def update_log_call_urls(self, key_id: object, task_id: object, urls: list[str]) -> bool:
+        """更新 call 日志中的图片 URL；数据库后端可覆盖该方法。"""
+        return False
+
+    def load_image_conversations(self) -> list[dict[str, Any]]:
+        """读取图片会话；数据库后端可覆盖该方法。"""
+        return []
+
+    def save_image_conversations(self, conversations: list[dict[str, Any]]) -> None:
+        """保存图片会话；数据库后端可覆盖该方法。"""
+        raise NotImplementedError("image conversation storage is not supported by this backend")
+
+    def load_image_tasks(self) -> list[dict[str, Any]]:
+        """读取图片任务；数据库后端可覆盖该方法。"""
+        return []
+
+    def save_image_tasks(self, tasks: list[dict[str, Any]]) -> None:
+        """保存图片任务；数据库后端可覆盖该方法。"""
+        raise NotImplementedError("image task storage is not supported by this backend")
+
     @abstractmethod
     def health_check(self) -> dict[str, Any]:
         """健康检查，返回存储后端状态"""

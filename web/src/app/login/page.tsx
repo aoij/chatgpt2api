@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { LoaderCircle, LockKeyhole } from "lucide-react";
+import { LoaderCircle, QrCode } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -79,12 +79,20 @@ export default function LoginPage() {
       <Card className="w-full max-w-[505px] rounded-[30px] border-white/80 bg-white/95 shadow-[0_28px_90px_rgba(28,25,23,0.10)]">
         <CardContent className="space-y-7 p-6 sm:p-8">
           <div className="space-y-4 text-center">
-            <div className="mx-auto inline-flex size-14 items-center justify-center rounded-[18px] bg-stone-950 text-white shadow-sm">
-              <LockKeyhole className="size-5" />
+            <div className="mx-auto w-fit rounded-[26px] border border-stone-200 bg-white p-3 shadow-sm">
+              <img
+                src="/miniapp-qrcode.png"
+                alt="图灵画板小程序二维码"
+                className="h-32 w-32 rounded-[20px] bg-white object-cover"
+              />
             </div>
             <div className="space-y-2">
+              <div className="mx-auto inline-flex items-center gap-2 rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-600">
+                <QrCode className="size-3.5" />
+                微信扫码进入图灵画板小程序
+              </div>
               <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="text-sm leading-6 text-stone-500">管理员可使用账号密码登录；普通用户仍可使用密钥或免登录链接。</p>
+              <p className="text-sm leading-6 text-stone-500">管理员和普通用户都可以使用账号密码登录；普通用户可先扫码进入小程序注册并设置密码。</p>
             </div>
           </div>
 
@@ -123,7 +131,7 @@ export default function LoginPage() {
                       void handleLogin();
                     }
                   }}
-                  placeholder="请输入管理员账号"
+                  placeholder="请输入管理员账号或小程序用户名"
                   className="h-13 rounded-2xl border-stone-200 bg-white px-4"
                 />
               </div>
@@ -142,7 +150,7 @@ export default function LoginPage() {
                       void handleLogin();
                     }
                   }}
-                  placeholder="请输入管理员密码"
+                  placeholder="请输入登录密码"
                   className="h-13 rounded-2xl border-stone-200 bg-white px-4"
                 />
               </div>
@@ -177,6 +185,27 @@ export default function LoginPage() {
               {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
               登录
             </Button>
+          </div>
+
+          <div className="rounded-2xl border border-stone-200 bg-white/80 p-4 text-left shadow-sm">
+            <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
+              <QrCode className="size-4" />
+              还没有账号？
+            </div>
+            <p className="mt-2 text-xs leading-5 text-stone-500">
+              可前往微信小程序「图灵画板」注册并设置登录密码，或关注公众号「身边风向」获取最新提醒。
+            </p>
+            <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center">
+              <img
+                src="/miniapp-qrcode.png"
+                alt="图灵画板小程序二维码"
+                className="h-24 w-24 rounded-2xl border border-stone-200 bg-white object-cover p-1 shadow-sm"
+              />
+              <div className="space-y-2 text-xs leading-5 text-stone-500">
+                <p>微信扫码进入小程序，首次登录会自动创建并绑定账号。</p>
+                <p>在小程序「我的」页面可修改昵称、头像和 chatgpt2api 登录密码。</p>
+              </div>
+            </div>
           </div>
         </CardContent>
       </Card>

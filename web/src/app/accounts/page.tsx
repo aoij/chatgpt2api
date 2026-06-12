@@ -45,12 +45,14 @@ import {
   fetchAccounts,
   fetchAccountSummary,
   fetchAccountTokens,
+  fetchRefreshProgress,
   removeAbnormalAccounts,
   refreshAccounts,
   updateAccount,
   type Account,
   type AccountType,
   type AccountStatus,
+  type RefreshProgressResponse,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -197,6 +199,7 @@ function AccountsPageContent() {
   const [editType, setEditType] = useState<AccountType>("Free");
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshProgress, setRefreshProgress] = useState<RefreshProgressResponse | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
 
@@ -282,6 +285,11 @@ function AccountsPageContent() {
     [accounts],
   );
 
+  const refreshTotal = Math.max(0, Number(refreshProgress?.total ?? 0));
+  const refreshProcessed = Math.max(0, Number(refreshProgress?.processed ?? 0));
+  const refreshPercent = refreshTotal > 0 ? Math.min(100, Math.round((refreshProcessed / refreshTotal) * 100)) : 0;
+  const refreshStatusCounts = refreshProgress?.status_counts ?? {};
+
   const selectedTokens = useMemo(() => {
     const selectedSet = new Set(selectedIds);
     return accounts.filter((item) => selectedSet.has(item.id)).map((item) => item.id);
@@ -322,27 +330,62 @@ function AccountsPageContent() {
     }
   };
 
-  const handleRefreshAccounts = async (accessTokens: string[]) => {
-    if (accessTokens.length === 0) {
-      toast.error("没有需要刷新的账户");
+  const handleRefreshAccounts = async (accessTokens: string[], options: { all?: boolean } = {}) => {
+    const refreshIds = options.all ? [] : accessTokens;
+    if (!options.all && refreshIds.length === 0) {
+      toast.error("没有需要刷新的账号");
       return;
     }
 
     setIsRefreshing(true);
+    setRefreshProgress(null);
     try {
-      const data = await refreshAccounts(accessTokens);
+      if (options.all) {
+        toast.info("已开始刷新全部账号信息和额度，账号较多时请耐心等待");
+      }
+      const { progress_id } = await refreshAccounts(refreshIds);
+      const data = await new Promise<{
+        items: Account[];
+        refreshed: number;
+        errors?: Array<{ access_token: string; error: string }>;
+      }>((resolve, reject) => {
+        const timer = window.setInterval(async () => {
+          try {
+            const progress = await fetchRefreshProgress(progress_id);
+            setRefreshProgress(progress);
+            if (!progress.done) {
+              return;
+            }
+            window.clearInterval(timer);
+            if (progress.error) {
+              reject(new Error(progress.error));
+              return;
+            }
+            if (!progress.result) {
+              reject(new Error("刷新结果为空"));
+              return;
+            }
+            resolve(progress.result);
+          } catch (error) {
+            window.clearInterval(timer);
+            reject(error);
+          }
+        }, 500);
+      });
       await loadAccounts(true);
       await loadSummary();
-      if (data.errors.length > 0) {
-        const firstError = data.errors[0]?.error;
+      const errors = data.errors ?? [];
+      const refreshed = Number(data.refreshed ?? 0);
+      if (errors.length > 0) {
+        const firstError = errors[0]?.error;
         toast.error(
-          `刷新成功 ${data.refreshed} 个，失败 ${data.errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
+          `刷新成功 ${refreshed} 个，失败 ${errors.length} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
       } else {
-        toast.success(`刷新成功 ${data.refreshed} 个账户`);
+        toast.success(`刷新成功 ${refreshed} 个账号`);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : "刷新账户失败";
+      const message = error instanceof Error ? error.message : "刷新账号失败";
       toast.error(message);
     } finally {
       setIsRefreshing(false);
@@ -437,7 +480,7 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.id))}
+            onClick={() => void handleRefreshAccounts([], { all: true })}
             disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
           >
             <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
@@ -463,6 +506,43 @@ function AccountsPageContent() {
           </Button>
         </div>
       </section>
+
+      {refreshProgress ? (
+        <Card className="rounded-2xl border-emerald-100 bg-emerald-50/80 shadow-sm">
+          <CardContent className="space-y-3 p-4">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2 text-sm font-semibold text-emerald-900">
+                {refreshProgress.done ? <CheckCircle2 className="size-4" /> : <LoaderCircle className="size-4 animate-spin" />}
+                {refreshProgress.done ? "账号刷新完成" : "正在刷新账号信息和额度"}
+              </div>
+              <div className="text-xs text-emerald-800">
+                已处理 {refreshProcessed} / {refreshTotal}，{refreshPercent}%
+              </div>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-white/80">
+              <div
+                className="h-full rounded-full bg-emerald-500 transition-all"
+                style={{ width: `${refreshPercent}%` }}
+              />
+            </div>
+            <div className="grid gap-2 text-xs text-emerald-900 sm:grid-cols-4 lg:grid-cols-8">
+              <div className="rounded-xl bg-white/75 px-3 py-2">已启动 {Number(refreshProgress.started ?? 0)}</div>
+              <div className="rounded-xl bg-white/75 px-3 py-2">运行中 {Number(refreshProgress.running ?? 0)}</div>
+              <div className="rounded-xl bg-white/75 px-3 py-2">排队 {Number(refreshProgress.queued ?? 0)}</div>
+              <div className="rounded-xl bg-white/75 px-3 py-2">正常 {Number(refreshStatusCounts["正常"] ?? 0)}</div>
+              <div className="rounded-xl bg-white/75 px-3 py-2">限流 {Number(refreshStatusCounts["限流"] ?? 0)}</div>
+              <div className="rounded-xl bg-white/75 px-3 py-2">异常 {Number(refreshStatusCounts["异常"] ?? 0)}</div>
+              <div className="rounded-xl bg-white/75 px-3 py-2">禁用 {Number(refreshStatusCounts["禁用"] ?? 0)}</div>
+              <div className="rounded-xl bg-white/75 px-3 py-2">总额度 {formatCompact(Number(refreshProgress.total_quota ?? 0))}</div>
+            </div>
+            {refreshProgress.last_started_token || refreshProgress.last_finished_token ? (
+              <div className="text-xs text-emerald-700">
+                最近启动：{refreshProgress.last_started_token || "-"}；最近完成：{refreshProgress.last_finished_token || "-"}
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
         <DialogContent showCloseButton={false} className="rounded-2xl p-6">

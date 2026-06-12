@@ -11,8 +11,8 @@ services:
       - ./data:/app/data
       - ./config.json:/app/config.json
     environment:
-      STORAGE_BACKEND: sqlite
-      DATABASE_URL: sqlite:////app/data/accounts.db
+      STORAGE_BACKEND: mysql
+      DATABASE_URL: mysql+pymysql://root:dfq666.@host.docker.internal:5019/chatgpt2api_aoij
     # 存储后端配置 (可选值: json, sqlite, postgres, git)
     # environment:
     #   STORAGE_BACKEND: json

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from services.config import DATA_DIR
+from services.state_store import load_json_state, save_json_state
 
 TAGS_FILE = DATA_DIR / "image_tags.json"
 
@@ -16,16 +17,13 @@ def _ensure_file() -> None:
 
 def load_tags() -> dict[str, list[str]]:
     _ensure_file()
-    try:
-        data = json.loads(TAGS_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+    data = load_json_state("image_tags", {})
     return data if isinstance(data, dict) else {}
 
 
 def save_tags(data: dict[str, list[str]]) -> None:
     _ensure_file()
-    TAGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    save_json_state("image_tags", data)
 
 
 def get_tags(image_rel: str) -> list[str]:
