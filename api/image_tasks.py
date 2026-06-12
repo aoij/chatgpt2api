@@ -17,7 +17,9 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import raise_image_quota_error, require_identity, resolve_image_base_url
 from services.content_filter import check_request
 from services.auth_service import ImageQuotaExceeded
+from services.config import config
 from services.image_conversation_service import image_conversation_service
+from services.image_service import thumbnail_url_for_image_url
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall, log_service
 
@@ -98,6 +100,44 @@ def _is_managed_image_url(value: object) -> bool:
     return isinstance(value, str) and "/images/" in value
 
 
+def _image_thumb_url(base_url: str, image_url: object) -> str:
+    if not isinstance(image_url, str) or not image_url.strip():
+        return ""
+    try:
+        return thumbnail_url_for_image_url(base_url.rstrip("/"), image_url) or ""
+    except Exception:
+        return ""
+
+
+def _ensure_conversation_image_thumbnails(conversation: dict[str, Any], base_url: str) -> dict[str, Any]:
+    if not isinstance(conversation, dict):
+        return conversation
+    next_conversation = dict(conversation)
+    turns: list[dict[str, Any]] = []
+    changed = False
+    for raw_turn in conversation.get("turns") if isinstance(conversation.get("turns"), list) else []:
+        if not isinstance(raw_turn, dict):
+            continue
+        turn = dict(raw_turn)
+        images: list[dict[str, Any]] = []
+        for raw_image in raw_turn.get("images") if isinstance(raw_turn.get("images"), list) else []:
+            if not isinstance(raw_image, dict):
+                continue
+            image = dict(raw_image)
+            if not str(image.get("thumbUrl") or "").strip() and image.get("url"):
+                thumb_url = _image_thumb_url(base_url, image.get("url"))
+                if thumb_url:
+                    image["thumbUrl"] = thumb_url
+                    changed = True
+            images.append(image)
+        turn["images"] = images
+        turns.append(turn)
+    if changed:
+        next_conversation["turns"] = turns
+        return next_conversation
+    return conversation
+
+
 def _resolve_turing_sync_url(kind: str) -> str:
     explicit_env = "CHATGPT2API_TURING_CONVERSATION_SYNC_URL" if kind == "conversation" else "CHATGPT2API_TURING_SYNC_URL"
     explicit = str(os.getenv(explicit_env) or "").strip()
@@ -142,6 +182,7 @@ def _notify_turing_conversation_sync(identity: dict[str, object], conversation: 
     conversation_id = str(conversation.get("id") or "").strip()
     if not conversation_id:
         return
+    conversation = _ensure_conversation_image_thumbnails(conversation, config.base_url)
     payload = {
         "chatgptKeyId": key_id,
         "conversationId": conversation_id,

@@ -192,7 +192,7 @@ def _normalize_image(raw: object) -> dict[str, Any] | None:
         "status": status,
     }
     has_url = isinstance(raw.get("url"), str) and bool(str(raw.get("url") or "").strip())
-    for key in ("taskId", "url", "b64_json", "revised_prompt", "error"):
+    for key in ("taskId", "url", "thumbUrl", "b64_json", "revised_prompt", "error"):
         if key == "b64_json" and has_url:
             continue
         value = raw.get(key)

@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { LoaderCircle, QrCode } from "lucide-react";
+import { LoaderCircle, LockKeyhole, QrCode } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -68,35 +68,29 @@ export default function LoginPage() {
 
   if (isCheckingAuth) {
     return (
-      <div className="grid min-h-[calc(100vh-1rem)] w-full place-items-center px-4 py-6">
+      <div className="grid min-h-[calc(100dvh-1rem)] w-full place-items-center px-4 py-6">
         <LoaderCircle className="size-5 animate-spin text-stone-400" />
       </div>
     );
   }
 
   return (
-    <div className="grid min-h-[calc(100vh-1rem)] w-full place-items-center px-4 py-6">
-      <Card className="w-full max-w-[505px] rounded-[30px] border-white/80 bg-white/95 shadow-[0_28px_90px_rgba(28,25,23,0.10)]">
-        <CardContent className="space-y-7 p-6 sm:p-8">
-          <div className="space-y-4 text-center">
-            <div className="mx-auto w-fit rounded-[26px] border border-stone-200 bg-white p-3 shadow-sm">
-              <img
-                src="/miniapp-qrcode.png"
-                alt="图灵画板小程序二维码"
-                className="h-32 w-32 rounded-[20px] bg-white object-cover"
-              />
+    <div className="grid min-h-[calc(100dvh-1rem)] w-full place-items-center px-3 py-5 sm:px-4 sm:py-8">
+      <Card className="w-full max-w-[506px] rounded-[28px] border border-white/90 bg-white shadow-[0_28px_90px_rgba(64,51,36,0.10)] sm:rounded-[30px]">
+        <CardContent className="space-y-6 p-5 sm:space-y-7 sm:p-8">
+          <div className="space-y-4 text-center sm:space-y-5">
+            <div className="mx-auto grid size-14 place-items-center rounded-[18px] bg-black text-white shadow-[0_12px_28px_rgba(0,0,0,0.18)]">
+              <LockKeyhole className="size-6" strokeWidth={2.2} />
             </div>
             <div className="space-y-2">
-              <div className="mx-auto inline-flex items-center gap-2 rounded-full bg-stone-100 px-3 py-1 text-xs font-medium text-stone-600">
-                <QrCode className="size-3.5" />
-                微信扫码进入图灵画板小程序
-              </div>
-              <h1 className="text-3xl font-semibold tracking-tight text-stone-950">欢迎回来</h1>
-              <p className="text-sm leading-6 text-stone-500">管理员和普通用户都可以使用账号密码登录；普通用户可先扫码进入小程序注册并设置密码。</p>
+              <h1 className="text-[30px] font-extrabold tracking-tight text-black sm:text-[32px]">欢迎回来</h1>
+              <p className="mx-auto max-w-[420px] text-sm leading-7 text-stone-600">
+                管理员和普通用户都可使用账号密码登录；普通用户也可继续使用密钥或小程序免登链路。
+              </p>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 rounded-2xl bg-stone-100 p-1">
+          <div className="grid grid-cols-2 gap-1 rounded-[18px] bg-stone-100/80 p-1 shadow-inner shadow-stone-200/40">
             {([
               ["password", "账号密码"],
               ["key", "密钥登录"],
@@ -105,10 +99,11 @@ export default function LoginPage() {
                 key={mode}
                 type="button"
                 className={cn(
-                  "h-10 rounded-xl text-sm font-medium transition",
-                  loginMode === mode ? "bg-white text-stone-950 shadow-sm" : "text-stone-500 hover:text-stone-800",
+                  "h-10 rounded-[15px] text-sm font-medium transition",
+                  loginMode === mode ? "bg-white text-black shadow-[0_2px_8px_rgba(0,0,0,0.08)]" : "text-stone-500 hover:text-stone-800",
                 )}
                 onClick={() => setLoginMode(mode)}
+                aria-pressed={loginMode === mode}
               >
                 {label}
               </button>
@@ -116,9 +111,9 @@ export default function LoginPage() {
           </div>
 
           {loginMode === "password" ? (
-            <div className="space-y-4">
+            <div className="space-y-5">
               <div className="space-y-2">
-                <label htmlFor="username" className="block text-sm font-medium text-stone-700">
+                <label htmlFor="username" className="block text-sm font-medium text-black">
                   账号
                 </label>
                 <Input
@@ -132,11 +127,11 @@ export default function LoginPage() {
                     }
                   }}
                   placeholder="请输入管理员账号或小程序用户名"
-                  className="h-13 rounded-2xl border-stone-200 bg-white px-4"
+                  className="h-[52px] rounded-2xl border-stone-200 bg-white px-4 text-[16px] text-black shadow-[0_1px_4px_rgba(0,0,0,0.08)] placeholder:text-stone-400 focus-visible:border-stone-300 focus-visible:ring-stone-200/80"
                 />
               </div>
               <div className="space-y-2">
-                <label htmlFor="password" className="block text-sm font-medium text-stone-700">
+                <label htmlFor="password" className="block text-sm font-medium text-black">
                   密码
                 </label>
                 <Input
@@ -151,13 +146,13 @@ export default function LoginPage() {
                     }
                   }}
                   placeholder="请输入登录密码"
-                  className="h-13 rounded-2xl border-stone-200 bg-white px-4"
+                  className="h-[52px] rounded-2xl border-stone-200 bg-white px-4 text-[16px] text-black shadow-[0_1px_4px_rgba(0,0,0,0.08)] placeholder:text-stone-400 focus-visible:border-stone-300 focus-visible:ring-stone-200/80"
                 />
               </div>
             </div>
           ) : (
-            <div className="space-y-3">
-              <label htmlFor="auth-key" className="block text-sm font-medium text-stone-700">
+            <div className="space-y-2">
+              <label htmlFor="auth-key" className="block text-sm font-medium text-black">
                 密钥
               </label>
               <Input
@@ -171,37 +166,35 @@ export default function LoginPage() {
                   }
                 }}
                 placeholder="请输入管理员密钥或用户密钥"
-                className="h-13 rounded-2xl border-stone-200 bg-white px-4"
+                className="h-[52px] rounded-2xl border-stone-200 bg-white px-4 text-[16px] text-black shadow-[0_1px_4px_rgba(0,0,0,0.08)] placeholder:text-stone-400 focus-visible:border-stone-300 focus-visible:ring-stone-200/80"
               />
             </div>
           )}
 
-          <div className="space-y-3">
-            <Button
-              className="h-13 w-full rounded-2xl bg-stone-950 text-white hover:bg-stone-800"
-              onClick={() => void handleLogin()}
-              disabled={isSubmitting}
-            >
-              {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
-              登录
-            </Button>
-          </div>
+          <Button
+            className="h-[52px] w-full rounded-2xl bg-black text-[15px] font-semibold text-white shadow-[0_12px_26px_rgba(0,0,0,0.14)] hover:bg-stone-900"
+            onClick={() => void handleLogin()}
+            disabled={isSubmitting}
+          >
+            {isSubmitting ? <LoaderCircle className="size-4 animate-spin" /> : null}
+            登录
+          </Button>
 
-          <div className="rounded-2xl border border-stone-200 bg-white/80 p-4 text-left shadow-sm">
-            <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
-              <QrCode className="size-4" />
+          <div className="rounded-[22px] border border-stone-200 bg-white p-4 text-left shadow-[0_1px_8px_rgba(0,0,0,0.04)] sm:p-5">
+            <div className="flex items-center gap-2 text-base font-bold text-black">
+              <QrCode className="size-4 text-stone-600" />
               还没有账号？
             </div>
-            <p className="mt-2 text-xs leading-5 text-stone-500">
+            <p className="mt-2 text-sm leading-6 text-stone-600">
               可前往微信小程序「图灵画板」注册并设置登录密码，或关注公众号「身边风向」获取最新提醒。
             </p>
             <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-center">
               <img
                 src="/miniapp-qrcode.png"
                 alt="图灵画板小程序二维码"
-                className="h-24 w-24 rounded-2xl border border-stone-200 bg-white object-cover p-1 shadow-sm"
+                className="size-24 shrink-0 rounded-2xl border border-stone-200 bg-white object-cover p-1 shadow-[0_10px_24px_rgba(0,0,0,0.08)]"
               />
-              <div className="space-y-2 text-xs leading-5 text-stone-500">
+              <div className="space-y-2 text-sm leading-6 text-stone-600">
                 <p>微信扫码进入小程序，首次登录会自动创建并绑定账号。</p>
                 <p>在小程序「我的」页面可修改昵称、头像和 chatgpt2api 登录密码。</p>
               </div>

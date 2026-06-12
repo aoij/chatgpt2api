@@ -20,6 +20,7 @@ export type StoredImage = {
   status?: "loading" | "success" | "error";
   b64_json?: string;
   url?: string;
+  thumbUrl?: string;
   revised_prompt?: string;
   error?: string;
   persistStatus?: "pending" | "done" | "error";
@@ -141,6 +142,7 @@ function normalizeStoredImage(image: StoredImage): StoredImage {
     ...image,
     taskId: typeof image.taskId === "string" && image.taskId ? image.taskId : undefined,
     url: typeof image.url === "string" && image.url ? image.url : undefined,
+    thumbUrl: typeof image.thumbUrl === "string" && image.thumbUrl ? image.thumbUrl : undefined,
     b64_json: typeof image.b64_json === "string" && image.b64_json ? image.b64_json : undefined,
     revised_prompt: typeof image.revised_prompt === "string" ? image.revised_prompt : undefined,
     persistStatus:

@@ -44,6 +44,9 @@ function getStoredImagePreviewSrc(image: StoredImage) {
   if (image.b64_json) {
     return `data:image/png;base64,${image.b64_json}`;
   }
+  if (image.thumbUrl) {
+    return image.thumbUrl;
+  }
   if (image.url) {
     return getImageThumbnailUrl(image.url);
   }
