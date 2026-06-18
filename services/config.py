@@ -275,6 +275,25 @@ class ConfigStore:
             return 3
 
     @property
+    def image_parallel_generation(self) -> bool:
+        return _bool_from_config(self.data, "image_parallel_generation", True)
+
+    @property
+    def image_settle_enabled(self) -> bool:
+        return _bool_from_config(self.data, "image_settle_enabled", True)
+
+    @property
+    def image_check_before_hit_enabled(self) -> bool:
+        return _bool_from_config(self.data, "image_check_before_hit_enabled", True)
+
+    @property
+    def image_settle_secs(self) -> float:
+        try:
+            return max(0.5, float(self.data.get("image_settle_secs", 2.0)))
+        except (TypeError, ValueError):
+            return 2.0
+
+    @property
     def image_task_worker_count(self) -> int:
         try:
             return max(1, int(self.data.get("image_task_worker_count", 10)))
@@ -415,6 +434,10 @@ class ConfigStore:
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_parallel_generation"] = self.image_parallel_generation
+        data["image_settle_enabled"] = self.image_settle_enabled
+        data["image_check_before_hit_enabled"] = self.image_check_before_hit_enabled
+        data["image_settle_secs"] = self.image_settle_secs
         data["image_task_worker_count"] = self.image_task_worker_count
         data["image_upstream_concurrency"] = self.image_upstream_concurrency
         data["image_per_account_concurrency"] = self.image_per_account_concurrency
@@ -449,6 +472,10 @@ class ConfigStore:
             _validate_image_storage_settings(next_data["image_storage"])
         next_data.pop("backup_state", None)
         next_data["image_account_concurrency"] = max(1, _normalize_positive_int(next_data.get("image_account_concurrency"), 3, 1))
+        try:
+            next_data["image_settle_secs"] = max(0.5, float(next_data.get("image_settle_secs", 2.0)))
+        except (TypeError, ValueError):
+            next_data["image_settle_secs"] = 2.0
         next_data["image_task_worker_count"] = max(1, _normalize_positive_int(next_data.get("image_task_worker_count"), 10, 1))
         next_data["image_upstream_concurrency"] = max(1, _normalize_positive_int(next_data.get("image_upstream_concurrency"), 3, 1))
         next_data["image_per_account_concurrency"] = max(1, _normalize_positive_int(next_data.get("image_per_account_concurrency"), 1, 1))

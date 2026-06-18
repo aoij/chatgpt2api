@@ -286,6 +286,10 @@ export function UserKeysCard({ standalone = false }: { standalone?: boolean } = 
         ...(editAvatarUrl.trim() !== String(item.avatar_url || "") ? { avatar_url: editAvatarUrl.trim() } : {}),
       });
       setItems(data.items);
+      if (trimmedKey) {
+        setRevealedKey(trimmedKey);
+        setRevealedLinkToken(String(item.link_token || ""));
+      }
       setEditingItem(null);
       setEditKey("");
       setEditPassword("");

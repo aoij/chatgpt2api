@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type MouseEvent } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 import webConfig from "@/constants/common-env";
@@ -78,6 +78,55 @@ export function TopNav() {
     setNavigatingHref("");
   }, [pathname]);
 
+  useEffect(() => {
+    if (!session || pathname === "/login") {
+      return;
+    }
+    const navItems = session.role === "admin" && session.scope !== "image" ? adminNavItems : userNavItems;
+    navItems.forEach((item) => {
+      router.prefetch(item.href);
+    });
+    router.prefetch("/image");
+  }, [pathname, router, session]);
+
+  const normalizePath = useCallback((value: string) => {
+    const pathnameValue = String(value || "").split(/[?#]/, 1)[0] || "/";
+    return pathnameValue.length > 1 ? pathnameValue.replace(/\/+$/, "") : pathnameValue;
+  }, []);
+
+  const handleFastNavigate = useCallback(
+    (event: MouseEvent<HTMLAnchorElement>, href: string) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        normalizePath(pathname) === normalizePath(href)
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      setNavigatingHref(href);
+      router.prefetch(href);
+
+      window.setTimeout(() => {
+        router.push(href);
+      }, 0);
+
+      // App Router 在页面 JS chunk 或当前页面主线程繁忙时，偶发会长时间停在原页面。
+      // 给用户一个硬跳转兜底：700ms 内 URL 还没变，就走浏览器原生跳转。
+      window.setTimeout(() => {
+        if (normalizePath(window.location.pathname) !== normalizePath(href)) {
+          window.location.assign(href);
+        }
+      }, 700);
+    },
+    [normalizePath, pathname, router],
+  );
+
   const handleLogout = async () => {
     await clearStoredAuthSession();
     router.replace("/login");
@@ -103,6 +152,10 @@ export function TopNav() {
         <div className="flex min-w-0 items-center justify-between gap-2 sm:justify-start sm:gap-3">
           <Link
             href="/image"
+            prefetch
+            onClick={(event) => handleFastNavigate(event, "/image")}
+            onPointerEnter={() => router.prefetch("/image")}
+            onFocus={() => router.prefetch("/image")}
             className="min-w-0 truncate py-1 text-[15px] font-bold tracking-tight text-stone-950 transition hover:text-stone-700 sm:max-w-[220px] sm:shrink-0 lg:max-w-none"
           >
             {publicConfig?.site_name || "chatgpt2api"}
@@ -127,14 +180,10 @@ export function TopNav() {
               <Link
                 key={item.href}
                 href={item.href}
-                onClick={() => {
-                  if (pathname !== item.href) {
-                    setNavigatingHref(item.href);
-                  }
-                }}
-                onMouseEnter={() => {
-                  router.prefetch(item.href);
-                }}
+                prefetch
+                onClick={(event) => handleFastNavigate(event, item.href)}
+                onPointerEnter={() => router.prefetch(item.href)}
+                onFocus={() => router.prefetch(item.href)}
                 className={cn(
                   "relative shrink-0 snap-start whitespace-nowrap rounded-full px-3 py-1.5 text-[13px] font-medium transition sm:rounded-none sm:px-0 sm:py-1 sm:text-[15px]",
                   active

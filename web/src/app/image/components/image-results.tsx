@@ -20,6 +20,7 @@ export type ImageLightboxItem = {
 };
 
 type ImageResultsProps = {
+  selectedConversationId?: string | null;
   selectedConversation: ImageConversation | null;
   isLoadingConversationDetail?: boolean;
   onOpenLightbox: (images: ImageLightboxItem[], index: number) => void;
@@ -87,6 +88,7 @@ async function downloadStoredImage(image: StoredImage, index: number) {
 }
 
 export function ImageResults({
+  selectedConversationId = null,
   selectedConversation,
   isLoadingConversationDetail = false,
   onOpenLightbox,
@@ -100,9 +102,18 @@ export function ImageResults({
   publicConfig,
 }: ImageResultsProps) {
   const deferredConversation = useDeferredValue(selectedConversation);
+  const expectedConversationId = selectedConversationId ?? selectedConversation?.id ?? null;
+  const activeConversation =
+    expectedConversationId && deferredConversation?.id === expectedConversationId
+      ? deferredConversation
+      : expectedConversationId && selectedConversation?.id === expectedConversationId
+        ? selectedConversation
+        : !expectedConversationId
+          ? selectedConversation
+          : null;
 
-  if (!deferredConversation) {
-    if (isLoadingConversationDetail) {
+  if (!activeConversation) {
+    if (isLoadingConversationDetail || expectedConversationId) {
       return (
         <div className="flex h-full min-h-[260px] items-center justify-center text-center sm:min-h-[420px]">
           <div className="flex items-center gap-3 text-sm text-stone-500">
@@ -138,10 +149,10 @@ export function ImageResults({
 
   return (
     <div className="mx-auto flex w-full max-w-[980px] flex-col gap-5 sm:gap-8">
-      {deferredConversation.turns.map((turn, turnIndex) => (
+      {activeConversation.turns.map((turn, turnIndex) => (
         <ImageTurnBlock
           key={turn.id}
-          conversationId={deferredConversation.id}
+          conversationId={activeConversation.id}
           turn={turn}
           turnIndex={turnIndex}
           onOpenLightbox={onOpenLightbox}
