@@ -2351,7 +2351,12 @@ function ImagePageContent({
             onImageCountChange={(value) => setImageCount(value ? clampImageCountWithLimit(value, batchLimit) : "")}
             onImageSizeChange={setImageSize}
             onSubmit={handleSubmit}
-            onOpenPromptMarket={() => setIsPromptMarketOpen(true)}
+            showPromptMarket={isAdmin}
+            onOpenPromptMarket={() => {
+              if (isAdmin) {
+                setIsPromptMarketOpen(true);
+              }
+            }}
             onPickReferenceImage={() => fileInputRef.current?.click()}
             onReferenceImageChange={handleReferenceImageChange}
             onRemoveReferenceImage={handleRemoveReferenceImage}
@@ -2367,11 +2372,13 @@ function ImagePageContent({
         onIndexChange={setLightboxIndex}
       />
 
-      <ImagePromptMarket
-        open={isPromptMarketOpen}
-        onOpenChange={setIsPromptMarketOpen}
-        onApplyPrompt={handleApplyMarketPrompt}
-      />
+      {isAdmin ? (
+        <ImagePromptMarket
+          open={isPromptMarketOpen}
+          onOpenChange={setIsPromptMarketOpen}
+          onApplyPrompt={handleApplyMarketPrompt}
+        />
+      ) : null}
 
       {deleteConfirm ? (
         <Dialog open onOpenChange={(open) => (!open ? setDeleteConfirm(null) : null)}>

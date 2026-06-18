@@ -35,6 +35,7 @@ type ImageComposerProps = {
   onImageCountChange: (value: string) => void;
   onImageSizeChange: (value: string) => void;
   onSubmit: () => void | Promise<void>;
+  showPromptMarket?: boolean;
   onOpenPromptMarket: () => void;
   onPickReferenceImage: () => void;
   onReferenceImageChange: (files: File[]) => void | Promise<void>;
@@ -76,6 +77,7 @@ export function ImageComposer({
   onImageCountChange,
   onImageSizeChange,
   onSubmit,
+  showPromptMarket = true,
   onOpenPromptMarket,
   onPickReferenceImage,
   onReferenceImageChange,
@@ -351,17 +353,19 @@ export function ImageComposer({
                 <ImagePlus className="size-4" />
                 上传图片
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                className="h-10 rounded-2xl border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 shadow-none"
-                onClick={onOpenPromptMarket}
-                aria-label="打开提示词市场"
-                title="提示词市场"
-              >
-                <Store className="size-4" />
-                <span className="sr-only">市场</span>
-              </Button>
+              {showPromptMarket ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-10 rounded-2xl border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 shadow-none"
+                  onClick={onOpenPromptMarket}
+                  aria-label="打开提示词市场"
+                  title="提示词市场"
+                >
+                  <Store className="size-4" />
+                  <span className="sr-only">市场</span>
+                </Button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => void submitAndCollapseMobilePanel()}
@@ -486,17 +490,19 @@ export function ImageComposer({
                     <ImagePlus className="size-4" />
                     <span>{referenceImages.length > 0 ? "添加参考图" : "上传图片"}</span>
                   </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="h-11 justify-start rounded-2xl border-stone-200 bg-white px-4 text-sm font-medium text-stone-700 shadow-none sm:h-10 sm:w-auto sm:justify-center sm:rounded-full sm:px-4 sm:text-sm"
-                    onClick={onOpenPromptMarket}
-                    aria-label="打开提示词市场"
-                    title="提示词市场"
-                  >
-                    <Store className="size-4" />
-                    <span>市场</span>
-                  </Button>
+                  {showPromptMarket ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="h-11 justify-start rounded-2xl border-stone-200 bg-white px-4 text-sm font-medium text-stone-700 shadow-none sm:h-10 sm:w-auto sm:justify-center sm:rounded-full sm:px-4 sm:text-sm"
+                      onClick={onOpenPromptMarket}
+                      aria-label="打开提示词市场"
+                      title="提示词市场"
+                    >
+                      <Store className="size-4" />
+                      <span>市场</span>
+                    </Button>
+                  ) : null}
 
                   <div className="hidden shrink-0 rounded-full bg-stone-100 px-3 py-2 text-xs font-medium text-stone-600 sm:block">
                     剩余额度 {availableQuota}

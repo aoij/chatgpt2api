@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import hashlib
 import json
+import os
 import time
 from threading import Condition, Lock
 from typing import Any
@@ -38,15 +39,45 @@ class AccountService:
     def __init__(self, storage_backend: StorageBackend):
         self.storage = storage_backend
         self._lock = Lock()
+        self._refresh_progress_lock = Lock()
         self._image_slot_condition = Condition(self._lock)
         self._index = 0
         self._accounts = self._load_accounts()
+        self._refresh_progress: dict[str, dict[str, Any]] = {}
         self._public_compact_cache: list[dict] | None = None
         self._image_inflight: dict[str, int] = {}
         self._image_cooldown_until: dict[str, float] = {}
         self._image_remote_refresh_ttl_seconds = 600
+        self._account_refresh_batch_size = self._read_int_env("CHATGPT2API_ACCOUNT_REFRESH_BATCH_SIZE", 200, 1, 500)
+        self._account_refresh_max_workers = self._read_int_env("CHATGPT2API_ACCOUNT_REFRESH_MAX_WORKERS", 24, 1, 64)
+        self._account_refresh_batch_pause_seconds = self._read_float_env(
+            "CHATGPT2API_ACCOUNT_REFRESH_BATCH_PAUSE_SECONDS",
+            0.1,
+            0.0,
+            10.0,
+        )
         self._invalid_tokens_path = DATA_DIR / "invalid_image_tokens.json"
         self._invalid_tokens = self._load_invalid_tokens()
+
+    @staticmethod
+    def _read_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+        try:
+            value = int(str(os.getenv(name, "")).strip() or default)
+        except Exception:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _read_float_env(name: str, default: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(str(os.getenv(name, "")).strip() or default)
+        except Exception:
+            value = default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _now_text() -> str:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     @staticmethod
     def _clean_token(value: Any) -> str:
@@ -1149,46 +1180,252 @@ class AccountService:
         # duan's customized account refresh path.
         return {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
 
-    def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
+    def _refresh_progress_account_stats(self) -> dict[str, Any]:
+        with self._lock:
+            status_counts: dict[str, int] = {}
+            total_quota = 0
+            for account in self._accounts:
+                status = self._clean_token(account.get("status")) or "未知"
+                status_counts[status] = status_counts.get(status, 0) + 1
+                try:
+                    total_quota += max(0, int(account.get("quota") or 0))
+                except Exception:
+                    continue
+        return {"status_counts": status_counts, "total_quota": total_quota}
+
+    def _cleanup_refresh_progress_locked(self) -> None:
+        now = time.time()
+        expired_ids: list[str] = []
+        for progress_id, progress in self._refresh_progress.items():
+            updated_at = float(progress.get("_updated_ts") or progress.get("_created_ts") or 0.0)
+            if updated_at and now - updated_at > 2 * 60 * 60:
+                expired_ids.append(progress_id)
+        for progress_id in expired_ids:
+            self._refresh_progress.pop(progress_id, None)
+        if len(self._refresh_progress) <= 64:
+            return
+        ordered = sorted(
+            self._refresh_progress.items(),
+            key=lambda item: float(item[1].get("_updated_ts") or item[1].get("_created_ts") or 0.0),
+        )
+        for progress_id, _ in ordered[: len(self._refresh_progress) - 64]:
+            self._refresh_progress.pop(progress_id, None)
+
+    def begin_refresh_progress(self, progress_id: str, total: int) -> tuple[str, bool]:
+        progress_id = self._clean_token(progress_id) or hashlib.sha1(str(time.time()).encode("utf-8")).hexdigest()[:16]
+        safe_total = max(0, int(total or 0))
+        now = time.time()
+        now_text = self._now_text()
+        batch_size = max(1, min(self._account_refresh_batch_size, safe_total or self._account_refresh_batch_size))
+        total_batches = (safe_total + batch_size - 1) // batch_size if safe_total else 0
+        stats = self._refresh_progress_account_stats()
+        with self._refresh_progress_lock:
+            self._cleanup_refresh_progress_locked()
+            existing = self._refresh_progress.get(progress_id)
+            if existing and not existing.get("done"):
+                return progress_id, False
+            for active_id, active_progress in self._refresh_progress.items():
+                if not active_progress.get("done"):
+                    return active_id, False
+            self._refresh_progress[progress_id] = {
+                "id": progress_id,
+                "total": safe_total,
+                "processed": 0,
+                "started": 0,
+                "running": 0,
+                "queued": safe_total,
+                "done": False,
+                "error": None,
+                "created_at": now_text,
+                "updated_at": now_text,
+                "finished_at": None,
+                "batch_size": batch_size,
+                "current_batch": 0,
+                "total_batches": total_batches,
+                "max_workers": min(self._account_refresh_max_workers, batch_size, safe_total) if safe_total else 0,
+                "status_counts": stats["status_counts"],
+                "total_quota": stats["total_quota"],
+                "last_started_token": "",
+                "last_finished_token": "",
+                "result": None,
+                "_created_ts": now,
+                "_updated_ts": now,
+            }
+        return progress_id, True
+
+    def _update_refresh_progress(self, progress_id: str | None, **updates: Any) -> None:
+        progress_id = self._clean_token(progress_id)
+        if not progress_id:
+            return
+        now = time.time()
+        updates["updated_at"] = self._now_text()
+        updates["_updated_ts"] = now
+        with self._refresh_progress_lock:
+            progress = self._refresh_progress.get(progress_id)
+            if progress is None:
+                return
+            progress.update(updates)
+
+    def _refresh_progress_stats(self, progress_id: str | None) -> None:
+        progress_id = self._clean_token(progress_id)
+        if not progress_id:
+            return
+        stats = self._refresh_progress_account_stats()
+        self._update_refresh_progress(
+            progress_id,
+            status_counts=stats["status_counts"],
+            total_quota=stats["total_quota"],
+        )
+
+    def finish_refresh_progress(
+            self,
+            progress_id: str | None,
+            result: dict[str, Any] | None = None,
+            error: str | None = None,
+    ) -> None:
+        progress_id = self._clean_token(progress_id)
+        if not progress_id:
+            return
+        stats = self._refresh_progress_account_stats()
+        now = time.time()
+        now_text = self._now_text()
+        with self._refresh_progress_lock:
+            progress = self._refresh_progress.get(progress_id)
+            if progress is None:
+                return
+            total = int(progress.get("total") or 0)
+            processed = int(progress.get("processed") or 0)
+            progress.update({
+                "processed": max(processed, total if result is not None and error is None else processed),
+                "running": 0,
+                "queued": 0,
+                "done": True,
+                "error": error,
+                "result": result,
+                "finished_at": now_text,
+                "updated_at": now_text,
+                "status_counts": stats["status_counts"],
+                "total_quota": stats["total_quota"],
+                "_updated_ts": now,
+            })
+
+    def get_refresh_progress(self, progress_id: str) -> dict[str, Any] | None:
+        progress_id = self._clean_token(progress_id)
+        if not progress_id:
+            return None
+        with self._refresh_progress_lock:
+            progress = self._refresh_progress.get(progress_id)
+            if progress is None:
+                return None
+            return {key: value for key, value in progress.items() if not key.startswith("_")}
+
+    def refresh_accounts(self, access_tokens: list[str], progress_id: str | None = None) -> dict[str, Any]:
         cleaned_tokens = self._clean_tokens(access_tokens)
+        progress_id = self._clean_token(progress_id)
+        if progress_id and self.get_refresh_progress(progress_id) is None:
+            progress_id, _ = self.begin_refresh_progress(progress_id, len(cleaned_tokens))
         if not cleaned_tokens:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
+            result = {"refreshed": 0, "errors": [], "items": self.list_accounts(compact=True)}
+            self.finish_refresh_progress(progress_id, result=result)
+            return result
 
         refreshed = 0
         errors: list[dict[str, str]] = []
-        max_workers = min(10, len(cleaned_tokens))
+        total = len(cleaned_tokens)
+        batch_size = max(1, min(self._account_refresh_batch_size, total))
+        max_workers = max(1, min(self._account_refresh_max_workers, batch_size))
+        total_batches = (total + batch_size - 1) // batch_size
+        processed = 0
+        started = 0
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_map = {executor.submit(self.fetch_remote_info, access_token): access_token for access_token in
-                          cleaned_tokens}
-            for future in as_completed(future_map):
-                access_token = future_map[future]
-                try:
-                    remote_info = future.result()
-                    if self.update_account(
-                        access_token,
-                        {
-                            **remote_info,
-                            "last_remote_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        },
-                    ) is not None:
-                        refreshed += 1
-                except Exception as exc:
-                    message = str(exc)
-                    print(f"[account-refresh] fail {anonymize_token(access_token)} {message}")
-                    if "/backend-api/me failed: HTTP 401" in message:
-                        self.mark_invalid_image_token(access_token, "refresh_accounts")
-                        if not config.auto_remove_invalid_accounts:
-                            self.update_account(access_token, {"status": "异常", "quota": 0})
-                        message = "检测到封号"
-                    errors.append({"access_token": access_token, "error": message})
+        try:
+            print(
+                f"[account-refresh] queue total={total} batch_size={batch_size} "
+                f"workers={max_workers} progress={progress_id or '-'}"
+            )
+            self._update_refresh_progress(
+                progress_id,
+                total=total,
+                queued=total,
+                batch_size=batch_size,
+                total_batches=total_batches,
+                max_workers=max_workers,
+            )
+            for batch_no, batch_start in enumerate(range(0, total, batch_size), start=1):
+                batch = cleaned_tokens[batch_start: batch_start + batch_size]
+                batch_workers = max(1, min(max_workers, len(batch)))
+                batch_done = 0
+                self._update_refresh_progress(
+                    progress_id,
+                    current_batch=batch_no,
+                    running=0,
+                    queued=max(0, total - started),
+                )
+                print(
+                    f"[account-refresh] batch {batch_no}/{total_batches} "
+                    f"size={len(batch)} workers={batch_workers}"
+                )
+                with ThreadPoolExecutor(max_workers=batch_workers) as executor:
+                    future_map = {}
+                    for access_token in batch:
+                        future_map[executor.submit(self.fetch_remote_info, access_token)] = access_token
+                        started += 1
+                        self._update_refresh_progress(
+                            progress_id,
+                            started=started,
+                            running=min(batch_workers, len(future_map) - batch_done),
+                            queued=max(0, total - started),
+                            last_started_token=anonymize_token(access_token),
+                        )
+                    for future in as_completed(future_map):
+                        access_token = future_map[future]
+                        try:
+                            remote_info = future.result()
+                            if self.update_account(
+                                access_token,
+                                {
+                                    **remote_info,
+                                    "last_remote_checked_at": self._now_text(),
+                                },
+                            ) is not None:
+                                refreshed += 1
+                        except Exception as exc:
+                            message = str(exc)
+                            print(f"[account-refresh] fail {anonymize_token(access_token)} {message}")
+                            if "/backend-api/me failed: HTTP 401" in message:
+                                self.mark_invalid_image_token(access_token, "refresh_accounts")
+                                if not config.auto_remove_invalid_accounts:
+                                    self.update_account(access_token, {"status": "异常", "quota": 0})
+                                message = "检测到封号"
+                            errors.append({"access_token": access_token, "error": message})
+                        finally:
+                            processed += 1
+                            batch_done += 1
+                            self._update_refresh_progress(
+                                progress_id,
+                                processed=processed,
+                                running=max(0, min(batch_workers, len(future_map) - batch_done)),
+                                queued=max(0, total - started),
+                                last_finished_token=anonymize_token(access_token),
+                            )
+                self._refresh_progress_stats(progress_id)
+                if batch_no < total_batches and self._account_refresh_batch_pause_seconds > 0:
+                    time.sleep(self._account_refresh_batch_pause_seconds)
 
-        print(f"[account-refresh] done refreshed={refreshed} errors={len(errors)} workers={max_workers}")
-        return {
-            "refreshed": refreshed,
-            "errors": errors,
-            "items": self.list_accounts(compact=True),
-        }
+            print(
+                f"[account-refresh] done refreshed={refreshed} errors={len(errors)} "
+                f"workers={max_workers} batch_size={batch_size}"
+            )
+            result = {
+                "refreshed": refreshed,
+                "errors": errors,
+                "items": self.list_accounts(compact=True),
+            }
+            self.finish_refresh_progress(progress_id, result=result)
+            return result
+        except Exception as exc:
+            self.finish_refresh_progress(progress_id, error=str(exc))
+            raise
 
 
 account_service = AccountService(config.get_storage_backend())
