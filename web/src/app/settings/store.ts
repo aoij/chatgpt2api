@@ -26,6 +26,7 @@ import {
   type BackupState,
   type CPAPool,
   type CPARemoteFile,
+  type ExternalImageModelConfig,
   type RegisterConfig,
   type SettingsConfig,
 } from "@/lib/api";
@@ -33,6 +34,29 @@ import {
 export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
+
+function normalizeExternalImageModels(value: unknown): ExternalImageModelConfig[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      id: String(item.id || item.model || "").trim(),
+      label: String(item.label || item.model || "").trim(),
+      model: String(item.model || "").trim(),
+      endpoint: String(item.endpoint || "").trim(),
+      enabled: Boolean(item.enabled),
+      supports_edit: Boolean(item.supports_edit),
+      default_size: typeof item.default_size === "string" ? item.default_size : "",
+      timeout_seconds: Number(item.timeout_seconds || 180),
+      api_key: typeof item.api_key === "string" ? item.api_key : "",
+      api_key_env: typeof item.api_key_env === "string" ? item.api_key_env : "",
+      has_api_key: Boolean(item.has_api_key),
+      clear_api_key: Boolean(item.clear_api_key),
+    }))
+    .filter((item) => item.id || item.model);
+}
 
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
   const backup = typeof config.backup === "object" && config.backup
@@ -79,6 +103,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     page_title: typeof config.page_title === "string" ? config.page_title : "ChatGPT 号池管理",
     image_page_title: typeof config.image_page_title === "string" ? config.image_page_title : "Turn ideas into images",
     image_page_subtitle: typeof config.image_page_subtitle === "string" ? config.image_page_subtitle : "在同一窗口里保留本地历史与任务状态，并从已有结果图继续发起新的无状态编辑。",
+    external_image_models: normalizeExternalImageModels(config.external_image_models),
   };
 }
 
@@ -159,6 +184,7 @@ type SettingsStore = {
   setPageTitle: (value: string) => void;
   setImagePageTitle: (value: string) => void;
   setImagePageSubtitle: (value: string) => void;
+  setExternalImageModels: (value: ExternalImageModelConfig[]) => void;
 
   loadRegister: (silent?: boolean) => Promise<void>;
   setRegisterConfig: (config: RegisterConfig) => void;
@@ -403,6 +429,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImagePageSubtitle: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_page_subtitle: value } } : {});
+  },
+
+  setExternalImageModels: (value) => {
+    set((state) => state.config ? { config: { ...state.config, external_image_models: value } } : {});
   },
 
   loadRegister: async (silent = false) => {

@@ -57,6 +57,7 @@ const ACTIVE_CONVERSATION_STORAGE_KEY = "chatgpt2api:image_active_conversation_i
 const DRAFT_CONVERSATION_STORAGE_VALUE = "__draft__";
 const IMAGE_SIZE_STORAGE_KEY = "chatgpt2api:image_last_size";
 const IMAGE_COUNT_STORAGE_KEY = "chatgpt2api:image_last_count";
+const IMAGE_MODEL_STORAGE_KEY = "chatgpt2api:image_last_model";
 const EDIT_TASK_SUBMIT_CONCURRENCY = 2;
 const GENERATE_TASK_SUBMIT_CONCURRENCY = 8;
 const TASK_SUBMIT_RETRY = 2;
@@ -763,6 +764,7 @@ function ImagePageContent({
   const [imagePrompt, setImagePrompt] = useState("");
   const [imageCount, setImageCount] = useState("1");
   const [imageSize, setImageSize] = useState("");
+  const [imageModel, setImageModel] = useState("gpt-image-2");
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isPromptMarketOpen, setIsPromptMarketOpen] = useState(false);
   const [referenceImageFiles, setReferenceImageFiles] = useState<File[]>([]);
@@ -795,6 +797,16 @@ function ImagePageContent({
     [publicConfig?.image_batch_limit, runtimeStats?.frontend_batch_limit],
   );
   const effectiveParsedCount = useMemo(() => Number(clampImageCountWithLimit(imageCount, batchLimit)), [batchLimit, imageCount]);
+  const imageModels = useMemo(() => {
+    const configured = (publicConfig?.image_models || []).filter((item) => item?.model);
+    return configured.length > 0
+      ? configured
+      : [{ id: "gpt-image-2", label: "ChatGPT Image", model: "gpt-image-2", provider: "chatgpt", supports_edit: true }];
+  }, [publicConfig?.image_models]);
+  const selectedImageModel = useMemo(
+    () => imageModels.find((item) => item.model === imageModel) || imageModels[0],
+    [imageModel, imageModels],
+  );
   const selectedConversation = useMemo(
     () => conversations.find((item) => item.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId],
@@ -1042,7 +1054,9 @@ function ImagePageContent({
     const loadHistory = async () => {
       try {
         const storedSize = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_SIZE_STORAGE_KEY) : null;
+        const storedModel = typeof window !== "undefined" ? window.localStorage.getItem(IMAGE_MODEL_STORAGE_KEY) : null;
         setImageSize(storedSize || "");
+        setImageModel(storedModel || "gpt-image-2");
         setImageCount("1");
 
         const items = await listImageConversations();
@@ -1562,6 +1576,7 @@ function ImagePageContent({
     setImagePrompt(turn.prompt);
     setImageCount(String(Math.max(1, turn.count || turn.images.length || 1)));
     setImageSize(turn.size);
+    setImageModel(turn.model || "gpt-image-2");
     setReferenceImages(turn.referenceImages);
     setReferenceImageFiles(
       turn.referenceImages.map((image) => dataUrlToFile(image.dataUrl, image.name, image.type)),
@@ -2150,6 +2165,11 @@ function ImagePageContent({
     }
 
     const effectiveImageMode: ImageConversationMode = referenceImageFiles.length > 0 ? "edit" : "generate";
+    const effectiveImageModel = selectedImageModel?.model || "gpt-image-2";
+    if (effectiveImageMode === "edit" && !selectedImageModel?.supports_edit) {
+      toast.error(`模型“${selectedImageModel?.label || effectiveImageModel}”暂不支持图生图，请切换模型后重试`);
+      return;
+    }
     setRecentQuotaUsageText("");
     const numericQuota = Number(availableQuota);
     if (!isAdmin && Number.isFinite(numericQuota) && numericQuota >= 0 && effectiveParsedCount > numericQuota) {
@@ -2171,7 +2191,7 @@ function ImagePageContent({
     const draftTurn: ImageTurn = {
       id: turnId,
       prompt,
-      model: "gpt-image-2",
+      model: effectiveImageModel,
       mode: effectiveImageMode,
       referenceImages: effectiveImageMode === "edit" ? referenceImages : [],
       count: effectiveParsedCount,
@@ -2352,6 +2372,8 @@ function ImagePageContent({
             prompt={imagePrompt}
             imageCount={imageCount}
             imageSize={imageSize}
+            imageModel={selectedImageModel?.model || "gpt-image-2"}
+            imageModels={imageModels}
             availableQuota={availableQuota}
             tokenName={tokenName}
             activeTaskCount={activeTaskCount}
@@ -2373,6 +2395,14 @@ function ImagePageContent({
             onPromptChange={setImagePrompt}
             onImageCountChange={(value) => setImageCount(value ? clampImageCountWithLimit(value, batchLimit) : "")}
             onImageSizeChange={setImageSize}
+            onImageModelChange={(model) => {
+              setImageModel(model);
+              try {
+                window.localStorage.setItem(IMAGE_MODEL_STORAGE_KEY, model);
+              } catch {
+                // Storage failures should not block image generation.
+              }
+            }}
             onSubmit={handleSubmit}
             showPromptMarket={isAdmin}
             onOpenPromptMarket={() => {

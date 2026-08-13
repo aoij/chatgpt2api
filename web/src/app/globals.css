@@ -205,6 +205,28 @@
       display: none;
     }
   }
+
+  /* The register card uses explicit desktop rules because this app's current
+     Tailwind source scan does not emit the page's xl: utilities reliably. */
+  @media (min-width: 80rem) {
+    .register-card-layout {
+      height: calc(100dvh - 132px);
+      min-height: 640px;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      overflow: hidden;
+    }
+
+    .register-card-layout > .register-card-config {
+      overflow-y: auto;
+      border-right: 1px solid #e7e5e4;
+      border-bottom-width: 0;
+    }
+
+    .register-card-layout > .register-card-results,
+    .register-card-layout .register-card-logs {
+      min-height: 0;
+    }
+  }
 }
 
 @layer components {

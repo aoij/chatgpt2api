@@ -2,7 +2,8 @@ import { httpBlobRequest, httpRequest } from "@/lib/request";
 
 export type AccountType = string;
 export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
-export type ImageModel = "gpt-image-2" | "codex-gpt-image-2" | "plus-codex-gpt-image-2" | "team-codex-gpt-image-2" | "pro-codex-gpt-image-2";
+// 图片模型由管理员配置，不能再用固定联合类型限制第三方 OpenAI 兼容模型。
+export type ImageModel = string;
 export type AuthRole = "admin" | "user";
 
 export type Account = {
@@ -113,12 +114,28 @@ export type SettingsConfig = {
   image_task_worker_count?: number | string;
   image_upstream_concurrency?: number | string;
   image_per_account_concurrency?: number | string;
+  external_image_models?: ExternalImageModelConfig[];
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   log_levels?: string[];
   backup?: BackupSettings;
   backup_state?: BackupState;
   [key: string]: unknown;
+};
+
+export type ExternalImageModelConfig = {
+  id: string;
+  label: string;
+  model: string;
+  endpoint: string;
+  enabled: boolean;
+  supports_edit?: boolean;
+  default_size?: string;
+  timeout_seconds?: number | string;
+  api_key?: string;
+  api_key_env?: string;
+  has_api_key?: boolean;
+  clear_api_key?: boolean;
 };
 
 export type BackupInclude = {
@@ -400,6 +417,16 @@ export type PublicConfig = {
   image_page_title: string;
   image_page_subtitle: string;
   image_batch_limit?: number;
+  image_models?: PublicImageModel[];
+};
+
+export type PublicImageModel = {
+  id: string;
+  label: string;
+  model: string;
+  provider: "chatgpt" | "external" | string;
+  supports_edit?: boolean;
+  default_size?: string;
 };
 
 export async function fetchPublicConfig() {

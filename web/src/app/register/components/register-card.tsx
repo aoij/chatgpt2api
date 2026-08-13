@@ -43,25 +43,36 @@ export function RegisterCard() {
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
+
+  /**
+   * 统一维护各个邮箱 provider 的默认字段，避免切换类型后遗漏关键配置。
+   * 这里只补当前类型最小必填集，不主动清理旧字段，避免用户临时切换类型时丢失已填写内容。
+   */
+  const buildProviderDefaults = (type: string) => ({
+    ...(type === "cloudmail_gen" ? { api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" } : {}),
+    ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [] } : {}),
+    ...(type === "tempmail_lol" ? { api_key: "", domain: [] } : {}),
+    ...(type === "mail_tm" ? { domain: [] } : {}),
+    ...(type === "dropmail" ? { api_token: "", domain_id: "", permanent_domain_only: true } : {}),
+    ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
+    ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
+    ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
+    ...(type === "gptmail" ? { api_key: "", default_domain: "" } : {}),
+    ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
+    ...(type === "ddg_mail" ? { ddg_token: "", cf_inbox_jwt: "", cf_domain: [], admin_password: "" } : {}),
+  });
+
   const updateProviderType = (index: number, type: string) => {
     updateProvider(index, {
       type,
       enable: true,
-      ...(type === "cloudmail_gen" ? { api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" } : {}),
-      ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [] } : {}),
-      ...(type === "tempmail_lol" ? { api_key: "", domain: [] } : {}),
-      ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
-      ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
-      ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
-      ...(type === "gptmail" ? { api_key: "", default_domain: "" } : {}),
-      ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
-      ...(type === "ddg_mail" ? { ddg_token: "", cf_inbox_jwt: "", cf_domain: [], admin_password: "" } : {}),
+      ...buildProviderDefaults(type),
     });
   };
 
   return (
-    <div className="grid min-h-0 items-stretch gap-0 overflow-visible rounded-xl border border-stone-200 bg-white/70 xl:h-[calc(100vh-132px)] xl:min-h-[640px] xl:grid-cols-2 xl:overflow-hidden">
-      <section className="space-y-4 border-b border-stone-200 p-3 sm:p-4 xl:overflow-y-auto xl:border-r xl:border-b-0">
+    <div className="register-card-layout grid min-h-0 min-w-0 items-stretch gap-0 rounded-xl border border-stone-200 bg-white/70">
+      <section className="register-card-config min-w-0 space-y-4 border-b border-stone-200 p-3 sm:p-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex items-center gap-3">
               <div className="flex size-9 items-center justify-center rounded-md bg-stone-100">
@@ -77,7 +88,7 @@ export function RegisterCard() {
             </Button>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid min-w-0 gap-4 sm:grid-cols-2 [&>*]:min-w-0">
             <div className="space-y-2">
               <label className="text-sm text-stone-700">注册模式</label>
               <Select value={config.mode || "total"} onValueChange={(value) => setMode(value as "total" | "quota" | "available")} disabled={config.enabled}>
@@ -129,7 +140,7 @@ export function RegisterCard() {
               </Button>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid min-w-0 gap-4 sm:grid-cols-2 [&>*]:min-w-0">
               <div className="space-y-2">
                 <label className="text-sm text-stone-700">请求超时</label>
                 <Input value={String(config.mail.request_timeout || "")} onChange={(event) => setMailField("request_timeout", event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
@@ -161,7 +172,7 @@ export function RegisterCard() {
                       </button>
                     </div>
 
-                    <div className="grid gap-4 md:grid-cols-2">
+                    <div className="grid min-w-0 gap-4 md:grid-cols-2 [&>*]:min-w-0">
                       <div className="space-y-2">
                         <label className="text-sm text-stone-700">类型</label>
                         <Select value={type} onValueChange={(value) => updateProviderType(index, value)} disabled={config.enabled}>
@@ -172,6 +183,8 @@ export function RegisterCard() {
                             <SelectItem value="cloudmail_gen">cloudmail_gen</SelectItem>
                             <SelectItem value="cloudflare_temp_email">cloudflare_temp_email</SelectItem>
                             <SelectItem value="tempmail_lol">tempmail_lol</SelectItem>
+                            <SelectItem value="mail_tm">mail.tm</SelectItem>
+                            <SelectItem value="dropmail">dropmail</SelectItem>
                             <SelectItem value="moemail">moemail</SelectItem>
                             <SelectItem value="inbucket">inbucket_mail</SelectItem>
                             <SelectItem value="duckmail">duckmail</SelectItem>
@@ -240,6 +253,26 @@ export function RegisterCard() {
                           <Input value={String(provider.api_key || "")} onChange={(event) => updateProvider(index, { api_key: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                         </div>
                       ) : null}
+                      {type === "dropmail" ? (
+                        <>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">API Token</label>
+                            <Input value={String(provider.api_token || provider.api_key || "")} onChange={(event) => updateProvider(index, { api_token: event.target.value })} placeholder="af_xxxxxxxxxxxxx" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm text-stone-700">Domain ID（可选）</label>
+                            <Input value={String(provider.domain_id || "")} onChange={(event) => updateProvider(index, { domain_id: event.target.value })} placeholder="留空则使用 DropMail 默认域名池" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                          </div>
+                          <label className="flex items-center gap-3 pt-8 text-sm text-stone-700">
+                            <Checkbox checked={Boolean(provider.permanent_domain_only ?? true)} onCheckedChange={(checked) => updateProvider(index, { permanent_domain_only: Boolean(checked) })} disabled={config.enabled} />
+                            仅使用永久域名
+                          </label>
+                          <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-xs text-sky-800 md:col-span-2">
+                            <p className="font-medium">DropMail 说明</p>
+                            <p className="mt-1">需要在 DropMail 后台生成 `af_` 开头的 API Token。`Domain ID` 可留空，系统会直接使用默认可用域名。</p>
+                          </div>
+                        </>
+                      ) : null}
                       {type === "duckmail" || type === "gptmail" ? (
                         <div className="space-y-2">
                           <label className="text-sm text-stone-700">Default Domain</label>
@@ -260,10 +293,10 @@ export function RegisterCard() {
                       ) : null}
                     </div>
 
-                    {type === "cloudmail_gen" || type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
+                    {type === "cloudmail_gen" || type === "tempmail_lol" || type === "mail_tm" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
                       <div className="space-y-2">
                         <label className="text-sm text-stone-700">{type === "cloudmail_gen" ? "邮箱域名" : type === "inbucket" ? "基础域名列表" : "Domain"}</label>
-                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : type === "mail_tm" ? "每行一个 mail.tm 域名，留空则自动拉取官方公共域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
                       </div>
                     ) : null}
                     {type === "cloudmail_gen" ? (
@@ -280,7 +313,7 @@ export function RegisterCard() {
 
       </section>
 
-      <section className="flex min-h-0 flex-col p-3 sm:p-4">
+      <section className="register-card-results flex min-h-0 min-w-0 flex-col p-3 sm:p-4">
         <div className="space-y-3">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -291,7 +324,7 @@ export function RegisterCard() {
                 {config.enabled ? "运行中" : "已停止"}
               </Badge>
             </div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div className="grid min-w-0 grid-cols-2 gap-2 sm:grid-cols-4 [&>*]:min-w-0">
               {[
                 ["成功 / 成功率", `${stats.success} / ${stats.success_rate || 0}%`],
                 ["失败", stats.fail],
@@ -328,17 +361,17 @@ export function RegisterCard() {
             </div>
         </div>
 
-        <div className="mt-4 flex min-h-[320px] flex-1 flex-col space-y-3 overflow-hidden border-t border-stone-200 pt-4 xl:min-h-0">
-            <div className="flex items-center justify-between">
-              <div>
+        <div className="register-card-logs mt-4 flex min-h-[320px] min-w-0 flex-1 flex-col space-y-3 overflow-hidden border-t border-stone-200 pt-4">
+            <div className="flex min-w-0 items-center justify-between gap-3">
+              <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-stone-900">实时日志</h3>
                 <p className="mt-1 text-xs text-amber-700">遇到 HTTP 状态码 400 等错误，基本是邮箱滥用被封，需要更换新的域名邮箱。</p>
               </div>
-              <Badge variant="secondary" className="rounded-md">
+              <Badge variant="secondary" className="shrink-0 rounded-md">
                 {logs.length}
               </Badge>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto border border-stone-200 bg-white/70 p-3 font-mono text-xs leading-6">
+            <div className="min-h-0 min-w-0 flex-1 overflow-y-auto break-words border border-stone-200 bg-white/70 p-3 font-mono text-xs leading-6 [overflow-wrap:anywhere]">
               {logs.length === 0 ? (
                 <div className="text-stone-500">暂无日志</div>
               ) : (

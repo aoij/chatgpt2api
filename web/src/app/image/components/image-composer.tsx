@@ -8,12 +8,15 @@ import { ImageLightbox } from "@/components/image-lightbox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import type { PublicImageModel } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type ImageComposerProps = {
   prompt: string;
   imageCount: string;
   imageSize: string;
+  imageModel: string;
+  imageModels: PublicImageModel[];
   availableQuota: string;
   tokenName: string;
   activeTaskCount: number;
@@ -35,6 +38,7 @@ type ImageComposerProps = {
   onPromptChange: (value: string) => void;
   onImageCountChange: (value: string) => void;
   onImageSizeChange: (value: string) => void;
+  onImageModelChange: (value: string) => void;
   onSubmit: () => void | Promise<void>;
   showPromptMarket?: boolean;
   onOpenPromptMarket: () => void;
@@ -56,6 +60,8 @@ export function ImageComposer({
   prompt,
   imageCount,
   imageSize,
+  imageModel,
+  imageModels,
   availableQuota,
   tokenName,
   activeTaskCount,
@@ -77,6 +83,7 @@ export function ImageComposer({
   onPromptChange,
   onImageCountChange,
   onImageSizeChange,
+  onImageModelChange,
   onSubmit,
   showPromptMarket = true,
   onOpenPromptMarket,
@@ -553,7 +560,23 @@ export function ImageComposer({
                     </div>
                   ) : null}
 
-                  <div className="grid grid-cols-[108px_minmax(0,1fr)] gap-2 sm:flex sm:min-w-0 sm:items-center sm:gap-3">
+                  <div className="grid w-full grid-cols-[108px_minmax(0,1fr)] gap-2 sm:flex sm:w-auto sm:min-w-0 sm:items-center sm:gap-3">
+                    <label className="col-span-2 flex h-11 min-w-0 items-center gap-2 rounded-2xl border border-stone-200 bg-white px-3 sm:col-auto sm:h-10 sm:min-w-[172px] sm:rounded-full">
+                      <span className="shrink-0 text-[11px] font-medium text-stone-500">模型</span>
+                      <select
+                        value={imageModel}
+                        onChange={(event) => onImageModelChange(event.target.value)}
+                        className="min-w-0 flex-1 appearance-none bg-transparent text-sm font-semibold text-stone-800 outline-none sm:text-xs"
+                        aria-label="选择图片模型"
+                      >
+                        {imageModels.map((model) => (
+                          <option key={model.id || model.model} value={model.model}>
+                            {model.label}{model.default_size ? `（${model.default_size}）` : model.supports_edit ? "" : "（仅文生图）"}
+                          </option>
+                        ))}
+                      </select>
+                      <ChevronDown className="size-4 shrink-0 text-stone-400" />
+                    </label>
                     <div className="flex h-11 items-center justify-between rounded-2xl border border-stone-200 bg-white px-3 sm:h-10 sm:min-w-[112px] sm:rounded-full">
                       <span className="hidden text-xs font-medium text-stone-500 sm:inline">张数</span>
                       <Input

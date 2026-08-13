@@ -47,6 +47,9 @@ class AccountService:
         self._public_compact_cache: list[dict] | None = None
         self._image_inflight: dict[str, int] = {}
         self._image_cooldown_until: dict[str, float] = {}
+        # 文本请求的上游限流只影响短时间内的文本调用，因此单独维护内存冷却表，
+        # 避免把临时的 429 状态写入账号数据或误判为永久异常账号。
+        self._text_cooldown_until: dict[str, float] = {}
         self._image_remote_refresh_ttl_seconds = 600
         self._account_refresh_batch_size = self._read_int_env("CHATGPT2API_ACCOUNT_REFRESH_BATCH_SIZE", 200, 1, 500)
         self._account_refresh_max_workers = self._read_int_env("CHATGPT2API_ACCOUNT_REFRESH_MAX_WORKERS", 24, 1, 64)
@@ -296,6 +299,7 @@ class AccountService:
                 self._save_invalid_tokens_locked()
             self._image_inflight.pop(access_token, None)
             self._image_cooldown_until.pop(access_token, None)
+            self._text_cooldown_until.pop(access_token, None)
             self._image_slot_condition.notify_all()
         if config.auto_remove_invalid_accounts:
             self.remove_invalid_token(access_token, reason or "image_stream")
@@ -446,6 +450,21 @@ class AccountService:
         if "timeout" in lower or "timed out" in lower or "connection" in lower:
             return 3 * 60
         return 60
+
+    @staticmethod
+    def _text_cooldown_seconds_for_error(error: str) -> int:
+        """计算文本账号的默认短冷却时间。
+
+        文本账号收到 429 时通常只是上游短时限流，不能沿用图片池的 20 分钟
+        冷却，也不能将账号标记为异常。调用方如果拿到了 Retry-After，会通过
+        `seconds` 参数覆盖这里的默认值。
+        """
+        lower = str(error or "").lower()
+        if "429" in lower or "rate limit" in lower or "upstream_rate_limited" in lower or "限流" in lower:
+            return 5
+        if any(code in lower for code in ("500", "502", "503", "504", "bad gateway", "gateway timeout")):
+            return 10
+        return 0
 
     def _candidate_account_sort_key(self, account: dict, now: float) -> tuple[int, float, int, float, str]:
         checked_at = self._account_remote_checked_timestamp(account)
@@ -687,6 +706,7 @@ class AccountService:
                     or token in excluded
                     or token in self._invalid_tokens
                     or status in {"禁用", "异常"}
+                    or float(self._text_cooldown_until.get(token, 0.0)) > time.time()
                 ):
                     continue
                 exp = self._jwt_exp(token)
@@ -717,6 +737,24 @@ class AccountService:
             self._accounts[index] = account
             self._save_account(account)
             return dict(account)
+
+    def cooldown_text_token(self, access_token: str, error: str = "", seconds: int | None = None) -> None:
+        """让文本账号在短时间内暂时退出选择池。
+
+        该状态只保存在进程内：文本上游的 429/5xx 是可恢复的瞬时状态，
+        不应污染账号文件，也不应触发自动删除或永久禁用逻辑。
+        """
+        access_token = self._clean_token(access_token)
+        if not access_token:
+            return
+        cooldown_seconds = max(
+            0,
+            int(seconds if seconds is not None else self._text_cooldown_seconds_for_error(error)),
+        )
+        if cooldown_seconds <= 0:
+            return
+        with self._lock:
+            self._text_cooldown_until[access_token] = time.time() + cooldown_seconds
 
     def remove_invalid_token(self, access_token: str, event: str) -> bool:
         if not config.auto_remove_invalid_accounts:
@@ -963,6 +1001,7 @@ class AccountService:
                 for token in target_set:
                     self._image_inflight.pop(token, None)
                     self._image_cooldown_until.pop(token, None)
+                    self._text_cooldown_until.pop(token, None)
                     self._invalid_tokens.discard(token)
                 self._save_invalid_tokens_locked()
                 self._save_accounts()

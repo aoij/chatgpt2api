@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from services.account_service import account_service
+from services.external_image_service import external_image_service
 from services.openai_backend_api import OpenAIBackendAPI
 from utils.helper import CODEX_IMAGE_MODEL
 
@@ -50,4 +51,21 @@ def list_models() -> dict[str, Any]:
                 "root": model,
                 "parent": None,
             })
+            seen.add(model)
+    # Enabled external image models are advertised through the same OpenAI
+    # models endpoint so API clients can discover them without exposing keys.
+    for external_model in external_image_service.public_models():
+        model = str(external_model.get("model") or "").strip()
+        if not model or model in seen:
+            continue
+        data.append({
+            "id": model,
+            "object": "model",
+            "created": 0,
+            "owned_by": "external-image-provider",
+            "permission": [],
+            "root": model,
+            "parent": None,
+        })
+        seen.add(model)
     return result

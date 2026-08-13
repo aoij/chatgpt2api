@@ -1,6 +1,6 @@
 "use client";
 
-import { LoaderCircle, PlugZap, Save } from "lucide-react";
+import { KeyRound, LoaderCircle, Plus, PlugZap, Save, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -9,7 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { testProxy, type ProxyTestResult } from "@/lib/api";
+import { testProxy, type ExternalImageModelConfig, type ProxyTestResult } from "@/lib/api";
 
 import { useSettingsStore } from "../store";
 
@@ -36,7 +36,61 @@ export function ConfigCard() {
   const setPageTitle = useSettingsStore((state) => state.setPageTitle);
   const setImagePageTitle = useSettingsStore((state) => state.setImagePageTitle);
   const setImagePageSubtitle = useSettingsStore((state) => state.setImagePageSubtitle);
+  const setExternalImageModels = useSettingsStore((state) => state.setExternalImageModels);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
+  const externalImageModels = config?.external_image_models || [];
+
+  const updateExternalImageModel = (index: number, updates: Partial<ExternalImageModelConfig>) => {
+    setExternalImageModels(externalImageModels.map((model, currentIndex) => (
+      currentIndex === index ? { ...model, ...updates } : model
+    )));
+  };
+
+  const addGrokImageModel = () => {
+    const id = "grok-imagine-image";
+    if (externalImageModels.some((item) => item.id === id || item.model === id)) {
+      toast.message("Grok Imagine 已在外部图片模型列表中");
+      return;
+    }
+    setExternalImageModels([
+      ...externalImageModels,
+      {
+        id,
+        label: "Grok Imagine",
+        model: "grok-imagine-image",
+        endpoint: "https://aoij.cc.cd/grok2api/v1/images/generations",
+        enabled: false,
+        supports_edit: false,
+        default_size: "1024x1024",
+        timeout_seconds: 180,
+        api_key: "",
+        has_api_key: false,
+      },
+    ]);
+  };
+
+  const addCustomImageModel = () => {
+    const id = `external-image-${Date.now()}`;
+    setExternalImageModels([
+      ...externalImageModels,
+      {
+        id,
+        label: "外部图片模型",
+        model: "",
+        endpoint: "",
+        enabled: false,
+        supports_edit: false,
+        default_size: "",
+        timeout_seconds: 180,
+        api_key: "",
+        has_api_key: false,
+      },
+    ]);
+  };
+
+  const removeExternalImageModel = (index: number) => {
+    setExternalImageModels(externalImageModels.filter((_, currentIndex) => currentIndex !== index));
+  };
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -265,6 +319,120 @@ export function ConfigCard() {
                 </label>
               ))}
             </div>
+          </div>
+          <div className="space-y-4 rounded-xl border border-stone-200 bg-white px-4 py-4 md:col-span-2">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-stone-800">外部图片模型</div>
+                <p className="mt-1 max-w-3xl text-xs leading-5 text-stone-500">
+                  支持 OpenAI 兼容的图片生成接口。Client Key 为只写字段，保存后不会在此页面回显；启用后模型会显示在用户画图页面。
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700"
+                  onClick={addGrokImageModel}
+                >
+                  <Plus className="size-4" />
+                  添加 Grok
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="h-9 rounded-xl border-stone-200 bg-white px-3 text-stone-700"
+                  onClick={addCustomImageModel}
+                >
+                  <Plus className="size-4" />
+                  自定义
+                </Button>
+              </div>
+            </div>
+
+            {externalImageModels.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-stone-200 bg-stone-50 px-4 py-5 text-sm text-stone-500">
+                尚未配置外部图片模型。可点击“添加 Grok”预填模型和接口地址。
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {externalImageModels.map((model, index) => (
+                  <div key={model.id || `${model.model}-${index}`} className="space-y-3 rounded-xl border border-stone-200 bg-stone-50/70 p-3 sm:p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-stone-800">
+                        <KeyRound className="size-4 shrink-0 text-stone-500" />
+                        <span className="truncate">{model.label || model.model || "未命名模型"}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-2 text-xs text-stone-600">
+                          <Checkbox
+                            checked={Boolean(model.enabled)}
+                            onCheckedChange={(checked) => updateExternalImageModel(index, { enabled: Boolean(checked) })}
+                          />
+                          启用
+                        </label>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="size-8 text-stone-500 hover:bg-rose-50 hover:text-rose-700"
+                          onClick={() => removeExternalImageModel(index)}
+                          aria-label={`删除外部图片模型 ${model.label || model.model || index + 1}`}
+                          title="删除模型"
+                        >
+                          <Trash2 className="size-4" />
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-stone-600">显示名称</label>
+                        <Input value={model.label} onChange={(event) => updateExternalImageModel(index, { label: event.target.value })} placeholder="Grok Imagine" className="h-10 rounded-xl border-stone-200 bg-white" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-stone-600">模型名</label>
+                        <Input value={model.model} onChange={(event) => updateExternalImageModel(index, { model: event.target.value })} placeholder="grok-imagine-image" className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" />
+                      </div>
+                      <div className="space-y-1.5 md:col-span-2">
+                        <label className="text-xs text-stone-600">图片生成 Endpoint</label>
+                        <Input value={model.endpoint} onChange={(event) => updateExternalImageModel(index, { endpoint: event.target.value })} placeholder="https://example.com/v1/images/generations" className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-stone-600">固定尺寸（可选）</label>
+                        <Input value={model.default_size || ""} onChange={(event) => updateExternalImageModel(index, { default_size: event.target.value })} placeholder="1024x1024" className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" />
+                      </div>
+                      <div className="space-y-1.5 md:col-span-2">
+                        <label className="text-xs text-stone-600">Client Key</label>
+                        <Input
+                          type="password"
+                          value={model.api_key || ""}
+                          onChange={(event) => updateExternalImageModel(index, { api_key: event.target.value, clear_api_key: false })}
+                          placeholder={model.has_api_key ? "已配置，留空将保留原 Key" : "输入新版 Client Key"}
+                          className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-xs text-stone-600">请求超时（秒）</label>
+                        <Input type="number" min="5" max="600" value={String(model.timeout_seconds || 180)} onChange={(event) => updateExternalImageModel(index, { timeout_seconds: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" />
+                      </div>
+                      <div className="flex items-end gap-3 pb-1">
+                        <span className="text-xs text-stone-500">当前外部模型仅支持文生图</span>
+                        {model.has_api_key ? (
+                          <Button
+                            type="button"
+                            variant="link"
+                            className="h-auto p-0 text-xs text-stone-500"
+                            onClick={() => updateExternalImageModel(index, { api_key: "", clear_api_key: true, has_api_key: false })}
+                          >
+                            清除密钥
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           <div className="space-y-2 md:col-span-2">
             <label className="text-sm text-stone-700">全局附加指令</label>

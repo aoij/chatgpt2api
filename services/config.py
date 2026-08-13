@@ -6,6 +6,7 @@ import os
 import sys
 from pathlib import Path
 import time
+from urllib.parse import urlparse
 
 from services.storage.base import StorageBackend
 from services.state_store import load_json_state, save_json_state
@@ -38,6 +39,10 @@ DEFAULT_IMAGE_STORAGE = {
     "public_base_url": "",
 }
 
+# 外部图片模型在运行配置中保存。密钥只允许写入，读取设置接口会返回
+# `has_api_key` 状态而不会返回原文，避免管理员页面或日志意外泄露凭据。
+DEFAULT_EXTERNAL_IMAGE_MODEL_TIMEOUT_SECONDS = 180
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -57,6 +62,91 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     except (TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
+
+
+def _normalize_external_image_model_endpoint(value: object) -> str:
+    endpoint = str(value or "").strip().rstrip("/")
+    if not endpoint:
+        return ""
+    parsed = urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("外部图片模型 Endpoint 必须是完整的 http 或 https 地址")
+    return endpoint
+
+
+def _normalize_external_image_models(
+    value: object,
+    *,
+    existing: object = None,
+) -> list[dict[str, object]]:
+    """规范化外部 OpenAI 图片模型配置，并保留未重新提交的密钥。
+
+    设置页读取配置时不会返回 API Key，因此普通的“保存其它字段”请求会带回
+    空字符串。这里按模型 id / model 匹配原配置，只有管理员明确填写新值或勾选
+    clear_api_key 时才覆盖已有密钥，防止误保存导致线上模型失效。
+    """
+    raw_items = value if isinstance(value, list) else []
+    existing_items = existing if isinstance(existing, list) else []
+    existing_by_id: dict[str, dict[str, object]] = {}
+    existing_by_model: dict[str, dict[str, object]] = {}
+    for raw_item in existing_items:
+        if not isinstance(raw_item, dict):
+            continue
+        item_id = str(raw_item.get("id") or "").strip().lower()
+        model = str(raw_item.get("model") or "").strip().lower()
+        if item_id:
+            existing_by_id[item_id] = raw_item
+        if model:
+            existing_by_model[model] = raw_item
+
+    normalized: list[dict[str, object]] = []
+    seen_models: set[str] = set()
+    seen_ids: set[str] = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        model = str(raw_item.get("model") or "").strip()
+        raw_endpoint = str(raw_item.get("endpoint") or "").strip()
+        if not model and not raw_endpoint:
+            continue
+        endpoint = _normalize_external_image_model_endpoint(raw_endpoint)
+        if not model or not endpoint:
+            raise ValueError("外部图片模型必须同时填写模型名和图片生成 Endpoint")
+        model_key = model.lower()
+        item_id = str(raw_item.get("id") or model).strip().lower()
+        if not item_id or model_key in seen_models or item_id in seen_ids:
+            continue
+        previous = existing_by_id.get(item_id) or existing_by_model.get(model_key) or {}
+        clear_api_key = _normalize_bool(raw_item.get("clear_api_key"), False)
+        submitted_api_key = str(raw_item.get("api_key") or "").strip()
+        if clear_api_key:
+            api_key = ""
+        elif submitted_api_key:
+            api_key = submitted_api_key
+        else:
+            api_key = str(previous.get("api_key") or "").strip()
+        api_key_env = str(raw_item.get("api_key_env") or previous.get("api_key_env") or "").strip()
+        timeout_seconds = _normalize_positive_int(
+            raw_item.get("timeout_seconds"),
+            _normalize_positive_int(previous.get("timeout_seconds"), DEFAULT_EXTERNAL_IMAGE_MODEL_TIMEOUT_SECONDS, 5),
+            5,
+        )
+        normalized.append({
+            "id": item_id,
+            "label": str(raw_item.get("label") or previous.get("label") or model).strip() or model,
+            "model": model,
+            "endpoint": endpoint,
+            "api_key": api_key,
+            "api_key_env": api_key_env,
+            "enabled": _normalize_bool(raw_item.get("enabled"), _normalize_bool(previous.get("enabled"), False)),
+            # 当前适配器只实现 /images/generations；禁止误标为支持图生图。
+            "supports_edit": False,
+            "default_size": str(raw_item.get("default_size") or previous.get("default_size") or "").strip(),
+            "timeout_seconds": min(timeout_seconds, 600),
+        })
+        seen_models.add(model_key)
+        seen_ids.add(item_id)
+    return normalized
 
 
 def _normalize_backup_include(value: object) -> dict[str, bool]:
@@ -455,6 +545,7 @@ class ConfigStore:
         data["global_system_prompt"] = self.global_system_prompt
         data["backup"] = self.get_backup_settings()
         data["image_storage"] = self.get_image_storage_settings()
+        data["external_image_models"] = self.get_external_image_models(include_secrets=False)
         data.pop("auth-key", None)
         data.pop("admin_password", None)
         return data
@@ -470,6 +561,13 @@ class ConfigStore:
         if "image_storage" in next_data:
             next_data["image_storage"] = _normalize_image_storage_settings(next_data.get("image_storage"))
             _validate_image_storage_settings(next_data["image_storage"])
+        if "external_image_models" in data:
+            next_data["external_image_models"] = _normalize_external_image_models(
+                data.get("external_image_models"),
+                existing=self.data.get("external_image_models"),
+            )
+        elif "external_image_models" in next_data:
+            next_data["external_image_models"] = _normalize_external_image_models(next_data.get("external_image_models"))
         next_data.pop("backup_state", None)
         next_data["image_account_concurrency"] = max(1, _normalize_positive_int(next_data.get("image_account_concurrency"), 3, 1))
         try:
@@ -488,6 +586,47 @@ class ConfigStore:
 
     def get_image_storage_settings(self) -> dict[str, object]:
         return _normalize_image_storage_settings(self.data.get("image_storage"))
+
+    def get_external_image_models(self, *, include_secrets: bool = False) -> list[dict[str, object]]:
+        """返回外部图片模型列表；设置接口默认不返回实际 Client Key。"""
+        models = _normalize_external_image_models(self.data.get("external_image_models"))
+        if include_secrets:
+            return models
+        public_models: list[dict[str, object]] = []
+        for model in models:
+            safe_model = dict(model)
+            api_key_env = str(safe_model.get("api_key_env") or "").strip()
+            has_api_key = bool(str(safe_model.get("api_key") or "").strip() or (api_key_env and os.getenv(api_key_env)))
+            safe_model.pop("api_key", None)
+            safe_model.pop("api_key_env", None)
+            safe_model.pop("clear_api_key", None)
+            safe_model["has_api_key"] = has_api_key
+            public_models.append(safe_model)
+        return public_models
+
+    def get_external_image_model(self, model_name: object) -> dict[str, object] | None:
+        """按模型名取内部运行配置，并优先从环境变量解析 Client Key。"""
+        target = str(model_name or "").strip().lower()
+        if not target:
+            return None
+        for model in self.get_external_image_models(include_secrets=True):
+            if str(model.get("model") or "").strip().lower() != target:
+                continue
+            resolved = dict(model)
+            api_key_env = str(resolved.get("api_key_env") or "").strip()
+            env_api_key = os.getenv(api_key_env).strip() if api_key_env and os.getenv(api_key_env) else ""
+            resolved["api_key"] = env_api_key or str(resolved.get("api_key") or "").strip()
+            return resolved
+        return None
+
+    def get_enabled_external_image_models(self) -> list[dict[str, object]]:
+        """仅返回可实际调用的模型，供公开模型列表与请求分发复用。"""
+        enabled: list[dict[str, object]] = []
+        for model in self.get_external_image_models(include_secrets=True):
+            resolved = self.get_external_image_model(model.get("model"))
+            if resolved and _normalize_bool(resolved.get("enabled"), False) and str(resolved.get("api_key") or "").strip():
+                enabled.append(resolved)
+        return enabled
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

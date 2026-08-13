@@ -17,6 +17,7 @@ from api.support import (
 from services.backup_service import BackupError, backup_service
 from services.auth_service import auth_service
 from services.config import config
+from services.external_image_service import external_image_service
 from services.image_service import add_log_image_thumbnails, build_image_download, build_images_zip, delete_images, list_images, warm_image_download_cache
 from services.image_task_service import image_task_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
@@ -184,6 +185,18 @@ def create_router(app_version: str) -> APIRouter:
             "image_page_title": config.image_page_title,
             "image_page_subtitle": config.image_page_subtitle,
             "image_batch_limit": config.image_account_concurrency,
+            # The workspace receives only display metadata. Endpoints and Client
+            # Keys stay in the administrator-only, masked settings response.
+            "image_models": [
+                {
+                    "id": "gpt-image-2",
+                    "label": "ChatGPT Image",
+                    "model": "gpt-image-2",
+                    "provider": "chatgpt",
+                    "supports_edit": True,
+                },
+                *external_image_service.public_models(),
+            ],
         }
 
     @router.get("/version")

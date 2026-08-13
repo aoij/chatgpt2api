@@ -17,6 +17,7 @@ from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
     IMAGE_MODELS,
+    UpstreamHTTPError,
     extract_image_from_message_content,
     is_codex_image_model,
     is_supported_image_model,
@@ -723,6 +724,15 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             error_message = str(exc)
             if emitted:
                 raise
+            if isinstance(exc, UpstreamHTTPError):
+                # 上游 429 只代表当前账号暂时被限流。优先使用 Retry-After，
+                # 没有该响应头时使用 AccountService 的短默认冷却，然后换账号，
+                # 避免同一个账号被连续请求并让 Cursor 收到通用连接错误。
+                account_service.cooldown_text_token(
+                    token,
+                    error_message,
+                    seconds=exc.retry_after,
+                )
             if is_token_invalid_error(error_message):
                 account_service.mark_invalid_image_token(token, "text_stream")
             token = account_service.get_text_access_token(attempted_tokens)

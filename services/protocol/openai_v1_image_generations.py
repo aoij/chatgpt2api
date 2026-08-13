@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Iterator
 
+from services.external_image_service import external_image_service
 from services.protocol.conversation import (
     ConversationRequest,
     collect_image_outputs,
@@ -10,6 +11,18 @@ from services.protocol.conversation import (
     stream_image_outputs_with_pool,
 )
 from utils.image_tokens import count_image_output_items_tokens, image_usage
+
+
+def _external_result_chunks(result: dict[str, Any], model: str) -> Iterator[dict[str, Any]]:
+    """Adapt a completed external API response to the existing SSE contract."""
+    yield {
+        "object": "image.generation.result",
+        "created": int(result.get("created") or 0),
+        "model": model,
+        "index": 1,
+        "total": 1,
+        "data": result.get("data") if isinstance(result.get("data"), list) else [],
+    }
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
@@ -23,6 +36,22 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     uploader = body.get("uploader") if isinstance(body.get("uploader"), dict) else None
     selected_account_id = str(body.get("selected_account_id") or "")
     progress_callback = body.get("progress_callback")
+    # Registered external models bypass the ChatGPT account pool entirely, while
+    # the current GPT/Codex models below retain their established retry behavior.
+    if external_image_service.has_model(model):
+        result = external_image_service.generate(
+            model_name=model,
+            prompt=prompt,
+            n=n,
+            size=size,
+            response_format=response_format,
+            base_url=base_url,
+            uploader=uploader,
+            progress_callback=progress_callback,
+        )
+        if body.get("stream"):
+            return _external_result_chunks(result, model)
+        return result
     outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
