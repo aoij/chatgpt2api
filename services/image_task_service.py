@@ -898,8 +898,8 @@ class ImageTaskService:
             content = b""
             last_download_error: Exception | None = None
             for token in self._resolve_persist_access_tokens(account_id):
+                backend = OpenAIBackendAPI(access_token=token)
                 try:
-                    backend = OpenAIBackendAPI(access_token=token)
                     content = self._download_persist_image_bytes(
                         backend=backend,
                         source_url=source_url,
@@ -921,6 +921,12 @@ class ImageTaskService:
                         }
                     )
                     continue
+                finally:
+                    # 每个候选账号一个 Session；不关闭会在补图轮询里持续泄漏连接
+                    try:
+                        backend.close()
+                    except Exception:
+                        pass
             if not content and last_download_error is not None:
                 raise last_download_error
             if not content:

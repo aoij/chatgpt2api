@@ -85,9 +85,14 @@ class AccountService:
     def _now_text() -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # json.dumps(None) 落库后会变成字符串 "null"，读取时必须按空值处理，
+    # 否则 refresh_token/id_token 会被当成"已存在"，续期逻辑永远不会触发。
+    _NULL_TOKENS = {"null", "none", "nil", "undefined"}
+
     @staticmethod
     def _clean_token(value: Any) -> str:
-        return str(value or "").strip()
+        text = str(value or "").strip()
+        return "" if text.lower() in AccountService._NULL_TOKENS else text
 
     def _clean_tokens(self, tokens: list[str]) -> list[str]:
         cleaned: list[str] = []
@@ -946,16 +951,33 @@ class AccountService:
             log_service.add(LOG_TYPE_ACCOUNT, f"导入 {added} 个账号，跳过 {skipped} 个", {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped, "items": items_out}
 
-    def add_accounts(self, tokens: list[str], source_type: str = "web") -> dict:
-        cleaned_tokens = self._clean_tokens(tokens)
-        if not cleaned_tokens:
+    def add_accounts(self, tokens: list[str] | list[dict], source_type: str = "web") -> dict:
+        """新增账号。
+
+        入参兼容两种形态：仅 access_token 的字符串，或包含
+        refresh_token / id_token 等字段的完整账号字典。注册机走 OAuth
+        授权码流程时能拿到三件套，只有完整对象才能让后续 token 续期生效。
+        """
+        payloads: list[dict] = []
+        for item in tokens or []:
+            if isinstance(item, dict):
+                token = self._clean_token(item.get("access_token") or item.get("accessToken"))
+                if token:
+                    payloads.append({**item, "access_token": token})
+            else:
+                token = self._clean_token(item)
+                if token:
+                    payloads.append({"access_token": token})
+        if not payloads:
             return {"added": 0, "skipped": 0, "items": self.list_accounts(compact=True)}
+        cleaned_tokens = [item["access_token"] for item in payloads]
 
         with self._lock:
             indexed = {self._clean_token(item.get("access_token")): dict(item) for item in self._accounts}
             added = 0
             skipped = 0
             invalid_cache_changed = False
+            payload_by_token = {item["access_token"]: item for item in payloads}
             for access_token in cleaned_tokens:
                 if access_token in self._invalid_tokens:
                     self._invalid_tokens.discard(access_token)
@@ -966,12 +988,16 @@ class AccountService:
                     current = {}
                 else:
                     skipped += 1
+                incoming = payload_by_token.get(access_token) or {}
+                # 新数据优先于库中旧值：注册机刚换到的 refresh_token 必须覆盖空值，
+                # 否则账号永远无法在 access_token 过期后续期。
+                merged = {**current, **{k: v for k, v in incoming.items() if v not in (None, "")}}
                 account = self._normalize_account(
                     {
-                        **current,
+                        **merged,
                         "access_token": access_token,
-                        "source_type": current.get("source_type") or self._normalize_source_type(source_type),
-                        "type": str(current.get("type") or "Free"),
+                        "source_type": merged.get("source_type") or self._normalize_source_type(source_type),
+                        "type": str(merged.get("type") or "Free"),
                     }
                 )
                 if account is not None:

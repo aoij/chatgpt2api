@@ -4,6 +4,7 @@ import mimetypes
 import os
 import random
 import re
+import threading
 import time
 
 import urllib.error
@@ -38,6 +39,11 @@ class ImagePollTimeoutError(RuntimeError):
 
 class ImageContentPolicyError(RuntimeError):
     """Raised when image generation is blocked by content policy moderation."""
+    pass
+
+
+class ImageStreamHardTimeoutError(RuntimeError):
+    """图片 SSE 流读取超过硬上限时抛出，用于快速中断被挂起的长连接。"""
     pass
 
 
@@ -199,6 +205,35 @@ class OpenAIBackendAPI:
         })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+
+    def close(self) -> None:
+        """释放底层 curl_cffi Session。
+
+        每个 backend 实例都会独立创建一个 Session；不显式关闭会让连接池和
+        TLS 上下文随调用次数累积，是号池刷新与图片轮询时内存持续上涨的主因。
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        session = getattr(self, "session", None)
+        if session:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+        return False
 
     def _build_fp(self) -> Dict[str, str]:
         account = self.account
@@ -2529,10 +2564,40 @@ class OpenAIBackendAPI:
         self._report_progress("starting_generation")
         response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
         self._report_progress("generating")
+        yield from self._iter_sse_payloads_capped(response, float(config.image_poll_timeout_secs))
+
+    def _iter_sse_payloads_capped(self, response: Any, hard_cap_secs: float) -> Iterator[str]:
+        """按墙钟硬上限消费图片 SSE 流，避免上游异常时长连接被无限挂起。
+
+        curl_cffi 在 stream=True + 标量 timeout 下不限制流式 body 的总读取时长，
+        上游未生成图片却保持连接时，读取会一直阻塞直到边缘重置（曾观测到单条流
+        挂起约 29.5 分钟才失败）。这里复用「图片轮询超时」作为硬上限：到点后关闭
+        底层连接以解除阻塞，并抛出明确错误，让任务快速失败而非长时间挂起。
+        """
+        deadline = time.monotonic() + hard_cap_secs
+        # 看门狗：SSE 读取可能阻塞在底层 curl 调用中，超时后关闭连接以强制解除阻塞
+        watchdog = threading.Timer(hard_cap_secs, response.close)
+        watchdog.daemon = True
+        watchdog.start()
+        timeout_message = f"图片生成流已超过硬上限 {hard_cap_secs:g} 秒，已强制中断（上游可能未生成图片）"
         try:
-            yield from iter_sse_payloads(response)
+            for payload in iter_sse_payloads(response):
+                yield payload
+                if time.monotonic() >= deadline:
+                    raise ImageStreamHardTimeoutError(timeout_message)
+        except ImageStreamHardTimeoutError:
+            raise
+        except Exception as exc:
+            # 看门狗关闭连接后，底层读取会抛出 curl 错误，这里统一转成明确的硬上限错误
+            if time.monotonic() >= deadline:
+                raise ImageStreamHardTimeoutError(timeout_message) from exc
+            raise
         finally:
-            response.close()
+            watchdog.cancel()
+            try:
+                response.close()
+            except Exception:
+                pass
 
     def _bootstrap(self) -> None:
         """预热首页，并提取 PoW 相关脚本引用。"""
@@ -2547,7 +2612,12 @@ class OpenAIBackendAPI:
             self.pow_script_sources = [DEFAULT_POW_SCRIPT]
 
     def _get_chat_requirements(self) -> ChatRequirements:
-        """获取当前模式对话所需的 sentinel token。"""
+        """获取当前模式对话所需的 sentinel token。
+
+        上游曾试验性改用 prepare/finalize 两步流程，但对登录态账号实测返回
+        401 invalid_jwt（匿名链路才可用），所以这里保留可用的一次性流程；
+        POW 侧的浏览器指纹修正（utils/pow.py）才是本次真正需要的修复。
+        """
         path = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
         context = "auth_chat_requirements" if self.access_token else "noauth_chat_requirements"
         body = {"p": build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)}

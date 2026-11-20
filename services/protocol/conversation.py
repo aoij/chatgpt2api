@@ -696,6 +696,20 @@ def text_backend() -> OpenAIBackendAPI:
     return OpenAIBackendAPI(access_token=account_service.get_text_access_token())
 
 
+def _close_backend(backend: OpenAIBackendAPI | None) -> None:
+    """安全释放一次请求用的 backend Session。
+
+    号池重试会在同一请求里连续创建多个 backend，单个 Session 不关闭会让
+    curl_cffi 连接池随调用次数累积，是内存上涨的主要来源。
+    """
+    if backend is None:
+        return
+    try:
+        backend.close()
+    except Exception:
+        pass
+
+
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
     max_attempts = 10
     attempted_tokens: set[str] = set()
@@ -708,6 +722,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             break
         attempted_tokens.add(token)
         emitted = False
+        active_backend = None
         try:
             active_backend = OpenAIBackendAPI(access_token=token)
             for event in conversation_events(active_backend, messages=request.messages, model=request.model, prompt=request.prompt):
@@ -738,6 +753,13 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             token = account_service.get_text_access_token(attempted_tokens)
             if token:
                 continue
+        finally:
+            # 每轮换用独立 Session，必须在这里关闭，否则号池轮询会持续堆积连接
+            if active_backend is not None:
+                try:
+                    active_backend.close()
+                except Exception:
+                    pass
     if last_error is not None:
         raise RuntimeError(f"text generation failed after {len(attempted_tokens)} account attempts: {last_error}") from last_error
     raise RuntimeError("no available text account")
@@ -1326,6 +1348,7 @@ def _generate_single_image(
             "max_account_attempts": MAX_ACCOUNT_ATTEMPTS,
             "index": index,
         })
+        backend = None
         try:
             backend = OpenAIBackendAPI(access_token=token)
             if request.progress_callback:
@@ -1350,6 +1373,7 @@ def _generate_single_image(
                 outputs.append(output)
             if returned_message:
                 account_service.mark_image_result(token, False)
+                _close_backend(backend)
                 return outputs
             if not returned_result:
                 account_service.mark_image_result(token, False)
@@ -1363,8 +1387,10 @@ def _generate_single_image(
                         account_email=account_email,
                         conversation_id=conv_id,
                     )
+                _close_backend(backend)
                 return outputs
             account_service.mark_image_result(token, True)
+            _close_backend(backend)
             return outputs
         except ImagePollTimeoutError as exc:
             account_service.mark_image_result(token, False)
@@ -1456,6 +1482,7 @@ def _generate_single_image(
                     "index": index,
                     "error": error_text[:200],
                 })
+                _close_backend(backend)
                 continue
             logger.warning({
                 "event": "image_stream_generation_error",
@@ -1477,6 +1504,7 @@ def _generate_single_image(
             })
             if not emitted_for_token and is_token_invalid_error(last_error):
                 account_service.mark_invalid_image_token(token, "image_stream")
+                _close_backend(backend)
                 continue
             # TLS/SSL 连接错误：自动重试
             if not emitted_for_token and is_tls_connection_error(last_error):
@@ -1492,6 +1520,7 @@ def _generate_single_image(
                         "error": last_error[:200],
                     })
                     time.sleep(min(2.0 * tls_retry_count, 10.0))
+                    _close_backend(backend)
                     continue
             # 连接超时错误（curl 28）：短等待后换下一个账号，避免单账号卡住队列
             if not emitted_for_token and is_connection_timeout_error(last_error):
@@ -1509,6 +1538,7 @@ def _generate_single_image(
                         "error": last_error[:200],
                     })
                     time.sleep(wait_secs)
+                    _close_backend(backend)
                     continue
             if not emitted_for_token and account_attempts < MAX_ACCOUNT_ATTEMPTS:
                 logger.warning({
@@ -1520,7 +1550,9 @@ def _generate_single_image(
                     "index": index,
                     "error": last_error[:200],
                 })
+                _close_backend(backend)
                 continue
+            _close_backend(backend)
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
 
 

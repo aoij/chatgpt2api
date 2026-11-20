@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import random
 import secrets
 import string
@@ -300,6 +301,53 @@ def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -
         else generator.generate_requirements_token()
     )
     return json.dumps({"p": p_value, "t": "", "c": token, "id": device_id, "flow": flow}, separators=(",", ":"))
+
+
+
+
+def build_create_account_sentinel_tokens(session: requests.Session, device_id: str) -> tuple[str, str, dict[str, Any]]:
+    """通过官方 Sentinel SDK helper 生成 create_account 必需的双 Token。
+
+    说明：
+    - 最终 create_account 风控要求同时携带 OpenAI-Sentinel-Token 与 OpenAI-Sentinel-SO-Token。
+    - SO Token 依赖官方 SDK 的 sessionObserverToken 逻辑，不能用旧版 Python PoW 手写拼接。
+    - helper 只返回 token 给本进程使用；日志只记录长度、SDK 版本和是否生成，禁止打印明文。
+    """
+    helper_url = os.getenv("CHATGPT2API_SENTINEL_HELPER_URL", "").strip()
+    if not helper_url:
+        raise RuntimeError("sentinel_helper_url_missing")
+    headers = {"Content-Type": "application/json"}
+    helper_key = os.getenv("CHATGPT2API_SENTINEL_HELPER_KEY", "").strip()
+    if helper_key:
+        headers["X-Sentinel-Helper-Key"] = helper_key
+    payload = {"device_id": device_id, "flow": "oauth_create_account"}
+    try:
+        resp = requests.post(helper_url, json=payload, headers=headers, timeout=70, verify=False)
+        data = resp.json() if getattr(resp, "text", "") else {}
+    except Exception as error:
+        raise RuntimeError(f"sentinel_helper_request_failed: {str(error)[:160]}") from error
+
+    sentinel_token = str(data.get("token") or "").strip()
+    so_token = str(data.get("so_token") or "").strip()
+    meta = {
+        "status_code": getattr(resp, "status_code", 0),
+        "sdk_version": str(data.get("sdk_version") or "unknown"),
+        "observer_wait_ms": data.get("observer_wait_ms"),
+        "token_len": len(sentinel_token),
+        "so_token_len": len(so_token),
+        "so_generated": bool(so_token),
+        "error": str(data.get("error") or "")[:160],
+        "init_error": str(data.get("init_error") or "")[:160],
+        "so_error": str(data.get("so_error") or "")[:160],
+    }
+    if getattr(resp, "status_code", 0) != 200 or not data.get("ok") or not sentinel_token or not so_token:
+        raise RuntimeError(
+            "sentinel_helper_invalid_response "
+            f"status={meta['status_code']} token_len={meta['token_len']} "
+            f"so_token_len={meta['so_token_len']} so_generated={meta['so_generated']} "
+            f"sdk={meta['sdk_version']} error={meta['error'] or meta['so_error'] or meta['init_error']}"
+        )
+    return sentinel_token, so_token, meta
 
 
 def _is_socks_proxy(proxy: str) -> bool:
@@ -635,7 +683,18 @@ class PlatformRegistrar:
     def _create_account(self, name: str, birthdate: str, index: int) -> None:
         step(index, "开始创建账号资料")
         headers = self._json_headers(f"{auth_base}/about-you")
-        headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
+        sentinel_token, so_token, sentinel_meta = build_create_account_sentinel_tokens(self.session, self.device_id)
+        headers["OpenAI-Sentinel-Token"] = sentinel_token
+        headers["OpenAI-Sentinel-SO-Token"] = so_token
+        step(
+            index,
+            "Sentinel SDK 完成: "
+            f"flow=oauth_create_account sdk={sentinel_meta.get('sdk_version')} "
+            f"token_len={sentinel_meta.get('token_len')} "
+            f"so_token_len={sentinel_meta.get('so_token_len')} "
+            f"so_generated={sentinel_meta.get('so_generated')} "
+            f"observer_wait_ms={sentinel_meta.get('observer_wait_ms')}",
+        )
         resp, error = request_with_local_retry(self.session, "post", f"{auth_base}/api/accounts/create_account", json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
         if resp is None or resp.status_code not in (200, 302):
             data = _response_json(resp) if resp is not None else {}
@@ -767,7 +826,16 @@ def worker(index: int) -> dict:
         result = registrar.register(index)
         cost = time.time() - start
         access_token = str(result["access_token"])
-        account_service.add_accounts([access_token])
+        # 注册链路已经拿到 OAuth 三件套；只传 access_token 会丢掉 refresh_token，
+        # 账号在 access_token 过期后无法续期，因此这里传完整对象落库。
+        account_payload = {
+            "access_token": access_token,
+            "refresh_token": str(result.get("refresh_token") or "").strip(),
+            "id_token": str(result.get("id_token") or "").strip(),
+            "email": str(result.get("email") or "").strip(),
+            "source_type": "web",
+        }
+        account_service.add_accounts([account_payload])
         account_service.refresh_accounts([access_token])
         local_account = account_service.get_account(access_token)
         cpa_sync = _run_auto_sync(index, "CPA", app_config.auto_sync_cpa, sync_registered_account_to_pools, result, local_account)
